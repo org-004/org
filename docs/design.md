@@ -36,6 +36,8 @@ These are the decisions the rest follows from.
    handed how past estimates turned out.
 6. **Every run ends with a status and a reason.** If the engineer cannot produce them the runner
    does. `done` is lowered to `partial` unless every acceptance criterion is reported passing.
+7. **Guarantees rest on mechanisms that were made to fail.** Each claim about what the manager
+   cannot do is backed by a test that tries to do it against the real harness.
 
 ## Components
 
@@ -43,11 +45,11 @@ These are the decisions the rest follows from.
             the person
                 │  talk / approve / watch
    ┌────────────▼─────────────────────────────────────────────┐
-   │ manager side                                             │
+   │ manager                                                  │
    │   org talk     Claude Code + persona, confined to a desk │
    │   org dash     status page, chat box, sync loop          │
    │   ledger       drafts · approved specs · runs · budget   │
-   │   dispatch     bundle ▸ provision ▸ start                │
+   │   dispatch     place ▸ provision ▸ bundle ▸ start        │
    │   sync         one read-only snapshot per run            │
    └────────────┬─────────────────────────────▲───────────────┘
         bundle  │ over a transport            │ snapshot (JSON)
@@ -64,19 +66,85 @@ These are the decisions the rest follows from.
 |---|---|---|
 | `ledger.py` | manager | paths, ids, config |
 | `spec.py` | manager | draft template, checks, approval |
-| `dispatch.py` | manager | choose a machine, build the bundle, provision, start, stop, resume |
-| `transport.py` | manager | run a script on a machine: OrbStack, ssh, local |
+| `dispatch.py` | manager | choose and place a machine, logins, bundle, start, stop, resume, the queue |
+| `transport.py` | manager | run a script on a machine: Docker, OrbStack, ssh, local |
 | `sync.py` | manager | pull snapshots into `runs/<run>/mirror/` |
 | `status.py` | manager | one document for the terminal, the page and the manager |
 | `budget.py` | manager | weekly-limit readings, the learned dollars-per-percent rate, estimate history |
 | `manager.py` | manager | launch the manager chat and the read-only question mode |
+| `login.py`, `doctor.py` | manager | the logins engineers are handed; what is missing |
 | `dash.py`, `web/` | manager | the status page and its API |
 | `runner.py` | engineer | the three phases, recovery, caps, status |
 | `stream.py` | engineer | read the CLI's event stream: spend, activity, limit state |
 | `schemas.py`, `prompts/` | engineer | what each turn must return, and the engineer's instructions |
+| `bin/org`, `docker/` | host | the wrapper, the image, `org up` |
 
 The engineer's side is the same package: dispatch copies it into the run directory, so a run
 keeps the code it started with even if the manager's copy is upgraded mid-run.
+
+## Where everything runs
+
+The manager and every engineer are Docker containers from one image. On the host there is a
+Docker engine and a shell wrapper.
+
+```
+ host: Docker engine + bin/org (forwards every command into the manager)
+ ┌──────────────────────────────────────────────────────────────────┐
+ │ org-manager     main process: org dash (8787 → host localhost)   │
+ │   volumes       ledger · Claude Code state · GitHub login · ssh  │
+ │   socket        /var/run/docker.sock                             │
+ │        │ docker run / exec / rm                                  │
+ │        ▼                                                         │
+ │ org-eng-<run>   sleep infinity; the runner is exec'd into it     │
+ │   network       org-engineers: no container-to-container traffic │
+ │   given         the three logins over stdin; no mounts, no env   │
+ └──────────────────────────────────────────────────────────────────┘
+```
+
+**Why Docker, and why the manager is a container too.** The first version put the manager on
+the Mac and engineers in OrbStack machines. That needs Python, Claude Code and the `orb` command
+on the Mac. Moving the manager into an OrbStack machine does not work cleanly: an isolated
+machine can reach other machines over the network, but it cannot create or delete them, because
+`orb` does not work from inside one. Something on the Mac would have to do that on its behalf, a
+kubelet of our own, reachable from every box.
+
+Docker already has that agent and an access model for it. The daemon creates and removes
+containers, and whoever holds its socket may ask. So the manager is a container holding the
+socket, engineers are containers that do not, and the host needs nothing but the engine.
+OrbStack ships one, as do Docker Desktop and Colima.
+
+**One image, two roles.** The difference is what a container is given. The manager gets the
+socket, the volumes and the logins. An engineer gets its own network and sudo.
+
+**The engineer's container idles and the runner is exec'd into it**, so a container is driven
+exactly like any other machine (`docker exec` is the transport), stays inspectable after the run,
+and can be re-entered by `org resume`.
+
+**The pool.** A node is a Docker host with a number of slots: the local daemon, or another one
+addressed as `ssh://user@host`. A run takes the least loaded node with a free slot. Otherwise it
+is recorded as queued, and `pump()` starts it when a slot frees. `pump()` runs whenever something
+reads the ledger (status, the dashboard's loop), so the queue moves without a scheduler process
+of its own. Placement is decided under a lock, so two readers cannot hand out one slot twice.
+Slots are counted from the ledger, not from `docker ps`, so a finished run that still has a
+container does not hold a slot.
+
+**Logins.** An engineer acts as the person: it needs the long-lived Claude token, a GitHub login
+and a git identity. All three are written into the container over stdin after it starts. Nothing
+is passed as an environment variable or on a command line, where `docker inspect` or a process
+list would show it.
+
+**The other machines** still work when the package is run directly on a machine instead of
+through the manager container:
+
+| Kind | Provisioned by | Reached by |
+|---|---|---|
+| `docker[:node]` | `docker run` on a pool node | `docker exec` |
+| `orb` | `orb clone <base> <name>` | `orb -m <name> bash -c …` |
+| `ssh:<name>` | exists already | `ssh <host> bash -c …` |
+| `local` | nothing; off by default | `bash -c …` |
+
+A transport does one thing: run a bash script on a machine with optional bytes on stdin. Files
+travel as base64 on stdin, so nothing depends on scp or a binary-clean channel.
 
 ## The spec
 
@@ -99,7 +167,8 @@ changed after the person read it cannot be approved by accident.
 
 **Why approval is a permission prompt.** The manager session runs under a rule that makes
 `org approve` always ask. The model can propose the command; only the person can let it run.
-Checked against the real harness: with nobody to answer, the command is refused.
+Checked against the real harness, in the default and auto permission modes: with nobody to
+answer, the command is refused.
 
 ## The engineer's run
 
@@ -148,9 +217,10 @@ as one JSON document. The manager's side writes that into `runs/<run>/mirror/`.
 `status.collect()` builds one document from the ledger and the mirrors. The terminal table, the
 page and the manager's question mode all render that document, so they cannot disagree.
 
-The page is one self-contained HTML file served on `127.0.0.1`. It can approve a spec and stop a
-run, so every API request needs a token (in the URL after `#`, where it is not sent to servers or
-logged) and requests whose Host or Origin is not this machine are refused.
+The page is one self-contained HTML file. It can approve a spec and stop a run, so every API
+request needs a token (in the URL after `#`, where it is not sent to servers or logged) and
+requests whose Host or Origin is not this machine are refused. In the manager container it
+listens on all interfaces and is published on the host's `127.0.0.1` only.
 
 **Visual encoding.** Milestone progress is drawn in one blue ramp (not started, running, done)
 so it reads without hue; the palette validator caught that green "done" beside red "blocked" is
@@ -171,108 +241,89 @@ Two exact numbers and one learned one.
 ## Confining the manager
 
 The manager must be able to read everything and run anything, and change nothing that matters.
-Three layers, each for what it can see:
 
-| Layer | Stops |
-|---|---|
-| Claude Code's Bash sandbox | shell writes outside the desk |
-| `permissions.blockWritesOutsideWorkingDirectories` | the file tools writing outside the desk |
-| deny and ask rules | commands that change remote state; approve, dispatch and stop without the person |
-
-`org` itself runs outside the sandbox, because it must write the ledger and reach machines, and
-is governed by rules instead: read commands allowed, human decisions always asked.
-
-`tests/live_manager_rules.py` attempts ten actions under these settings against the real harness
-and judges by outcome. It found two things reading the documentation had not: read-only shell
-commands are auto-allowed only inside the working directory, and a bare `Read` rule does not
-satisfy the path check on `ls` and `cat`, so the rules now carry `Read(//**)` and an explicit
-list of read-only commands.
-
-## Machines
-
-A transport does one thing: run a bash script on a machine with optional bytes on stdin. Files
-travel as base64 on stdin, so nothing depends on scp or a binary-clean channel.
-
-| Kind | Provisioned by | Reached by |
+| Layer | Stops | Enforced by |
 |---|---|---|
-| `orb` | `orb clone <base> <name>` | `orb -m <name> bash -c …` |
-| `ssh:<name>` | exists already | `ssh <host> bash -c …` |
-| `local` | nothing; off by default | `bash -c …` |
-| `docker` | planned, below | `docker exec` |
+| shell sandbox | shell writes outside the desk; shell reads of the login files | the operating system (bubblewrap, or Seatbelt on macOS) |
+| `blockWritesOutsideWorkingDirectories` | the file tools writing outside the desk | the harness |
+| deny rules | pushes and other commands that change GitHub; reading the login files | the harness |
+| ask rules | approve, dispatch, stop, exec | the harness, by asking the person, in every permission mode |
 
-## Container mode (next)
+`org` and `gh` run outside the sandbox (`org` must write the ledger and reach machines; `gh`
+needs its token) and are governed by rules instead.
 
-The first version puts the manager on the Mac, which needs Python, Claude Code and the `orb`
-command there. The question that followed: can the manager live in a box as well, with one setup
-script on the Mac?
+**The sandbox is the mechanism, so it is required when it exists.** `org talk` probes whether
+the sandbox can start. If it can, the session is told to refuse to run without it. If it cannot,
+the session is started in the ask-first permission mode and says so. The reason is a live
+finding: with no sandbox and Claude Code in its auto mode, where a classifier answers most
+permission prompts, the classifier allowed a `git branch` in a repository outside the desk. A
+guarantee that depends on a classifier's judgment is not a guarantee, so without a sandbox the
+prompt goes to the person.
 
-**With OrbStack machines, not cleanly.** An isolated machine can reach other machines over the
-network, so a boxed manager could use the ssh transport. It cannot create or delete machines:
-`orb` does not work from inside one. That would take an agent on the Mac that boxes can call,
-and every box can reach the Mac's loopback, so that agent would be a new hole in the isolation
-that has to be defended.
+**Inside a container the sandbox needs two Docker options** on the manager:
+`seccomp=unconfined`, or bubblewrap cannot create its namespaces, and `systempaths=unconfined`,
+or it cannot mount its own `/proc`. Claude Code offers a weaker nested mode that avoids the
+second, at the price of showing sandboxed commands the container's other processes; the full
+sandbox was chosen. Both options weaken the manager container's own wall, which is not a
+boundary anyway for something that holds the Docker socket.
 
-**With Docker, yes.** The Docker daemon already is that agent, with an access model that exists:
-whoever holds the socket controls the containers.
+**What the live check taught**, beyond the above (`tests/live_manager_rules.py`, eleven outcomes):
 
-```
- Mac: Docker engine (OrbStack provides one) + a 30-line `org` wrapper
- ┌──────────────────────────────────────────────────────────────────┐
- │ org-manager   org dash (port 8787 → Mac localhost) · org talk    │
- │   holds: docker.sock, the ledger volume, the login tokens        │
- │        │ docker run / exec / rm                                  │
- │        ▼                                                         │
- │ org-eng-<run> …  one container per run, no socket, own network   │
- └──────────────────────────────────────────────────────────────────┘
-   remote capacity: another Docker host, reached as ssh://user@host
-```
-
-- **One image** for both roles: Python, git, gh, tmux, Claude Code, this package.
-- **`org up`** on the Mac builds the image, creates the volumes and networks, starts the manager
-  and hands it the login tokens. After that `org talk` on the Mac is `docker exec` into the
-  manager. The Mac needs only a Docker engine.
-- **The pool** is a list of Docker hosts with a number of slots each. A run that finds no free
-  slot is queued and started when one frees.
-- **The manager and engineers' files.** The manager reaches any engineer's filesystem through
-  `docker exec`: read-only `org ls`, `org cat` and `org diff` for the manager chat, and
-  `org exec`, which asks the person first.
-
-**What it costs.** The socket makes the manager container root on the Docker VM, so the
-container is not what confines the manager; its permission rules and sandbox are, exactly as on
-the Mac. An engineer in a plain container cannot run Docker itself, so a project whose tests
-need containers needs a nested engine or an OrbStack machine.
+- Read-only shell commands are auto-allowed only inside the working directory, and a bare `Read`
+  rule does not satisfy the path check on `ls` and `cat`: the rules carry `Read(//**)` and an
+  explicit list of read-only commands.
+- An allow rule with a wildcard before the git verb (`git -C * log *`) also admits `-c` options,
+  which can run programs. Those rules were removed; `cd` and the plain form replace them.
+- A push written as `git -C <dir> push` does not match a deny rule for `git push`: both forms
+  are denied.
 
 ## Trust
 
 | Who | Holds | Can |
 |---|---|---|
 | the person | everything | everything |
-| manager chat | read access to the machine; the desk | draft; propose approve, dispatch, stop |
-| `org` CLI | the ledger; machine control; the tokens | whatever the person or the page asks of it |
-| engineer | its machine; the `gh` login and Claude token placed there | anything those credentials allow, on its own machine |
+| manager chat | read access to its container; the desk | draft; propose approve, dispatch, stop, exec |
+| `org` CLI in the manager | the ledger; the Docker socket; the logins | whatever the person or the page asks of it |
+| engineer | its container; the logins placed there | anything those logins allow, from its own container |
 | dashboard page | the access token | approve, stop, ask |
 
-An engineer runs with permissions bypassed, so its machine is the boundary. What it can do
-outside that machine is exactly what its credentials allow: a narrower `gh` token narrows it.
-The default delivery is a pull request, not a merge.
+- An engineer runs with permissions bypassed, so its container is the boundary. Outside it, an
+  engineer can do exactly what its GitHub login and Claude token allow: a token scoped to the
+  repositories in play narrows that. The default delivery is a pull request, not a merge.
+- The manager container holds the Docker socket, which is root on the Docker host, and on a Mac
+  the Docker host can mount the Mac's files. The manager chat cannot reach the socket (sandboxed
+  shell commands get no Unix sockets, and `docker` is not an allowed command), but the `org`
+  program can, and it is the trusted part.
+- Engineers share a bridge network with inter-container traffic off, and none with the manager.
 
 ## What has been checked
 
 | Claim | How |
 |---|---|
 | runner: phases, recovery, caps, stop, resume, replanning, the run lock | unit tests against a scripted stand-in for the CLI |
-| a real engineer plans, builds, pushes and reports | `tests/e2e.py`, locally and over ssh; the script repeats the acceptance checks itself |
-| the manager's confinement | `tests/live_manager_rules.py`, real harness, ten outcomes |
+| a real engineer plans, builds, pushes and reports | `tests/e2e.py` in a real container, locally, and over ssh; the script repeats the acceptance checks itself |
+| `org up`; the manager in its container starts engineers in sibling containers | run against a real Docker daemon, then `e2e.py` from inside the manager |
+| pool placement, the queue, a second node, limits per node | unit tests against a simulated client; a second node with a real engineer on it |
+| logins reach an engineer over stdin and never on a command line | unit test over every recorded client call |
+| the manager's confinement | `tests/live_manager_rules.py`: rules alone on a machine without the sandbox, and with the sandbox live inside the manager container, in the default and auto modes |
 | the manager's refinement | `tests/live_manager_refine.py`: a request with a false premise; it read the code and said so |
-| dispatch, sync, status, two engineers at once | unit tests against a simulated `orb` |
 | the page | a real browser, light, dark and phone width; no console errors |
 | Python 3.9 and 3.14 | the whole suite under both |
 
-Not checked: a real OrbStack clone (the commands are the ones the `box` helper uses), the macOS
-Bash sandbox, and an interactive `org talk` session beyond launching it.
+Not checked: anything on macOS itself (there the manager is the same Linux container, so what
+differs is the engine's socket path and port publishing); a remote Docker host over `ssh://`
+(the same client flag was exercised with a local address); a real OrbStack clone.
 
 ## Alternatives considered
 
+- **A host agent for OrbStack machines.** A small daemon on the Mac that creates machines for a
+  boxed manager. It would be reachable from every box, and it would be ours to secure. Docker's
+  daemon is that agent, already built.
+- **A shared volume instead of `docker exec`.** Mounting every run directory into the manager
+  would make sync a file read and let the manager browse engineers' files natively. It works only
+  for the local node, and `docker exec` works for all of them, so there is one mechanism.
+- **A socket proxy** that lets the manager call only some of the Docker API. It narrows what a
+  compromised `org` could do, at the cost of another moving part. Not built.
 - **Claude Code's own background sessions** (`claude --bg`, `claude agents --json`). They run on
   the local machine only and report state but not cost. The headless stream is the documented
   interface and carries cost, limits and structured output.
@@ -288,7 +339,10 @@ Bash sandbox, and an interactive `org talk` session beyond launching it.
 ## Known gaps
 
 - A run's share of the weekly limit is unknown until the rate has been learned or configured.
-- The manager's shell deny rules match the form a model normally writes. They stop an overeager
-  manager, not a hostile one; the sandbox is the boundary.
+- The sandbox keeps the manager's shell off the filesystem, but changes made over the network
+  are stopped only by deny rules for the commands that make them. A read-only GitHub token for
+  the manager, separate from the engineers', would close that; today both use one login.
+- An engineer cannot run Docker inside its container.
 - One engineer per spec. A spec too large for one engineer is the manager's to split.
 - No notification when a run finishes; the page and `org status` have to be looked at.
+- The image is built on each pool node from this checkout; there is no registry.
