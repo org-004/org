@@ -97,7 +97,8 @@ class Runner:
         self.prices = pricing.table(self.job.get("pricing"))
         self.workspace = Path(self.job.get("workspace") or (Path.home() / "work" / self.job["run_id"])).expanduser()
         self.state = read_json(self.dir / "state.json") or self._new_state()
-        self.meter = Meter(self.prices, self.state.get("confirmed_usd", 0.0), self.state.get("by_model") or {})
+        self.meter = Meter(self.prices, self.state.get("confirmed_usd", 0.0), self.state.get("by_model") or {},
+                           self.state.get("cumulative") or {})
         self.stop_requested = False
         self.proc: Optional[subprocess.Popen] = None
         self._killed = False
@@ -140,6 +141,7 @@ class Runner:
     def save_state(self) -> None:
         self.state["confirmed_usd"] = self.meter.confirmed_usd
         self.state["by_model"] = self.meter.by_model
+        self.state["cumulative"] = self.meter.cumulative
         write_json(self.dir / "state.json", self.state)
 
     def cost_cap(self) -> Optional[float]:
@@ -188,6 +190,8 @@ class Runner:
         if st["phase"] != "reporting":
             left_min += max((est.get("wall_minutes") or 0) - planned_min, 2.0)
             left_usd += max((est.get("cost_usd") or 0) - planned_usd, 0.0)
+        else:
+            left_min += 1.0  # the report is being written: "in about a minute", not a time already past
         return {
             "eta_at": t + left_min * 60.0,
             "cost_usd": spent + left_usd,
@@ -714,9 +718,12 @@ class Runner:
         # Freeze. The engineer may amend plan.md later; these copies are what a reviewer judges.
         write_json(self.dir / "plan.json", plan)
         write_json(self.dir / "plan.frozen.json", plan)
+        frozen = self.dir / "plan.frozen.md"
         if (self.dir / "plan.md").exists():
-            shutil.copyfile(self.dir / "plan.md", self.dir / "plan.frozen.md")
-            os.chmod(self.dir / "plan.frozen.md", 0o444)
+            if frozen.exists():  # left by a runner that died before recording that planning was done
+                os.chmod(frozen, 0o644)
+            shutil.copyfile(self.dir / "plan.md", frozen)
+            os.chmod(frozen, 0o444)
         st["plan"] = plan
         st["verdict"] = plan["verdict"]
         st["estimate"] = plan.get("estimate")
@@ -834,6 +841,7 @@ class Runner:
         plan_cost = st.get("plan_cost_usd")
         total = self.meter.confirmed_usd
         week = weekly_window(self.meter.rate_limit) or {}
+        reporting = [x for x in st.get("turns") or [] if x.get("label") == "report"]
         return {
             "run_id": self.job["run_id"],
             "spec_id": self.job.get("spec_id"),
@@ -863,6 +871,11 @@ class Runner:
                 }
                 for m in st.get("milestones") or []
             ],
+            # Verifying and writing the report is real time and money; the plan's totals include it.
+            "report": {
+                "minutes": round(sum(x["ended_at"] - x["started_at"] for x in reporting) / 60.0, 1),
+                "cost_usd": round(sum(x.get("cost_usd") or 0 for x in reporting), 4),
+            } if reporting else None,
             "total": {
                 "elapsed_minutes": round((end - st["started_at"]) / 60.0, 1),
                 "cost_usd": round(total, 4),

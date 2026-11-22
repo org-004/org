@@ -254,6 +254,9 @@ def scorecard(ledger: Ledger, run_id: str) -> str:
                      "%s %s" % (fmt_dur((m.get("actual_minutes") or 0) * 60), fmt_usd(m.get("actual_cost_usd"))) if m.get("actual_minutes") is not None else "not run",
                      "%s / %s  %s" % (ratio(m.get("actual_minutes"), m.get("est_minutes")),
                                       ratio(m.get("actual_cost_usd"), m.get("est_cost_usd")), m.get("outcome") or "")])
+    rep = a.get("report")
+    if rep:
+        rows.append(["verify and report", "in the totals", "%s %s" % (fmt_dur((rep.get("minutes") or 0) * 60), fmt_usd(rep.get("cost_usd"))), "—"])
     rows.append(["total", "", "%s, %s" % (fmt_dur((tot.get("elapsed_minutes") or 0) * 60), fmt_usd(tot.get("cost_usd"))), ""])
     lines += _table(rows, 200)
     lines += ["", "turns %s · retries %s · usage-limit waits %s · plan amendments %s · subagents %s" % (

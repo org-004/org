@@ -43,8 +43,8 @@ class RunnerCase(unittest.TestCase):
         os.environ["FAKE_CLAUDE_SCENARIO"] = str(self.scen / "scenario.json")
         self.addCleanup(os.environ.pop, "FAKE_CLAUDE_SCENARIO", None)
 
-    def job(self, turns, caps=None, engineer=None, acceptance=("AC1",), **extra):
-        (self.scen / "scenario.json").write_text(json.dumps({"turns": turns}))
+    def job(self, turns, caps=None, engineer=None, acceptance=("AC1",), scenario=None, **extra):
+        (self.scen / "scenario.json").write_text(json.dumps(dict({"turns": turns}, **(scenario or {}))))
         job = {
             "run_id": "001-test-r1", "spec_id": "001-test", "spec_sha": sha256_bytes(SPEC.encode()), "title": "Test spec",
             "model": "fable", "effort": "high", "delivery": "none", "caps": caps or {}, "acceptance_ids": list(acceptance),
@@ -98,6 +98,24 @@ class RunnerCase(unittest.TestCase):
         self.assertEqual(read_json(self.run_dir / "result.json")["status"], "done")
         # the report prompt carried the runner's measurements
         self.assertIn('"est_cost_usd": 1.2', calls[3]["prompt"])
+
+    def test_cumulative_session_cost_is_not_counted_twice(self):
+        # The CLI's total_cost_usd grows across resumed turns. With the per-turn field present the
+        # meter uses it; without it (a different CLI version) it must difference the cumulative one.
+        for scenario in ({}, {"no_since": True}):
+            shutil.rmtree(self.scen)
+            self.scen.mkdir()
+            for name in ("state.json", "status.json", "events.jsonl"):
+                (self.run_dir / name).unlink(missing_ok=True)
+            self.job({"plan": PLAN_TURN, "milestone:M1": DONE("M1"), "milestone:M2": DONE("M2"), "report": REPORT}, scenario=scenario)
+            self.go()
+            st = self.status()
+            self.assertEqual(st["state"], "done")
+            self.assertAlmostEqual(st["cost"]["confirmed_usd"], 0.95, places=6, msg=str(scenario))
+            self.assertAlmostEqual(st["cost"]["by_model"]["claude-fable-5-2"]["usd"], 0.95, places=6, msg=str(scenario))
+            self.assertEqual(st["cost"]["by_model"]["claude-fable-5-2"]["output"], 2000, msg=str(scenario))
+            costs = [m["actual_cost_usd"] for m in read_json(self.run_dir / "actuals.json")["milestones"]]
+            self.assertEqual(costs, [0.3, 0.3], msg=str(scenario))
 
     def test_infeasible_plan_ends_in_fail(self):
         plan = {"verdict": "infeasible", "summary": "Cannot.", "infeasible_reason": "The API it needs does not exist.",

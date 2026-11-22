@@ -104,7 +104,9 @@ def main():
     if opts.get("--session-id") and (sessions / sid).exists():
         sys.stderr.write("Error: Session ID %s is already in use.\n" % sid)
         return 1
-    (sessions / sid).write_text(label)
+    # As in the real CLI, a session's cost and usage are cumulative across resumed invocations.
+    prior = json.loads((sessions / sid).read_text()) if (sessions / sid).exists() else {"cost": 0.0, "turns": 0}
+    (sessions / sid).write_text(json.dumps(prior))
 
     model = MODELS.get(opts.get("--model", "fable"), opts.get("--model", "claude-fable-5-2"))
     run_dir = os.environ.get("CREW_RUN_DIR", "")
@@ -156,10 +158,16 @@ def main():
         slept += 0.1
 
     cost = float(entry.get("cost", 0.25))
-    model_usage = {model: {"inputTokens": 10, "outputTokens": 500, "cacheReadInputTokens": 20000,
-                           "cacheCreationInputTokens": 3000, "costUSD": cost}}
-    base = {"type": "result", "session_id": sid, "num_turns": 3, "duration_ms": 1200, "total_cost_usd": cost,
-            "modelUsage": model_usage, "model_usage_since_last_result": model_usage, "permission_denials": []}
+    total, turns = prior["cost"] + cost, prior["turns"] + 1
+    (sessions / sid).write_text(json.dumps({"cost": total, "turns": turns}))
+    this_turn = {model: {"inputTokens": 10, "outputTokens": 500, "cacheReadInputTokens": 20000,
+                         "cacheCreationInputTokens": 3000, "costUSD": cost}}
+    so_far = {model: {"inputTokens": 10 * turns, "outputTokens": 500 * turns, "cacheReadInputTokens": 20000 * turns,
+                      "cacheCreationInputTokens": 3000 * turns, "costUSD": total}}
+    base = {"type": "result", "session_id": sid, "num_turns": 3, "duration_ms": 1200, "total_cost_usd": total,
+            "modelUsage": so_far, "permission_denials": []}
+    if not scenario.get("no_since"):
+        base["model_usage_since_last_result"] = this_turn
     if entry.get("budget"):
         emit(dict(base, subtype="error_max_budget_usd", is_error=True, result="Reached maximum budget"))
         return 1

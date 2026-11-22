@@ -93,6 +93,49 @@ None
 """
 
 
+CHECK = r"""
+set -e
+T=$(mktemp -d)
+trap 'rm -rf "$T"' EXIT
+git clone -q "$HOME/crew-e2e/{spec_id}/textkit.git" "$T/c" 2>/dev/null
+cd "$T/c"
+git checkout -q "crew/{spec_id}"
+echo "AC1=$(python3 -m unittest -q 2>&1 | tr '\n' ' ')"
+echo "AC2=$(python3 -c "from textkit import slugify; print(slugify('Hello, World!'))" 2>&1)"
+echo "AC3=$(python3 -c "from textkit import slugify; print(repr(slugify('!!!')))" 2>&1)"
+echo "AC4=$(python3 -c "from textkit import squeeze; print(squeeze('  a \t b  '))" 2>&1)"
+echo "AC5=$(git log --oneline origin/master | wc -l | tr -d ' ')"
+"""
+
+
+def independent_check(ledger: Ledger, run_id: str, spec_id: str) -> bool:
+    """Re-run the spec's acceptance commands on the engineer's machine, in a fresh clone.
+
+    The engineer reports its own verdicts; this is the smoke test not taking its word for it.
+    """
+    import re
+
+    from crew.transport import TransportError, for_machine
+
+    try:
+        out = for_machine(ledger.run(run_id)["machine"], ledger.config()).run(CHECK.replace("{spec_id}", spec_id), timeout=180).stdout.decode()
+    except TransportError as e:
+        print("independent check could not run: %s" % e)
+        return False
+    got = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    ran = re.search(r"Ran (\d+) tests?", got.get("AC1", ""))
+    verdicts = {
+        "AC1": bool(ran) and int(ran.group(1)) >= 4 and "OK" in got.get("AC1", ""),
+        "AC2": got.get("AC2") == "hello-world",
+        "AC3": got.get("AC3") == "''",
+        "AC4": got.get("AC4") == "a b",
+        "AC5": got.get("AC5") == "1",
+    }
+    for ac in sorted(verdicts):
+        print("  %s %s   %s" % (ac, "pass" if verdicts[ac] else "FAIL", got.get(ac, "(no output)")))
+    return all(verdicts.values())
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--machine", default="local", help="local, orb or ssh:<name> (default local)")
@@ -102,9 +145,14 @@ def main() -> int:
     ap.add_argument("--base", default=None, help="OrbStack template machine to clone (default from ~/.crew/config.json, else base)")
     ap.add_argument("--home", default=None, help="ledger directory to use (default: a new temporary one)")
     ap.add_argument("--timeout", type=int, default=3600, help="seconds to wait for the run")
+    ap.add_argument("--recheck", metavar="RUN", help="only repeat the independent check for a run already in --home")
     args = ap.parse_args()
 
     ledger = Ledger(args.home or tempfile.mkdtemp(prefix="crew-e2e-"))
+    if args.recheck:
+        run_id = ledger.resolve_run(args.recheck)
+        print("independent check of %s:" % run_id)
+        return 0 if independent_check(ledger, run_id, ledger.run(run_id)["spec_id"]) else 1
     ledger.init()
     real = read_json(Path.home() / ".crew" / "config.json", {}) or {}
     machines = dict(real.get("machines") or {})
@@ -162,7 +210,18 @@ def main() -> int:
     st = read_json(ledger.mirror_dir(run_id) / "status.json") or {}
     for w in st.get("warnings") or []:
         print("warning: " + w)
-    return 0 if result.get("status") == "done" else 1
+    print()
+    print("independent check, in a fresh clone on the engineer's machine:")
+    verified = independent_check(ledger, run_id, spec_id)
+    reported = result.get("status") == "done"
+    print()
+    if reported and verified:
+        print("PASS: the engineer reported done and the independent check agrees")
+    elif reported:
+        print("FAIL: the engineer reported done but the independent check does not agree")
+    else:
+        print("FAIL: the engineer reported %s" % result.get("status"))
+    return 0 if (reported and verified) else 1
 
 
 if __name__ == "__main__":

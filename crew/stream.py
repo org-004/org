@@ -23,6 +23,7 @@ from . import pricing
 from .util import clip, now
 
 USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+CUMULATIVE_KEYS = ("costUSD", "inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens")
 
 
 def describe_tool(name: str, inp: Optional[dict]) -> str:
@@ -80,10 +81,12 @@ def weekly_window(rate_limit: Optional[dict]) -> Optional[dict]:
 class Meter:
     """Accumulates one run's spend and activity across turns."""
 
-    def __init__(self, prices: Dict[str, Dict[str, float]], confirmed_usd: float = 0.0, by_model: Optional[dict] = None):
+    def __init__(self, prices: Dict[str, Dict[str, float]], confirmed_usd: float = 0.0, by_model: Optional[dict] = None,
+                 cumulative: Optional[dict] = None):
         self.prices = prices
         self.confirmed_usd = confirmed_usd  # sum of the CLI's own per-turn costs
         self.by_model: Dict[str, Dict[str, float]] = by_model or {}
+        self.cumulative: Dict[str, dict] = cumulative or {}  # session id -> last cumulative modelUsage
         self.correction: Dict[str, float] = {}  # model -> CLI cost / table cost, last turn
         self._turn: Dict[str, Any] = {}  # message id -> (model, usage) for the turn in flight
         self.session_id: Optional[str] = None
@@ -110,8 +113,29 @@ class Meter:
     def total_usd(self) -> float:
         return self.confirmed_usd + self.live_usd()
 
+    def _turn_usage(self, ev: dict) -> dict:
+        """Per-model usage of this turn alone.
+
+        `total_cost_usd` and `modelUsage` are cumulative over a session, across resumed
+        invocations (seen in 2.1.322: 0.106, 0.232, 0.362 for three turns). The per-turn figure is
+        `model_usage_since_last_result`. If a CLI version omits it, difference the cumulative one.
+        """
+        since = ev.get("model_usage_since_last_result")
+        cumulative = ev.get("modelUsage") or {}
+        sid = ev.get("session_id") or self.session_id or "?"
+        if since is None:
+            before, since = self.cumulative.get(sid) or {}, {}
+            for model, m in cumulative.items():
+                p = before.get(model) or {}
+                delta = {k: (m.get(k) or 0) - (p.get(k) or 0) for k in CUMULATIVE_KEYS}
+                # Counters that went backwards mean this process started from zero.
+                since[model] = delta if delta["costUSD"] >= 0 else {k: m.get(k) or 0 for k in CUMULATIVE_KEYS}
+        if cumulative:
+            self.cumulative[sid] = {model: {k: m.get(k) or 0 for k in CUMULATIVE_KEYS} for model, m in cumulative.items()}
+        return since
+
     def _close_turn(self, ev: dict) -> dict:
-        per_model = ev.get("model_usage_since_last_result") or ev.get("modelUsage") or {}
+        per_model = self._turn_usage(ev)
         if per_model:
             cost = sum((m.get("costUSD") or 0.0) for m in per_model.values())
         else:
