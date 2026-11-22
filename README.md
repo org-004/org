@@ -14,17 +14,19 @@ state is files.
 ```
  your Mac                                   engineer machines (several at once)
  ┌───────────────────────────────┐          ┌──────────────────────────────────┐
- │ org talk    refine a spec    │ approve  │ OrbStack clone of `base`         │
- │ org dash    status + chat    │ ───────▶ │   runner ─▶ claude -p (bypass)   │
- │ org status  the same, in a   │          │   plan ▸ milestones ▸ report     │
+ │ org talk     refine a spec    │ approve  │ OrbStack clone of `base`         │
+ │ org dash     status + chat    │ ───────▶ │   runner ─▶ claude -p (bypass)   │
+ │ org status   the same, in a   │          │   plan ▸ milestones ▸ report     │
  │              terminal         │ ◀─────── │   status.json  plan.md  report.md│
- │ ledger: ~/.org               │   pull   ├──────────────────────────────────┤
+ │ ledger: ~/.org                │   pull   ├──────────────────────────────────┤
  └───────────────────────────────┘          │ or a remote VM over ssh          │
                                             └──────────────────────────────────┘
 ```
 
 The Mac always initiates. An engineer's machine never needs a route back, so the machines can
 stay isolated, and reading a run's state never touches the engineer's session.
+
+[docs/design.md](docs/design.md) explains why it is built this way and what has been checked.
 
 ## Setup
 
