@@ -8,7 +8,7 @@ from __future__ import annotations
 import shutil
 from typing import List, Optional
 
-from . import budget, spec
+from . import budget, dispatch, spec
 from .ledger import Ledger
 from .runner import TERMINAL_STATES
 from .sync import sync_all
@@ -26,6 +26,8 @@ def run_view(ledger: Ledger, run_id: str, rate: Optional[float]) -> dict:
     health = "ok"
     if rec.get("state") == "dispatch_failed":
         state, health, terminal = "dispatch_failed", "error", True
+    elif rec.get("state") == "queued":
+        state, terminal = "queued", False  # no machine yet, so nothing to be unhealthy
     elif not terminal:
         if rec.get("reachable") is False:
             health = "unreachable"
@@ -55,8 +57,9 @@ def run_view(ledger: Ledger, run_id: str, rate: Optional[float]) -> dict:
         "health": health,
         "terminal": terminal,
         "phase": st.get("phase"),
-        "detail": st.get("detail") or rec.get("error") or rec.get("last_error"),
-        "machine": {"kind": machine.get("kind"), "name": machine.get("name"), "removed": bool(rec.get("machine_removed_at"))},
+        "detail": st.get("detail") or rec.get("queue_reason") or rec.get("error") or rec.get("last_error"),
+        "machine": {"kind": machine.get("kind"), "name": machine.get("name"), "node": machine.get("node"),
+                    "removed": bool(rec.get("machine_removed_at"))},
         "attach": rec.get("attach"),
         "model": st.get("model"),
         "started_at": (st.get("started_at") + skew) if st.get("started_at") else rec.get("dispatched_at"),
@@ -100,6 +103,7 @@ def collect(ledger: Ledger, do_sync: bool = False) -> dict:
         # event log are left to the dashboard's loop and to `org sync`.
         quick = float((ledger.config().get("status") or {}).get("sync_timeout_s") or 8)
         sync_all(ledger, timeout=quick, slices=1)
+        dispatch.pump(ledger)  # a run that just finished may have freed a slot for a queued one
     rate = budget.usd_per_pct(ledger)
     week = budget.weekly(ledger)
     runs = [run_view(ledger, r, rate["value"]) for r in ledger.run_ids()]
@@ -130,9 +134,11 @@ def collect(ledger: Ledger, do_sync: bool = False) -> dict:
         meta = ledger.spec_meta(spec_id) or {}
         specs.append({"id": spec_id, "title": meta.get("title"), "version": meta.get("version"), "sha": meta.get("sha256"),
                       "approved_at": meta.get("approved_at"), "runs": ledger.runs_for(spec_id)})
+    uses_pool = spec.default_machine(ledger).startswith("docker") or any(v["machine"]["kind"] == "docker" for v in runs)
     return {
         "now": now(),
         "home": str(ledger.root),
+        "pool": dispatch.pool(ledger) if uses_pool else [],
         "budget": {
             "weekly": week,
             "usd_per_pct": rate,
@@ -192,7 +198,12 @@ def _table(rows: List[List[str]], width: int) -> List[str]:
 
 def render(state: dict, width: Optional[int] = None) -> str:
     width = width or shutil.get_terminal_size((140, 40)).columns
-    lines = [budget_line(state["budget"]), ""]
+    lines = [budget_line(state["budget"])]
+    if state.get("pool"):
+        queued = len([v for v in state["runs"] if v["state"] == "queued"])
+        lines.append("Pool: " + " · ".join("%s %d/%d" % (p["node"], p["used"], p["slots"]) for p in state["pool"])
+                     + ((" · %d queued" % queued) if queued else ""))
+    lines.append("")
     runs = state["runs"]
     if runs:
         rows = [["RUN", "STATE", "DONE", "ELAPSED", "ETA", "SPEND", "PLAN", "CAP", "MACHINE", "NOW"]]

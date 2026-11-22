@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 from . import budget
+from .dispatch import docker_nodes
 from .ledger import Ledger
 from .manager import launch_env
 from .transport import Ssh, TransportError
@@ -47,9 +48,29 @@ def checks(ledger: Ledger) -> List[Tuple[str, str, str, str]]:
     add(ledger.config_path.exists(), "ledger", str(ledger.root), "org init")
 
     default = (machines.get("default") or "orb").strip()
+    uses_docker = default.startswith("docker")
+    docker = shutil.which("docker")
+    if uses_docker:
+        add(bool(docker), "docker", docker or "not found", "install a Docker engine (OrbStack, Docker Desktop, Colima, or Docker on Linux)")
+    if docker and uses_docker:
+        image = (machines.get("docker") or {}).get("image", "org:latest")
+        for name, entry in sorted(docker_nodes(cfg).items()):
+            base = [docker] + (["-H", entry["host"]] if entry.get("host") else [])
+            code, engine = _out(base + ["version", "--format", "{{.Server.Version}}"], timeout=25)
+            if code != 0:
+                add(False, "docker node `%s`" % name, engine.splitlines()[-1][:150] if engine else "no answer",
+                    "check that the daemon is running and reachable%s" % (" as " + entry["host"] if entry.get("host") else ""))
+                continue
+            have = _out(base + ["image", "inspect", "-f", "{{.Id}}", image])[0] == 0
+            add(have, "docker node `%s`" % name, "engine %s, %d slot(s)%s" % (engine, int(entry.get("slots", 1)), "" if have else ", image %s missing" % image),
+                "`org up` builds it on this machine; `org node add %s <host>` builds it on a remote one" % name)
+        token = Path.home() / ".claude" / "oauth-token"
+        add(token.is_file() and token.stat().st_size > 0, "Claude token for engineers", str(token) if token.is_file() else "missing", "org login")
+        add(_out(["gh", "auth", "token"])[0] == 0, "GitHub login for engineers", "present" if _out(["gh", "auth", "token"])[0] == 0 else "missing",
+            "org login (without it engineers cannot clone private repositories or push)", soft=True)
     uses_orb = default == "orb"
     orb = shutil.which("orb")
-    if uses_orb or orb:
+    if uses_orb or (orb and not uses_docker):
         add(bool(orb), "orb", orb or "not found", "OrbStack machines are created from the Mac: brew install --cask orbstack", soft=not uses_orb)
         if orb:
             base = (machines.get("orb") or {}).get("base", "base")

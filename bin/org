@@ -1,6 +1,12 @@
 #!/bin/sh
-# Launcher: run the package from this checkout with whatever python3 is on the machine.
-# Symlink it onto PATH (ln -s "$PWD/bin/org" ~/.local/bin/org); the link is followed back here.
+# org: one command, two ways of running.
+#
+#   Container mode   `org up` has started a manager container. Every other command runs inside
+#                    it, so this machine needs a Docker engine and nothing else.
+#   Local mode       there is no manager container. The package runs here with python3.
+#
+# ORG_LOCAL=1 forces local mode. Inside the image ORG_IN_CONTAINER is set, which does the same.
+# Symlink this file onto PATH (ln -s "$PWD/bin/org" ~/.local/bin/org); the link is followed back.
 self="$0"
 while [ -L "$self" ]; do
   target=$(readlink "$self")
@@ -10,4 +16,42 @@ while [ -L "$self" ]; do
   esac
 done
 root=$(cd "$(dirname "$self")/.." && pwd)
-PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m org "$@"
+manager="${ORG_MANAGER:-org-manager}"
+
+run_local() {
+  PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m org "$@"
+}
+
+[ -n "${ORG_IN_CONTAINER:-}" ] && run_local "$@"
+
+case "${1:-}" in
+  up|down) exec bash "$root/docker/up.sh" "$@" ;;
+esac
+
+[ -n "${ORG_LOCAL:-}" ] && run_local "$@"
+
+state=""
+if command -v docker >/dev/null 2>&1; then
+  state=$(docker inspect -f '{{.State.Status}}' "$manager" 2>/dev/null || true)
+fi
+case "$state" in
+  "") run_local "$@" ;;
+  running) ;;
+  *) echo "org: the manager container exists but is $state. \`org up\` starts it again (ORG_LOCAL=1 runs without it)." >&2; exit 1 ;;
+esac
+
+case "${1:-}" in
+  dash)
+    # The dashboard is the manager container's main process; here it only needs opening.
+    url=$(docker exec "$manager" org dash --url) || exit 1
+    echo "$url"
+    case " $* " in *" --url "*|*" --no-open "*) exit 0 ;; esac
+    if command -v open >/dev/null 2>&1; then open "$url"; elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$url"; fi
+    exit 0 ;;
+  shell)
+    shift
+    exec docker exec -it "$manager" bash "$@" ;;
+esac
+
+if [ -t 0 ] && [ -t 1 ]; then tty="-it"; else tty="-i"; fi
+exec docker exec $tty -e TERM="${TERM:-xterm-256color}" -e COLUMNS="$(tput cols 2>/dev/null || echo 140)" "$manager" org "$@"

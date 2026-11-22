@@ -36,9 +36,10 @@ PROMPTS = Path(__file__).parent / "prompts"
 BIN = Path(__file__).resolve().parent.parent / "bin"
 
 READ_COMMANDS = ["status", "peek", "logs", "plan", "report", "review", "sync", "spec ls", "spec show", "spec check",
-                 "machine ls", "project ls"]
+                 "machine ls", "project ls", "ls", "cat", "diff", "pool", "doctor"]
 DRAFT_COMMANDS = ["spec new", "spec revise", "project add", "init"]
-HUMAN_COMMANDS = ["approve", "dispatch", "stop", "resume", "machine rm"]
+# Decisions that are the person's. `exec` is among them: it runs anything on an engineer's machine.
+HUMAN_COMMANDS = ["approve", "dispatch", "stop", "resume", "machine rm", "exec", "pump", "login"]
 
 # Commands that change state outside this machine. Bash deny rules match the form a model
 # normally writes; they are a guard against an overeager manager, not a wall against a hostile
@@ -49,6 +50,8 @@ OUTWARD = [
     "gh repo create", "gh repo delete", "gh repo edit", "gh repo rename", "gh repo archive", "gh repo fork",
     "gh release", "gh workflow run", "gh run rerun", "gh run cancel", "gh secret", "gh variable", "gh gist create",
 ]
+# The same push, written with options before the verb (git -C <dir> push, git -c k=v push).
+OUTWARD_FORMS = ["git * push *", "git * push"]
 OUTWARD_API = ["gh api * -X *", "gh api * --method *", "gh api -X *", "gh api --method *", "gh api * -f *", "gh api * -F *",
                "gh api * --field *", "gh api * --raw-field *", "gh api * --input *"]
 
@@ -64,35 +67,88 @@ GH_READ = ["pr view", "pr list", "pr diff", "pr checks", "pr status", "issue vie
            "run view", "run list", "release view", "release list", "search", "api", "auth status"]
 
 
+def secret_paths() -> list:
+    """Where logins live on this side, as permission-rule path patterns."""
+    home = Path.home()
+    return [str(home / ".claude" / "oauth-token"), str(home / ".claude" / ".credentials.json"),
+            str(home / ".config" / "gh") + "/**", str(home / ".ssh") + "/**"]
+
+
 def _org(commands) -> list:
     return ["Bash(org %s *)" % c for c in commands]
 
 
 def _read_rules() -> list:
+    # No `git -C <dir> <verb>` forms: a wildcard before the verb would also admit options such as
+    # `-c`, which can make git run a program. `cd <dir>` and then the plain form does the same job.
     return (["Bash(%s *)" % c for c in READ_SHELL] + ["Bash(git %s *)" % c for c in GIT_READ]
-            + ["Bash(git -C * %s *)" % c for c in GIT_READ] + ["Bash(gh %s *)" % c for c in GH_READ])
+            + ["Bash(gh %s *)" % c for c in GH_READ])
 
 
-def settings(ledger: Ledger, mode: str) -> dict:
+def sandbox_usable() -> bool:
+    """Can Claude Code's shell sandbox actually start here?
+
+    macOS has Seatbelt built in. Linux needs bubblewrap and socat, and bubblewrap must be allowed
+    to make its namespaces, which a container only permits with the options `org up` gives the
+    manager. A probe, because finding out mid-session leaves the shell unusable.
+    """
+    if sys.platform == "darwin":
+        return shutil.which("sandbox-exec") is not None
+    if not (shutil.which("bwrap") and shutil.which("socat")):
+        return False
+    try:
+        return subprocess.run(["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-pid", "--proc", "/proc", "true"],
+                              capture_output=True, timeout=15).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def sandboxed(ledger: Ledger) -> bool:
+    return bool((ledger.config().get("manager") or {}).get("sandbox", True)) and sandbox_usable()
+
+
+def session_mode(ledger: Ledger, with_sandbox: Optional[bool] = None) -> Optional[str]:
+    """The permission mode a manager session is started in; None leaves Claude Code's default.
+
+    With the sandbox, the operating system stops shell writes outside the desk, so any mode is
+    safe, including `auto`, where a classifier answers most prompts. Without it, nothing but a
+    prompt stands between the manager and a write to the person's checkouts, and that prompt must
+    go to the person, not to a classifier: so the session asks first (`manual`).
+    """
+    configured = (ledger.config().get("manager") or {}).get("permission_mode")
+    if configured:
+        return configured
+    if with_sandbox is None:
+        with_sandbox = sandboxed(ledger)
+    return None if with_sandbox else "manual"
+
+
+def settings(ledger: Ledger, mode: str, with_sandbox: Optional[bool] = None) -> dict:
     """The Claude Code settings layered over the user's own for a manager session."""
     mgr = ledger.config().get("manager") or {}
     desk, root = str(ledger.desk), str(ledger.root)
+    if with_sandbox is None:
+        with_sandbox = mode == "talk" and sandboxed(ledger)
     perms = {
         # Read(//**) as well as Read: the harness checks the paths given to ls, cat and the like
         # against read rules by path, and a rule without a path does not satisfy that check.
         "allow": ["Read", "Read(//**)", "Grep", "Glob"] + _org(READ_COMMANDS) + _read_rules(),
         "ask": _org(HUMAN_COMMANDS) + ["Bash(orb *)", "Bash(ssh *)"],
         # An absolute path in a rule is written with a second leading slash.
-        "deny": ["Bash(%s *)" % c for c in OUTWARD] + ["Bash(%s)" % c for c in OUTWARD_API]
-        + ["Edit(/%s/specs/**)" % root, "Edit(/%s/runs/**)" % root, "Edit(/%s/config.json)" % root],
+        "deny": ["Bash(%s *)" % c for c in OUTWARD] + ["Bash(%s)" % c for c in OUTWARD_FORMS + OUTWARD_API]
+        + ["Edit(/%s/specs/**)" % root, "Edit(/%s/runs/**)" % root, "Edit(/%s/config.json)" % root]
+        # The logins this side hands to engineers are not the manager chat's to read or repeat.
+        + ["Read(/%s)" % p for p in secret_paths()],
         "blockWritesOutsideWorkingDirectories": True,
     }
     out = {"permissions": perms}
     if mode == "talk":
         perms["allow"] += _org(DRAFT_COMMANDS) + ["Edit(/%s/**)" % desk, "WebSearch", "WebFetch"]
-        if mgr.get("sandbox", True):
+        if with_sandbox:
             out["sandbox"] = {
                 "enabled": True,
+                # The session was started on the strength of the sandbox: without it, do not run.
+                "failIfUnavailable": True,
                 "autoAllowBashIfSandboxed": True,
                 "allowUnsandboxedCommands": False,
                 # Outside the sandbox, and so under the permission rules above instead: org itself
@@ -102,6 +158,11 @@ def settings(ledger: Ledger, mode: str) -> dict:
                 "excludedCommands": ["org", "org *", "gh", "gh *"] + list(mgr.get("sandbox_exclude") or []),
                 "network": {"allowedDomains": list(mgr.get("network_allow") or [])},
             }
+            # The same files, kept from sandboxed shell commands by the operating system.
+            secrets = [str(q) for q in (Path.home() / ".claude" / "oauth-token", Path.home() / ".claude" / ".credentials.json",
+                                        Path.home() / ".config" / "gh", Path.home() / ".ssh") if q.exists()]
+            if secrets:
+                out["sandbox"]["filesystem"] = {"denyRead": secrets}
     return out
 
 
@@ -137,6 +198,33 @@ def _claude(ledger: Ledger) -> Optional[str]:
     return shutil.which(ledger.config().get("claude_bin") or "claude", path=launch_env(ledger)["PATH"])
 
 
+def prepare_container_session(ledger: Ledger, claude: str) -> None:
+    """In the manager's own container, skip Claude Code's first-run screens.
+
+    The install inside the image is org's, used for nothing else, so org answers the two questions
+    a new install asks: the theme screen, and whether the desk is trusted. On a Mac this does
+    nothing: that install and its answers are the person's.
+    """
+    if not os.environ.get("ORG_IN_CONTAINER"):
+        return
+    path = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")) / ".claude.json"
+    data = read_json(path, {}) or {}
+    project = data.setdefault("projects", {}).setdefault(str(ledger.desk), {})
+    changed = False
+    if not project.get("hasTrustDialogAccepted"):
+        project["hasTrustDialogAccepted"], changed = True, True
+    if not data.get("hasCompletedOnboarding"):
+        try:
+            version = subprocess.run([claude, "--version"], capture_output=True, text=True, timeout=20).stdout.split()[0]
+        except (OSError, IndexError, subprocess.TimeoutExpired):
+            version = "0"
+        data.update(hasCompletedOnboarding=True, lastOnboardingVersion=version)
+        changed = True
+    if changed:
+        write_json(path, data)
+        os.chmod(path, 0o600)
+
+
 def talk(ledger: Ledger, prompt: Optional[str] = None, project: Optional[str] = None, resume: bool = False,
          dry_run: bool = False) -> int:
     """Replace this process with the manager's interactive session."""
@@ -145,21 +233,30 @@ def talk(ledger: Ledger, prompt: Optional[str] = None, project: Optional[str] = 
     if not claude:
         print("org: the claude CLI is not on PATH", file=sys.stderr)
         return 127
+    with_sandbox = sandboxed(ledger)
+    mode = session_mode(ledger, with_sandbox)
     if dry_run:
-        print("would run, in %s:\n  %s --append-system-prompt <persona, %d characters> --settings <below> --name 'org manager'\n"
-              % (ledger.desk, claude, len(persona(ledger))))
-        print(json.dumps(settings(ledger, "talk"), indent=2))
+        print("would run, in %s:\n  %s --append-system-prompt <persona, %d characters> --settings <below> --name 'org manager'%s\n"
+              % (ledger.desk, claude, len(persona(ledger)), (" --permission-mode " + mode) if mode else ""))
+        print("shell sandbox: %s\n" % ("on" if with_sandbox else "not available here, so the session asks before shell commands that are not reads"))
+        print(json.dumps(settings(ledger, "talk", with_sandbox), indent=2))
         return 0
     try:
         sync_all(ledger)  # so the persona opens with what the machines say now
     except Exception:
         pass
+    prepare_container_session(ledger, claude)
     mgr = ledger.config().get("manager") or {}
-    cmd = [claude, "--append-system-prompt", persona(ledger), "--settings", json.dumps(settings(ledger, "talk")),
+    if not with_sandbox and mgr.get("sandbox", True):
+        print("org: no shell sandbox on this machine; the manager will ask before any shell command that is not a read.\n"
+              "     `org doctor` says what is missing.", file=sys.stderr)
+    cmd = [claude, "--append-system-prompt", persona(ledger), "--settings", json.dumps(settings(ledger, "talk", with_sandbox)),
            "--name", "org manager"]
-    for flag, key in (("--model", "model"), ("--effort", "effort"), ("--permission-mode", "permission_mode")):
+    for flag, key in (("--model", "model"), ("--effort", "effort")):
         if mgr.get(key):
             cmd += [flag, str(mgr[key])]
+    if mode:
+        cmd += ["--permission-mode", mode]
     if resume:
         cmd.append("--continue")
     if project and prompt:

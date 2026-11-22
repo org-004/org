@@ -185,7 +185,7 @@ class ManagerSettings(unittest.TestCase):
         self.ledger.init()
 
     def test_talk_mode_confines_writes_to_the_desk(self):
-        s = manager.settings(self.ledger, "talk")
+        s = manager.settings(self.ledger, "talk", with_sandbox=True)
         p = s["permissions"]
         desk = str(self.ledger.desk)
         self.assertIn("Edit(/%s/**)" % desk, p["allow"])
@@ -193,17 +193,34 @@ class ManagerSettings(unittest.TestCase):
         self.assertTrue(p["blockWritesOutsideWorkingDirectories"])
         self.assertIn("Edit(/%s/specs/**)" % self.ledger.root, p["deny"], "approved specs cannot be edited")
         self.assertEqual(s["sandbox"]["enabled"], True)
+        self.assertEqual(s["sandbox"]["failIfUnavailable"], True, "a session started on the strength of the sandbox does not run without it")
         self.assertEqual(s["sandbox"]["allowUnsandboxedCommands"], False, "no escape hatch out of the sandbox")
         self.assertIn("org *", s["sandbox"]["excludedCommands"])
 
+    def test_without_a_sandbox_the_session_asks_the_person_first(self):
+        # With no sandbox, only a prompt stands between the manager and a write to a checkout,
+        # and in Claude Code's auto mode a classifier would answer that prompt. Seen live: it
+        # allowed a `git branch` in a repository outside the desk. So the mode is pinned.
+        self.assertNotIn("sandbox", manager.settings(self.ledger, "talk", with_sandbox=False))
+        self.assertEqual(manager.session_mode(self.ledger, with_sandbox=False), "manual")
+        self.assertIsNone(manager.session_mode(self.ledger, with_sandbox=True), "with the sandbox, any mode is safe")
+        write_json(self.ledger.config_path, {"manager": {"permission_mode": "auto"}})
+        self.assertEqual(manager.session_mode(self.ledger, with_sandbox=False), "auto", "an explicit choice is the person's to make")
+        write_json(self.ledger.config_path, {"manager": {"sandbox": False}})
+        self.assertFalse(manager.sandboxed(self.ledger))
+
     def test_approval_always_asks_the_person(self):
         for mode in ("talk", "ask"):
-            p = manager.settings(self.ledger, mode)["permissions"]
-            for cmd in ("approve", "dispatch", "stop", "machine rm"):
-                self.assertIn("Bash(org %s *)" % cmd, p["ask"], cmd)
-                self.assertNotIn("Bash(org %s *)" % cmd, p["allow"], cmd)
-            self.assertIn("Bash(git push *)", p["deny"])
-            self.assertIn("Bash(gh pr create *)", p["deny"])
+            for with_sandbox in (True, False):
+                p = manager.settings(self.ledger, mode, with_sandbox=with_sandbox)["permissions"]
+                for cmd in ("approve", "dispatch", "stop", "machine rm", "exec"):
+                    self.assertIn("Bash(org %s *)" % cmd, p["ask"], cmd)
+                    self.assertNotIn("Bash(org %s *)" % cmd, p["allow"], cmd)
+                self.assertIn("Bash(git push *)", p["deny"])
+                self.assertIn("Bash(git * push *)", p["deny"], "the same push with options before the verb")
+                self.assertIn("Bash(gh pr create *)", p["deny"])
+                self.assertFalse([r for r in p["allow"] if "git -C" in r], "no allow rule with a wildcard before the git verb")
+                self.assertTrue([r for r in p["deny"] if r.startswith("Read(/") and "oauth-token" in r], "the login token is not readable")
         self.assertNotIn("sandbox", manager.settings(self.ledger, "ask"), "question mode runs nothing that needs one")
 
     def test_persona_names_the_desk_and_the_state(self):

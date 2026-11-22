@@ -150,8 +150,8 @@ def check(text: str, default_machine: str = "orb") -> Tuple[List[str], List[str]
         if key not in KNOWN_KEYS:
             warnings.append("header: unknown key %r is ignored" % key)
     machine = str(meta.get("machine") or "")
-    if machine and not re.match(r"^(orb|local|ssh:[A-Za-z0-9_.-]+)$", machine):
-        errors.append("header: machine must be orb, local or ssh:<name>")
+    if machine and not re.match(r"^(docker(:[A-Za-z0-9_.-]+)?|orb|local|ssh:[A-Za-z0-9_.-]+)$", machine):
+        errors.append("header: machine must be docker, docker:<node>, orb, ssh:<name> or local")
     for repo in meta.get("repos") or []:
         if PLACEHOLDER_REPO_RE.search(str(repo)):
             errors.append("header: repo %s is a placeholder; an engineer would have nothing to clone. "

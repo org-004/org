@@ -20,6 +20,7 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 from . import dispatch, manager, spec, status
@@ -99,7 +100,7 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin:
             o = urlparse(origin)
-            return o.hostname in ("127.0.0.1", "localhost", "::1") and o.port == self.server.server_port
+            return o.hostname in ("127.0.0.1", "localhost", "::1") and o.port in self.server.ports
         return True
 
     def _authorized(self) -> bool:
@@ -224,6 +225,7 @@ class Handler(BaseHTTPRequestHandler):
 def _sync_loop(server) -> None:
     while not server.stopping:
         try:
+            dispatch.pump(server.ledger)  # a slot freed since the last pass goes to the next queued run
             sync_all(server.ledger)
             server.sync_error = None
         except Exception as e:  # a bad machine must not stop the loop
@@ -235,11 +237,21 @@ def _sync_loop(server) -> None:
             time.sleep(0.25)
 
 
-def make_server(ledger: Ledger, port: int) -> ThreadingHTTPServer:
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+def public_port(ledger: Ledger, port=None) -> int:
+    """The port a browser uses. In a container it is the published one, which may differ."""
+    return int(os.environ.get("ORG_DASH_PUBLIC_PORT") or port or (ledger.config().get("dash") or {}).get("port") or 8787)
+
+
+def url(ledger: Ledger, port=None) -> str:
+    return "http://127.0.0.1:%d/#t=%s" % (public_port(ledger, port), load_token(ledger))
+
+
+def make_server(ledger: Ledger, port: int, host: str = "127.0.0.1") -> ThreadingHTTPServer:
+    httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
     httpd.ledger = ledger
     httpd.token = load_token(ledger)
+    httpd.ports = {httpd.server_address[1], public_port(ledger, httpd.server_address[1])}
     httpd.ask_lock = threading.Lock()
     httpd.synced_at = None
     httpd.sync_error = None
@@ -248,21 +260,24 @@ def make_server(ledger: Ledger, port: int) -> ThreadingHTTPServer:
     return httpd
 
 
-def serve(ledger: Ledger, port=None, open_browser: bool = True) -> int:
+def serve(ledger: Ledger, port=None, open_browser: bool = True, host: Optional[str] = None) -> int:
     ledger.init()
     port = int(port or (ledger.config().get("dash") or {}).get("port") or 8787)
+    # Inside a container the listener must take connections arriving through the published port;
+    # the publishing (-p 127.0.0.1:…) is what keeps it off the network. The token still gates it.
+    host = host or ("0.0.0.0" if os.environ.get("ORG_IN_CONTAINER") else "127.0.0.1")
     try:
-        httpd = make_server(ledger, port)
+        httpd = make_server(ledger, port, host)
     except OSError as e:
-        print("org: cannot listen on 127.0.0.1:%d (%s). Is the dashboard already running? Try --port." % (port, e))
+        print("org: cannot listen on %s:%d (%s). Is the dashboard already running? Try --port." % (host, port, e))
         return 1
-    url = "http://127.0.0.1:%d/#t=%s" % (port, httpd.token)
+    address = url(ledger, port)
     threading.Thread(target=_sync_loop, args=(httpd,), daemon=True).start()
-    print("org dashboard: %s" % url, flush=True)
-    print("ledger: %s   (ctrl-c stops the dashboard; engineers keep running)" % ledger.root, flush=True)
-    if open_browser:
+    print("org dashboard: %s" % address, flush=True)
+    print("ledger: %s   (stopping the dashboard does not stop engineers)" % ledger.root, flush=True)
+    if open_browser and not os.environ.get("ORG_IN_CONTAINER"):
         try:
-            webbrowser.open(url)
+            webbrowser.open(address)
         except Exception:
             pass
     try:

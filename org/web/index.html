@@ -234,6 +234,7 @@ const ICON = {
 };
 const icon = (name, role) => '<svg viewBox="0 0 14 14" class="r-' + role + '" aria-hidden="true">' + ICON[name] + "</svg>";
 const STATE = {
+  queued: ["muted", "ring", "Queued"],
   provisioning: ["accent", "dot", "Provisioning"], dispatched: ["accent", "dot", "Starting"],
   planning: ["accent", "dot", "Planning"], executing: ["accent", "dot", "Executing"], reporting: ["accent", "dot", "Reporting"],
   waiting: ["warning", "pause", "Waiting for the limit"],
@@ -372,7 +373,9 @@ function renderKpis(s) {
   const ready = s.drafts.filter(d => !d.errors.length).length;
   const tile = (label, value, sub) => '<div class="card kpi"><div class="label">' + label + '</div><div class="value">' + value + '</div><div class="sub">' + esc(sub || "") + "</div></div>";
   const parts = [["done", n("done")], ["partial", n("partial")], ["failed", n("failed") + n("dispatch_failed")], ["stopped", n("stopped")]].filter(p => p[1]).map(p => p[1] + " " + p[0]);
-  put("kpis", tile("Engineers working", live.length, sick ? sick + (sick === 1 ? " needs" : " need") + " attention" : (live.length ? "on " + new Set(live.map(v => v.machine.name)).size + " machine(s)" : "none in flight"))
+  put("kpis", tile("Engineers working", live.length, sick ? sick + (sick === 1 ? " needs" : " need") + " attention"
+      : (s.pool && s.pool.length ? "pool: " + s.pool.map(p => p.node + " " + p.used + "/" + p.slots).join(" · ")
+        : (live.length ? "on " + new Set(live.map(v => v.machine.name)).size + " machine(s)" : "none in flight")))
     + tile("Drafts awaiting approval", s.drafts.length, s.drafts.length ? ready + " ready, " + (s.drafts.length - ready) + " failing checks" : "")
     + tile("Finished runs", fin.length, parts.join(" · "))
     + tile("Spent by engineers this window", usd(s.budget.org_spend_this_window_usd), s.budget.org_pct_this_window != null ? s.budget.org_pct_this_window.toFixed(1) + "% of the weekly limit" : ""));

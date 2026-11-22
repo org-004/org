@@ -2,30 +2,36 @@
 
 Steps, all initiated from the manager's side:
 
-  1. pick the machine (the spec header, else config): a fresh OrbStack clone, an SSH host, or local
-  2. build the bundle: this package, the approved spec, job.json (caps, budget, price table, how
-     past estimates turned out)
-  3. provision: for OrbStack, `orb clone <base> <name>` and `orb start`, as `box new` does
-  4. copy the Claude login token in over stdin, as `box <name>` does (per machine, opt-in for SSH)
-  5. unpack the bundle and start the runner detached, in tmux when the machine has it
+  1. pick the machine (the spec header, else config): a container from the Docker pool, a fresh
+     OrbStack clone, an SSH host, or local
+  2. place it: a Docker run needs a node with a free slot, and waits in the queue until one frees
+  3. provision: `docker run`, or `orb clone` and `orb start` as `box new` does
+  4. copy the logins in over stdin: the Claude token, and for a blank container the GitHub token
+     and git identity
+  5. build the bundle (this package, the approved spec, job.json with caps, budget, prices and how
+     past estimates turned out), unpack it, and start the runner detached, in tmux when present
 
-The run record is written before step 3, so a dispatch that fails halfway is visible in status.
+The run record is written before any of that, so a dispatch that waits or fails is visible.
 """
 from __future__ import annotations
 
 import base64
+import fcntl
 import io
 import json
 import re
+import subprocess
 import tarfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from . import budget, pricing
+from . import budget
 from .ledger import Ledger
-from .transport import Local, Orb, Ssh, Transport, TransportError, for_machine
-from .util import now, read_json, read_text
+from .runner import TERMINAL_STATES
+from .transport import Docker, Local, Orb, Ssh, Transport, TransportError, for_machine
+from .util import now, read_text
 
 PACKAGE = Path(__file__).parent
 REMOTE_ROOT = "$HOME/org-runs"
@@ -39,14 +45,35 @@ def remote_dir(run_id: str) -> str:
     return "%s/%s" % (REMOTE_ROOT, run_id)
 
 
+def workspace_dir(run_id: str) -> str:
+    return "$HOME/work/%s" % run_id
+
+
+def _machine_name(prefix: str, run_id: str) -> str:
+    return re.sub(r"[^a-z0-9-]", "-", (prefix + run_id).lower())[:60].strip("-")
+
+
+def docker_nodes(cfg: dict) -> Dict[str, dict]:
+    nodes = ((cfg.get("machines") or {}).get("docker") or {}).get("nodes") or {}
+    return nodes or {"local": {"host": None, "slots": 4}}
+
+
 def choose_machine(cfg: dict, header: dict, override: Optional[str], run_id: str) -> dict:
-    """Resolve "orb" | "ssh:<name>" | "local" into a machine record for run.json."""
+    """Resolve "docker[:<node>]" | "orb" | "ssh:<name>" | "local" into a machine record."""
     machines = cfg.get("machines") or {}
     want = (override or header.get("machine") or machines.get("default") or "orb").strip()
+    if want == "docker" or want.startswith("docker:"):
+        d = machines.get("docker") or {}
+        node = want[7:] or None if ":" in want else None
+        if node and node not in docker_nodes(cfg):
+            raise DispatchError("docker node %r is not defined in config.json under machines.docker.nodes" % node)
+        return {"kind": "docker", "name": _machine_name(d.get("prefix", "org-eng-"), run_id), "wanted_node": node, "node": None,
+                "image": d.get("image", "org:latest"), "network": d.get("network", "org-engineers"),
+                "push_token": d.get("push_token", True)}
     if want == "orb":
         orb = machines.get("orb") or {}
-        name = re.sub(r"[^a-z0-9-]", "-", (orb.get("prefix", "eng-") + run_id).lower())[:60].strip("-")
-        return {"kind": "orb", "name": name, "base": orb.get("base", "base"), "push_token": orb.get("push_token", True)}
+        return {"kind": "orb", "name": _machine_name(orb.get("prefix", "eng-"), run_id), "base": orb.get("base", "base"),
+                "push_token": orb.get("push_token", True)}
     if want.startswith("ssh:"):
         name = want[4:]
         entry = (machines.get("ssh") or {}).get(name)
@@ -60,7 +87,54 @@ def choose_machine(cfg: dict, header: dict, override: Optional[str], run_id: str
             raise DispatchError("the local machine is disabled: an engineer runs with all permissions bypassed, "
                                 "so it belongs in a container. Set machines.local.enabled to true in config.json to allow it.")
         return {"kind": "local", "name": "localhost", "home": local.get("home"), "push_token": False}
-    raise DispatchError("unknown machine %r: use orb, ssh:<name> or local" % want)
+    raise DispatchError("unknown machine %r: use docker, docker:<node>, orb, ssh:<name> or local" % want)
+
+
+# ---------------------------------------------------------------- the pool
+
+
+def node_load(ledger: Ledger) -> Dict[str, int]:
+    """Engineers currently holding a slot on each Docker node, counted from the ledger."""
+    load: Dict[str, int] = {}
+    for run_id in ledger.run_ids():
+        rec = ledger.run(run_id)
+        machine = rec.get("machine") or {}
+        if machine.get("kind") != "docker" or not machine.get("node"):
+            continue
+        if rec.get("final") or rec.get("machine_removed_at") or rec.get("state") in ("queued", "dispatch_failed"):
+            continue
+        if rec.get("state") in TERMINAL_STATES:
+            continue
+        load[machine["node"]] = load.get(machine["node"], 0) + 1
+    return load
+
+
+def place(ledger: Ledger, machine: dict) -> Optional[str]:
+    """The least loaded node with a free slot that this run may use, or None."""
+    nodes, load = docker_nodes(ledger.config()), node_load(ledger)
+    wanted = machine.get("wanted_node")
+    free = [(load.get(n, 0), n) for n in ([wanted] if wanted else sorted(nodes))
+            if n in nodes and load.get(n, 0) < int(nodes[n].get("slots", 1))]
+    return min(free)[1] if free else None
+
+
+def pool(ledger: Ledger) -> List[dict]:
+    """Each node with its slots and what is using them, for status."""
+    nodes, load = docker_nodes(ledger.config()), node_load(ledger)
+    return [{"node": n, "host": nodes[n].get("host"), "slots": int(nodes[n].get("slots", 1)), "used": load.get(n, 0)}
+            for n in sorted(nodes)]
+
+
+@contextmanager
+def _placing(ledger: Ledger):
+    """Placement is decided by one process at a time, or two could hand out the same slot."""
+    ledger.runs.mkdir(parents=True, exist_ok=True)
+    with open(ledger.runs / ".dispatch.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+# ---------------------------------------------------------------- what travels to the machine
 
 
 def build_job(ledger: Ledger, meta: dict, run_id: str, machine: dict) -> dict:
@@ -136,7 +210,11 @@ def start_script(run_id: str, detach: str = "auto") -> str:
     ]) + "\n"
 
 
-def provision(machine: dict) -> Transport:
+def provision(machine: dict, run_id: str = "") -> Transport:
+    if machine["kind"] == "docker":
+        return Docker.create(machine["name"], machine["image"], host=machine.get("host"), node=machine.get("node") or "local",
+                             network=machine.get("network"), labels={"org.role": "engineer", "org.run": run_id},
+                             limits=machine.get("limits"))
     if machine["kind"] == "orb":
         return Orb.create(machine.get("base", "base"), machine["name"])
     if machine["kind"] == "ssh":
@@ -161,8 +239,45 @@ def preflight(tr: Transport) -> dict:
     return facts
 
 
+def _local(argv: List[str]) -> str:
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=20)
+        return p.stdout.strip() if p.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def push_logins(tr: Transport, machine: dict, log) -> None:
+    """Give the machine what it needs to act as the person: the Claude token, and for a blank
+    container the GitHub token and git identity. Everything goes in over stdin."""
+    token = Path.home() / ".claude" / "oauth-token"
+    if machine.get("push_token"):
+        if token.is_file() and token.stat().st_size:
+            tr.run('umask 077; mkdir -p "$HOME/.claude"; cat > "$HOME/.claude/oauth-token"', input=token.read_bytes(), timeout=60)
+            log("login token copied in")
+        else:
+            log("warning: no ~/.claude/oauth-token here; the engineer will use whatever login the machine has")
+    if machine["kind"] != "docker":
+        return  # an OrbStack clone inherits its template's GitHub login; an ssh host is set up by its owner
+    gh = _local(["gh", "auth", "token"])
+    if gh:
+        tr.run("gh auth login --with-token >/dev/null 2>&1 && gh auth setup-git", input=(gh + "\n").encode(), timeout=60)
+        log("GitHub login copied in")
+    else:
+        log("warning: no GitHub login on this side (`gh auth login`); the engineer cannot clone private repositories or push")
+    name, email = _local(["git", "config", "--global", "user.name"]), _local(["git", "config", "--global", "user.email"])
+    if name and email:
+        tr.run('IFS= read -r n; IFS= read -r e; git config --global user.name "$n" && git config --global user.email "$e"',
+               input=("%s\n%s\n" % (name, email)).encode(), timeout=30, check=False)
+    else:
+        log("warning: no git identity on this side (`git config --global user.name` and user.email); commits will fail until one is set")
+
+
+# ---------------------------------------------------------------- dispatch, the queue
+
+
 def dispatch(ledger: Ledger, spec_id: str, machine_override: Optional[str] = None, log=print) -> Tuple[str, dict]:
-    """Start a new run of an approved spec. Returns (run_id, run record)."""
+    """Create a run of an approved spec and start it if a machine is free. Returns (run_id, record)."""
     meta = ledger.spec_meta(spec_id)
     if not meta:
         raise DispatchError("%s is not approved" % spec_id)
@@ -179,23 +294,42 @@ def dispatch(ledger: Ledger, spec_id: str, machine_override: Optional[str] = Non
         "machine": machine,
         "remote_dir": remote_dir(run_id),
         "created_at": now(),
-        "state": "provisioning",
+        "state": "queued",
         "events_offset": 0,
     }
     ledger.run_dir(run_id).mkdir(parents=True, exist_ok=True)
     ledger.save_run(run_id, record)
+    return run_id, start(ledger, run_id, log)
+
+
+def start(ledger: Ledger, run_id: str, log=print) -> dict:
+    """Start a queued run if its machine can take it now; otherwise leave it queued."""
+    cfg = ledger.config()
+    with _placing(ledger):
+        record = ledger.run(run_id)
+        if record.get("state") != "queued":
+            return record
+        machine = record["machine"]
+        if machine["kind"] == "docker":
+            node = place(ledger, machine)
+            if node is None:
+                where = machine.get("wanted_node") or "any node"
+                record["queue_reason"] = "no free slot on %s (%s)" % (
+                    where, ", ".join("%s %d/%d" % (p["node"], p["used"], p["slots"]) for p in pool(ledger)))
+                ledger.save_run(run_id, record)
+                log("queued: %s" % record["queue_reason"])
+                return record
+            entry = docker_nodes(cfg)[node]
+            machine.update(node=node, host=entry.get("host"),
+                           limits={k: entry[k] for k in ("cpus", "memory") if entry.get(k)})
+        record.update(state="provisioning", queue_reason=None)
+        ledger.save_run(run_id, record)  # the slot is taken from here on
+    meta = ledger.spec_meta(record["spec_id"])
     try:
-        log("machine: %s %s" % (machine["kind"], machine["name"]))
-        tr = provision(machine)
-        facts = preflight(tr)
-        record["facts"] = facts
-        token = Path.home() / ".claude" / "oauth-token"
-        if machine.get("push_token"):
-            if token.is_file() and token.stat().st_size:
-                tr.run('umask 077; mkdir -p "$HOME/.claude"; cat > "$HOME/.claude/oauth-token"', input=token.read_bytes(), timeout=60)
-                log("login token copied in")
-            else:
-                log("warning: no ~/.claude/oauth-token here; the engineer will use whatever login the machine has")
+        log("machine: %s %s%s" % (machine["kind"], machine["name"], (" on " + machine["node"]) if machine.get("node") else ""))
+        tr = provision(machine, run_id)
+        record["facts"] = preflight(tr)
+        push_logins(tr, machine, log)
         job = build_job(ledger, meta, run_id, machine)
         data = build_bundle(ledger, meta, job)
         # A shared host may already hold a run with this id, from another ledger or an earlier
@@ -216,12 +350,45 @@ def dispatch(ledger: Ledger, spec_id: str, machine_override: Optional[str] = Non
         record.update(state="dispatch_failed", error=str(e))
         ledger.save_run(run_id, record)
         raise DispatchError("%s: %s" % (run_id, e))
-    return run_id, record
+    return record
+
+
+def pump(ledger: Ledger, log=lambda message: None) -> List[str]:
+    """Start whatever is queued and can now be placed. Returns the runs it started.
+
+    Called whenever something looks at the ledger (status, sync, the dashboard's loop), so a freed
+    slot is taken up without a scheduler process of its own.
+    """
+    started = []
+    queued = [r for r in ledger.run_ids() if ledger.run(r).get("state") == "queued"]
+    queued.sort(key=lambda r: ledger.run(r).get("created_at") or 0)
+    for run_id in queued:
+        try:
+            if start(ledger, run_id, log).get("state") != "queued":
+                started.append(run_id)
+        except DispatchError as e:
+            log("could not start %s: %s" % (run_id, e))
+    return started
+
+
+# ---------------------------------------------------------------- acting on a run's machine
+
+
+def machine_run(ledger: Ledger, run_id: str, script: str, timeout: float = 60, input: Optional[bytes] = None):
+    """Run a script on a run's machine. The engineer's session is not involved."""
+    rec = ledger.run(run_id)
+    if rec.get("state") in ("queued", "provisioning", "dispatch_failed") or rec.get("machine_removed_at"):
+        raise DispatchError("%s has no machine to reach (%s)" % (run_id, "removed" if rec.get("machine_removed_at") else rec.get("state")))
+    return for_machine(rec["machine"], ledger.config()).run(script, timeout=timeout, input=input, check=False)
 
 
 def stop(ledger: Ledger, run_id: str) -> str:
     """Ask the runner to stop. It ends the engineer's turn and records the run as stopped."""
     rec = ledger.run(run_id)
+    if rec.get("state") == "queued":
+        rec.update(state="stopped", final=True, error="stopped while queued")
+        ledger.save_run(run_id, rec)
+        return "removed from the queue"
     tr = for_machine(rec["machine"], ledger.config())
     script = ('RUN="%s"; touch "$RUN/STOP"; '
               'PID=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(\'pid\',\'\'))" "$RUN/status.json" 2>/dev/null); '
@@ -232,7 +399,10 @@ def stop(ledger: Ledger, run_id: str) -> str:
 def resume(ledger: Ledger, run_id: str) -> str:
     """Restart the runner for a run whose process died. It continues from its saved state."""
     rec = ledger.run(run_id)
-    tr = for_machine(rec["machine"], ledger.config())
+    machine = rec["machine"]
+    if machine.get("kind") == "docker" and Docker.state(machine["name"], machine.get("host")) == "exited":
+        Docker._ok(machine.get("host"), ["start", machine["name"]], "docker start %s" % machine["name"])  # the host restarted
+    tr = for_machine(machine, ledger.config())
     tr.run('rm -f "%s/STOP"' % rec["remote_dir"], timeout=30)
     how = tr.run(start_script(run_id, (ledger.config().get("machines") or {}).get("detach", "auto")), timeout=60).stdout.decode().strip()
     rec.update(final=False, resumed_at=now())
@@ -241,12 +411,15 @@ def resume(ledger: Ledger, run_id: str) -> str:
 
 
 def remove_machine(ledger: Ledger, run_id: str) -> str:
-    """Delete the OrbStack machine a run used. Other kinds of machine are not org's to delete."""
+    """Delete the container or OrbStack machine a run used. Other machines are not org's to delete."""
     rec = ledger.run(run_id)
     machine = rec.get("machine") or {}
-    if machine.get("kind") != "orb":
+    if machine.get("kind") == "docker":
+        Docker.delete(machine["name"], machine.get("host"))
+    elif machine.get("kind") == "orb":
+        Orb.delete(machine["name"])
+    else:
         return "nothing to delete: %s machines are not created by org" % machine.get("kind")
-    Orb.delete(machine["name"])
     rec["machine_removed_at"] = now()
     ledger.save_run(run_id, rec)
     return "deleted %s" % machine["name"]

@@ -14,7 +14,11 @@
     org peek <run>                 what the engineer is doing right now
     org logs <run> [-f]            its activity feed
     org stop|resume <run>          stop the engineer, or restart a runner that died
-    org machine rm <run>           delete the OrbStack machine a run used
+    org ls|cat|diff <run> [path]   look at the files on a run's machine, read-only
+    org exec <run> -- <command>    run a command on a run's machine
+    org pool                       the Docker nodes, their slots, and what is queued
+    org machine rm <run>           delete the container or OrbStack machine a run used
+    org login                      the logins engineers are given: Claude, GitHub, git identity
     org doctor                     check that this machine is ready to manage engineers
 
 A <run> may be a run id, a unique prefix, or a spec reference (meaning that spec's latest run).
@@ -430,10 +434,159 @@ def cmd_ask(args) -> int:
     return manager.ask_cli(Ledger(args.home), " ".join(args.question))
 
 
+DIFF_SCRIPT = r"""
+cd "%s" 2>/dev/null || { echo "no workspace yet"; exit 0; }
+found=0
+for g in $(find . -maxdepth 4 -name .git -not -path '*/node_modules/*' 2>/dev/null | sort); do
+  r=$(dirname "$g"); found=1
+  echo "== $r  [$(git -C "$r" rev-parse --abbrev-ref HEAD 2>/dev/null)]  $(git -C "$r" remote get-url origin 2>/dev/null)"
+  git -C "$r" status --short | head -40
+  echo "-- last commits"; git -C "$r" log --oneline -8 2>/dev/null
+  echo "-- not yet pushed: $(git -C "$r" log --branches --not --remotes --oneline 2>/dev/null | wc -l | tr -d ' ') commit(s)"
+  echo "-- uncommitted changes"; git -C "$r" diff --stat | tail -15
+  echo
+done
+[ "$found" = 1 ] || echo "no repositories in the workspace yet"
+"""
+
+
+def _on_machine(args, script: str, timeout: float = 60) -> int:
+    from . import dispatch
+    from .transport import TransportError
+
+    ledger = Ledger(args.home)
+    run_id = need_run(ledger, args.run)
+    try:
+        p = dispatch.machine_run(ledger, run_id, script, timeout=timeout)
+    except (dispatch.DispatchError, TransportError) as e:
+        die(e)
+    sys.stdout.write(p.stdout.decode("utf-8", "replace"))
+    sys.stderr.write(p.stderr.decode("utf-8", "replace"))
+    return p.returncode
+
+
+def cmd_fs(args) -> int:
+    """Read-only looks at an engineer's machine. The commands are built here, not passed through."""
+    import shlex
+
+    from . import dispatch
+
+    ledger = Ledger(args.home)
+    workspace = dispatch.workspace_dir(need_run(ledger, args.run))
+    if args.cmd == "diff":
+        return _on_machine(args, DIFF_SCRIPT % workspace)
+    enter = 'cd "%s" 2>/dev/null || cd "$HOME"; ' % workspace
+    if args.cmd == "ls":
+        return _on_machine(args, enter + "ls -la -- %s" % shlex.quote(args.path or "."))
+    return _on_machine(args, enter + "head -c 400000 -- %s" % shlex.quote(args.path))
+
+
+def cmd_exec(args) -> int:
+    """Run anything on a run's machine, from its workspace. The engineer's session is untouched,
+    but the command can change what the engineer is working on, so the manager chat must ask."""
+    import shlex
+
+    from . import dispatch
+
+    ledger = Ledger(args.home)
+    command = args.command[0] if len(args.command) == 1 else " ".join(shlex.quote(a) for a in args.command)
+    enter = 'cd "%s" 2>/dev/null || cd "$HOME"; ' % dispatch.workspace_dir(need_run(ledger, args.run))
+    return _on_machine(args, 'export PATH="$HOME/.local/bin:$PATH"; ' + enter + command, timeout=args.timeout)
+
+
+def cmd_pool(args) -> int:
+    from . import dispatch
+
+    ledger = Ledger(args.home)
+    for p in dispatch.pool(ledger):
+        print("%-14s %d of %d slot(s) in use   %s" % (p["node"], p["used"], p["slots"], p["host"] or "this Docker daemon"))
+    queued = [r for r in ledger.run_ids() if ledger.run(r).get("state") == "queued"]
+    for run_id in queued:
+        print("queued: %s  (%s)" % (run_id, ledger.run(run_id).get("queue_reason") or "waiting"))
+    return 0
+
+
+def cmd_node(args) -> int:
+    """The pool: which Docker hosts engineers may run on, and how many at once on each."""
+    import subprocess
+    from pathlib import Path
+
+    from . import dispatch
+    from .transport import Docker, TransportError
+    from .util import write_json
+
+    ledger = Ledger(args.home)
+    ledger.init()
+    if args.action == "ls":
+        return cmd_pool(args)
+    saved = read_json(ledger.config_path, {}) or {}
+    docker_cfg = saved.setdefault("machines", {}).setdefault("docker", {})
+    nodes = docker_cfg.setdefault("nodes", dict(dispatch.docker_nodes(ledger.config())))
+    if args.action == "rm":
+        if args.name not in nodes:
+            die("no node named %s (have: %s)" % (args.name, ", ".join(sorted(nodes))))
+        if dispatch.node_load(ledger).get(args.name):
+            die("%s still has engineers running; stop them or let them finish first" % args.name)
+        del nodes[args.name]
+        write_json(ledger.config_path, saved)
+        print("removed %s; containers already on it are untouched" % args.name)
+        return 0
+    host = None if args.host in (None, "", "local") else args.host
+    cfg = ledger.config()["machines"]["docker"]
+    if not args.no_build:
+        root = Path(__file__).resolve().parent.parent
+        if not (root / "docker" / "Dockerfile").exists():
+            die("this install has no docker/Dockerfile to build from; build the image on that host yourself and pass --no-build")
+        print("building %s on %s (the first build on a host takes a few minutes)" % (cfg["image"], host or "this Docker daemon"))
+        env = dict(os.environ)
+        if subprocess.run(Docker.cli(host) + ["buildx", "version"], capture_output=True).returncode != 0:
+            env["DOCKER_BUILDKIT"] = "0"  # a client without the buildx plugin can only use the classic builder
+        built = subprocess.run(Docker.cli(host) + ["build", "-q", "-t", cfg["image"], "-f", str(root / "docker" / "Dockerfile"), str(root)], env=env)
+        if built.returncode != 0:
+            die("the image did not build on %s; nothing was changed" % (host or "this daemon"))
+    try:
+        Docker.ensure_network(host, cfg.get("network") or "org-engineers")
+    except TransportError as e:
+        die(e)
+    entry = {"host": host, "slots": args.slots}
+    for key in ("cpus", "memory"):
+        if getattr(args, key):
+            entry[key] = getattr(args, key)
+    nodes[args.name] = entry
+    write_json(ledger.config_path, saved)
+    print("node %s: %s, %d slot(s)" % (args.name, host or "this Docker daemon", args.slots))
+    return 0
+
+
+def cmd_pump(args) -> int:
+    from . import dispatch
+
+    started = dispatch.pump(Ledger(args.home), log=lambda m: print("  " + m))
+    print("started: %s" % (", ".join(started) or "nothing"))
+    return 0
+
+
+def cmd_login(args) -> int:
+    from . import login
+
+    if args.status:
+        s = login.status()
+        print("Claude token: %s" % ("present" if s["claude_token"] else "missing"))
+        print("GitHub:       %s" % ("logged in" if s["github"] else "not logged in"))
+        print("git identity: %s" % (("%s <%s>" % (s["git_name"], s["git_email"])) if s["git_name"] and s["git_email"] else "not set"))
+        return 0 if (s["claude_token"] and s["github"]) else 1
+    return login.run(force=args.force, token_stdin=args.token_stdin)
+
+
 def cmd_dash(args) -> int:
     from . import dash
 
-    return dash.serve(Ledger(args.home), port=args.port, open_browser=not args.no_open)
+    ledger = Ledger(args.home)
+    if args.url:
+        ledger.init()
+        print(dash.url(ledger, args.port))
+        return 0
+    return dash.serve(ledger, port=args.port, open_browser=not args.no_open, host=args.host)
 
 
 def cmd_doctor(args) -> int:
@@ -545,8 +698,49 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("dash", help="the dashboard as a local web page")
     s.add_argument("--port", type=int)
+    s.add_argument("--host", default=None, help="address to listen on (default 127.0.0.1; 0.0.0.0 inside a container)")
     s.add_argument("--no-open", action="store_true")
+    s.add_argument("--url", action="store_true", help="print the dashboard's URL and exit")
     s.set_defaults(fn=cmd_dash)
+
+    for name, text in (("ls", "list files on a run's machine (its workspace by default)"),
+                       ("cat", "print a file from a run's machine"),
+                       ("diff", "the state of every repository in a run's workspace")):
+        s = sub.add_parser(name, help=text)
+        s.add_argument("run")
+        if name == "ls":
+            s.add_argument("path", nargs="?")
+        elif name == "cat":
+            s.add_argument("path")
+        s.set_defaults(fn=cmd_fs)
+
+    s = sub.add_parser("exec", help="run a command on a run's machine")
+    s.add_argument("run")
+    s.add_argument("--timeout", type=float, default=600)
+    s.add_argument("command", nargs=argparse.REMAINDER, help="after --, the command; one argument is taken as a shell line")
+    s.set_defaults(fn=cmd_exec)
+
+    sub.add_parser("pool", help="the Docker nodes, their slots, and what is queued").set_defaults(fn=cmd_pool)
+
+    s = sub.add_parser("node", help="add or remove Docker hosts in the pool")
+    ss = s.add_subparsers(dest="action", required=True)
+    ss.add_parser("ls")
+    a = ss.add_parser("add", help="add a host, or change one: org node add bigbox ssh://me@bigbox --slots 8")
+    a.add_argument("name")
+    a.add_argument("host", nargs="?", help="a DOCKER_HOST value such as ssh://user@host; omit for the daemon this side reaches directly")
+    a.add_argument("--slots", type=int, default=4, help="engineers that may run there at once")
+    a.add_argument("--cpus", help="CPU limit per engineer container, e.g. 4")
+    a.add_argument("--memory", help="memory limit per engineer container, e.g. 16g")
+    a.add_argument("--no-build", action="store_true", help="the image is already on that host")
+    ss.add_parser("rm").add_argument("name")
+    s.set_defaults(fn=cmd_node)
+    sub.add_parser("pump", help="start queued runs that can now be placed").set_defaults(fn=cmd_pump)
+
+    s = sub.add_parser("login", help="the Claude token, GitHub login and git identity engineers are given")
+    s.add_argument("--status", action="store_true", help="say what is in place and exit")
+    s.add_argument("--force", action="store_true", help="log in again even if a login is present")
+    s.add_argument("--token-stdin", action="store_true", help="store a Claude token read from stdin")
+    s.set_defaults(fn=cmd_login)
 
     s = sub.add_parser("engineer", help=argparse.SUPPRESS)
     ss = s.add_subparsers(dest="action", required=True)

@@ -141,7 +141,7 @@ title: CSV export for the table view
 project: acme
 repos: acme/web, acme/api
 delivery: pr            # pr | branch | merge | none
-machine: orb            # orb | ssh:<name> | local
+machine: docker         # docker | docker:<node> | orb | ssh:<name> | local
 max_cost_usd: 40        # hard caps; set at least one
 max_hours: 6
 max_weekly_pct: 10      # enforced once the dollars-per-percent rate is known

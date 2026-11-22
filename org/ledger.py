@@ -53,8 +53,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "network_allow": ["github.com", "*.github.com", "*.githubusercontent.com"],
     },
     "machines": {
-        # Where a spec runs when its frontmatter does not say: "orb", "ssh:<name>" or "local".
-        "default": "orb",
+        # Where a spec runs when its header does not say: "docker", "docker:<node>", "orb",
+        # "ssh:<name>" or "local". A manager that is itself a container can only start containers.
+        "default": "docker" if os.environ.get("ORG_IN_CONTAINER") else "orb",
+        # The pool: Docker hosts and how many engineers each may run at once. A run that finds no
+        # free slot waits in the queue. "host" is null for the daemon this side can reach
+        # directly, or a DOCKER_HOST value such as ssh://user@bigbox.
+        "docker": {
+            "image": "org:latest",
+            "network": "org-engineers",
+            "prefix": "org-eng-",
+            "push_token": True,
+            "nodes": {"local": {"host": None, "slots": 4}},
+        },
         "orb": {"base": "base", "prefix": "eng-", "push_token": True},
         # name -> {"host": "user@host", "options": ["-p", "2222"], "push_token": false}
         "ssh": {},
@@ -74,7 +85,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 # What `org init` writes: only the knobs a person is likely to turn. Everything else comes from
 # DEFAULT_CONFIG at load time, so new defaults reach existing ledgers.
 STARTER_CONFIG = {
-    "machines": {"default": "orb", "orb": {"base": "base"}, "ssh": {}},
+    "machines": {"ssh": {}},
     "budget": {"usd_per_weekly_pct": None},
 }
 
