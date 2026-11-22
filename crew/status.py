@@ -70,6 +70,9 @@ def run_view(ledger: Ledger, run_id: str, rate: Optional[float]) -> dict:
         "cost_by_model": cost.get("by_model") or {},
         "weekly_pct": (usd / rate) if (usd is not None and rate) else None,
         "estimate": st.get("estimate"),
+        # The plan's cost as a share of the weekly limit: what the human budgets against.
+        "estimate_weekly_pct": ((st.get("estimate") or {}).get("cost_usd") / rate)
+        if (rate and (st.get("estimate") or {}).get("cost_usd") is not None) else None,
         "forecast_cost_usd": forecast.get("cost_usd") if not terminal else None,
         "forecast_basis": forecast.get("basis"),
         "progress": st.get("progress") or {"done": 0, "total": 0, "milestones": []},
@@ -200,6 +203,8 @@ def render(state: dict, width: Optional[int] = None) -> str:
                 spend += " · %.1f%%" % v["weekly_pct"]
             est = v.get("estimate") or {}
             plan = "%s %s" % (fmt_dur(est["wall_minutes"] * 60), fmt_usd(est.get("cost_usd"))) if est.get("wall_minutes") else "—"
+            if v.get("estimate_weekly_pct") is not None and plan != "—":
+                plan += " · %.1f%%" % v["estimate_weekly_pct"]
             if v["terminal"]:
                 what = clip((v.get("result") or {}).get("msg") or v.get("detail") or "", 200)
                 eta = "—"

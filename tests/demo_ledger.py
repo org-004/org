@@ -153,8 +153,10 @@ def build(root) -> Ledger:
         milestones=[milestone("M1", "Outline from the CLI help", 8, 0.5, 290 * MIN, 6 * MIN, "done", 0.3),
                     milestone("M2", "Write and check every command", 15, 1.0, 284 * MIN, 11 * MIN, "done", 0.6),
                     milestone("M3", "Open the pull request", 5, 0.3, 273 * MIN, 3 * MIN, "done", 0.2)],
-        result={"status": "done", "msg": "README rewritten; every command in it was run and its output checked. PR gasblaster/acme-cli#41.",
-                "acceptance": [{"id": "AC%d" % i, "verdict": "pass", "evidence": "ran"} for i in (1, 2, 3)]})
+        result={"status": "done", "msg": "README rewritten; every command in it was run and its output checked.",
+                "acceptance": [{"id": "AC%d" % i, "verdict": "pass", "evidence": "ran"} for i in (1, 2, 3)],
+                "artifacts": [{"repo": "gasblaster/acme-cli", "branch": "crew/006-readme-refresh", "pr_url": "https://example.test/gasblaster/acme-cli/pull/41"},
+                              {"repo": "gasblaster/acme-docs", "branch": "crew/006-readme-refresh", "pr_url": "https://example.test/gasblaster/acme-docs/pull/7"}]})
     run(ledger, "005-payments-webhooks-r1", "Retry and dead-letter queue for payment webhooks", "partial", 26 * HOUR, orb("005-payments-webhooks-r1"),
         finished_ago=22 * HOUR, cost=38.6, cap=40.0, estimate={"wall_minutes": 150, "cost_usd": 24.0}, plan=plan, report="# Report\n\n## Outcome\n\npartial.\n",
         milestones=[milestone("M1", "Retry policy and schema", 30, 5, 26 * HOUR, 41 * MIN, "done", 7.9),

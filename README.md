@@ -46,6 +46,10 @@ What it needs:
 - For remote VMs, an entry per host in `~/.crew/config.json` (below). The host needs `python3`,
   `git`, `claude` with a working login, and key-based ssh.
 
+The first `crew talk` asks once, as Claude Code does for any new folder, whether to trust
+`~/.crew/desk`. That folder is the manager's desk and holds only what crew and the manager put
+there.
+
 ## The flow
 
 ```sh

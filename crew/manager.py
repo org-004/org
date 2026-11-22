@@ -57,7 +57,7 @@ OUTWARD_API = ["gh api * -X *", "gh api * --method *", "gh api -X *", "gh api --
 # allowed automatically and the operating system stops the writes; where the sandbox is off or not
 # available, the harness allows read-only commands only inside the working directory, and a
 # manager that has to ask before every `ls` of a checkout is no use. These are the read-only forms.
-READ_SHELL = ["ls", "cat", "head", "tail", "wc", "stat", "file", "du", "tree", "rg", "grep", "find", "jq", "which", "pwd", "date"]
+READ_SHELL = ["cd", "ls", "cat", "head", "tail", "wc", "stat", "file", "du", "tree", "rg", "grep", "find", "jq", "which", "pwd", "date"]
 GIT_READ = ["status", "log", "show", "diff", "blame", "ls-files", "ls-remote", "rev-parse", "describe", "shortlog", "grep",
             "branch --list", "branch -a", "branch -r", "branch -vv", "remote -v", "remote show", "remote get-url", "worktree list"]
 GH_READ = ["pr view", "pr list", "pr diff", "pr checks", "pr status", "issue view", "issue list", "repo view", "repo list",

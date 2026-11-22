@@ -76,6 +76,7 @@ HEADER_RE = re.compile(r"\A---\n(.*?)\n---\n?", re.S)
 SECTION_RE = re.compile(r"^##\s+(.+?)\s*$", re.M)
 AC_RE = re.compile(r"^\s*[-*]\s*(?:\[[ xX]\]\s*)?(AC\d+)\b", re.M)
 REQ_RE = re.compile(r"^\s*[-*]\s*(R\d+)\s*\((MUST|SHOULD)\)", re.M)
+PLACEHOLDER_REPO_RE = re.compile(r"^(owner|org|user|your[-_]?\w*|example|todo|tbd|xxx)/|/(name|repo|todo|tbd)$|[<>{}?]|^(todo|tbd)$", re.I)
 PLACEHOLDER_HINTS = [
     "one testable statement per line",
     "a check someone else could run",
@@ -151,6 +152,10 @@ def check(text: str, default_machine: str = "orb") -> Tuple[List[str], List[str]
     machine = str(meta.get("machine") or "")
     if machine and not re.match(r"^(orb|local|ssh:[A-Za-z0-9_.-]+)$", machine):
         errors.append("header: machine must be orb, local or ssh:<name>")
+    for repo in meta.get("repos") or []:
+        if PLACEHOLDER_REPO_RE.search(str(repo)):
+            errors.append("header: repo %s is a placeholder; an engineer would have nothing to clone. "
+                          "Put what is still unknown under Open questions until the person supplies it" % repo)
     # The engineer works on another machine. A path on this one is not a repository it can clone.
     where = machine or default_machine or "orb"
     if where != "local":

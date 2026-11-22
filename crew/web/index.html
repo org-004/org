@@ -425,7 +425,8 @@ function runCard(v) {
     + '" aria-label="Spend against ' + (v.cost_cap_usd ? "the cap" : "the plan") + '"><i style="width:' + Math.min(ratio, 1) * 100 + '%"></i></div>';
   const spendSub = [est.cost_usd != null ? "planned " + usd(est.cost_usd) : "", v.cost_cap_usd ? "cap " + usd(v.cost_cap_usd) : "",
                     live && v.forecast_cost_usd != null ? "heading for " + usd(v.forecast_cost_usd) : ""].filter(Boolean).join(" · ");
-  const share = v.weekly_pct != null ? stat("Share of the weekly limit", v.weekly_pct.toFixed(1) + "%", "this run alone") : stat("Share of the weekly limit", "—", "rate not known yet");
+  const planShare = v.estimate_weekly_pct != null ? "planned " + v.estimate_weekly_pct.toFixed(1) + "%" : "this run alone";
+  const share = v.weekly_pct != null ? stat("Share of the weekly limit", v.weekly_pct.toFixed(1) + "%", planShare) : stat("Share of the weekly limit", "—", "rate not known yet");
   let now;
   if (live) {
     const chips = (v.agents_running ? '<span class="chip">' + v.agents_running + " subagent" + (v.agents_running === 1 ? "" : "s") + "</span>" : "");
@@ -438,6 +439,12 @@ function runCard(v) {
       const pass = r.acceptance.filter(a => a.verdict === "pass").length;
       now += '<div class="now" style="border:0;padding-top:0"><span class="k">Checks</span><span class="v">' + pass + " of " + r.acceptance.length + " acceptance criteria pass"
         + (pass < r.acceptance.length ? ": " + esc(r.acceptance.filter(a => a.verdict !== "pass").map(a => a.id + " " + a.verdict).join(", ")) : "") + "</span></div>";
+    }
+    if (r.artifacts && r.artifacts.length) {      // where the work landed, one line per repository
+      now += '<div class="now" style="border:0;padding-top:0"><span class="k">Where</span><span class="v">' + r.artifacts.map(a => {
+        const pr = a.pr_url && /^https?:\/\//.test(a.pr_url) ? ' <a href="' + esc(a.pr_url) + '" target="_blank" rel="noopener noreferrer">pull request</a>' : "";
+        return esc(a.repo || "") + (a.branch ? ' <span class="chip mono">' + esc(a.branch) + "</span>" : "") + pr;
+      }).join("<br>") + "</span></div>";
     }
   }
   const warns = (v.warnings || []).map(w => '<div class="warn">' + icon("alert", "serious") + "<span>" + esc(w) + "</span></div>").join("");

@@ -27,7 +27,7 @@ An engineer cannot ask anyone anything. Every ambiguity you leave in the spec be
 - **Acceptance criteria** are checks someone else could run: `- AC1: <command> <expected observation>`. If a requirement cannot be checked, rewrite the requirement.
 - **Constraints** hold branches, compatibility, performance and security limits, and the reasoning behind the caps.
 - **Alternatives considered** records what was weighed and why it lost, so the engineer does not reopen it.
-- **Open questions** must read `None` before approval. Resolve each with the person or move it out of scope.
+- **Open questions** must read `None` before approval. Resolve each with the person or move it out of scope. Anything the person still has to supply or do before an engineer could start, such as a repository name or pushing a checkout, is an open question: list it there, which blocks approval, and never stand a placeholder in for it.
 
 Run `crew spec check <spec>` until it reports ready. It prints the draft's sha256.
 

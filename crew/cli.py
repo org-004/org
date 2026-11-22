@@ -316,6 +316,9 @@ def cmd_peek(args) -> int:
     if v["terminal"]:
         r = v.get("result") or {}
         print("result:    %s — %s" % (r.get("status"), r.get("msg")))
+        for a in r.get("artifacts") or []:
+            print("delivered: %s%s%s" % (a.get("repo") or "", ("  branch " + a["branch"]) if a.get("branch") else "",
+                                         ("  " + a["pr_url"]) if a.get("pr_url") else ""))
     else:
         print("now:       %s" % (v.get("detail") or ""))
         if v.get("activity"):

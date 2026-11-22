@@ -112,6 +112,14 @@ class SpecChecks(unittest.TestCase):
         self.assertEqual(spec.check(local_path.replace("delivery: pr", "delivery: pr\nmachine: local"))[0], [])
         self.assertEqual(spec.check(local_path, default_machine="local")[0], [])
 
+    def test_a_placeholder_repo_is_not_ready(self):
+        for name in ("OWNER/crew", "owner/name", "<org>/acme-api", "your-org/acme", "TBD"):
+            errors, _ = spec.check(GOOD.replace("repos: gasblaster/acme-web, gasblaster/acme-api", "repos: " + name))
+            self.assertTrue(any("placeholder" in e for e in errors), name)
+        for name in ("gasblaster/acme-web", "https://github.com/gasblaster/pkm.git", "git@github.com:gasblaster/pkm.git", "ownerly/repository"):
+            errors, _ = spec.check(GOOD.replace("repos: gasblaster/acme-web, gasblaster/acme-api", "repos: " + name))
+            self.assertEqual(errors, [], name)
+
     def test_effort_is_checked(self):
         self.assertEqual(spec.check(GOOD.replace("delivery: pr", "delivery: pr\neffort: xhigh"))[0], [])
         self.assertTrue(any("effort must be one of" in e for e in spec.check(GOOD.replace("delivery: pr", "delivery: pr\neffort: heroic"))[0]))
