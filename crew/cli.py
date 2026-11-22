@@ -237,38 +237,9 @@ def cmd_review(args) -> int:
 
 
 def _feed(path, start: int = 0):
-    """Yield (offset, line) for each activity line in a mirrored event log, from a byte offset."""
-    from .stream import describe_tool
+    from .stream import feed
 
-    try:
-        f = open(path, "rb")
-    except FileNotFoundError:
-        return
-    with f:
-        f.seek(start)
-        while True:
-            raw = f.readline()
-            if not raw or not raw.endswith(b"\n"):
-                return
-            try:
-                ev = json.loads(raw)
-            except ValueError:
-                continue
-            kind, text = ev.get("type"), None
-            sub = "  ↳ " if ev.get("parent_tool_use_id") else "  "
-            if kind == "assistant":
-                for block in (ev.get("message") or {}).get("content") or []:
-                    if block.get("type") == "tool_use":
-                        text = describe_tool(block.get("name") or "tool", block.get("input"))
-                    elif block.get("type") == "text" and (block.get("text") or "").strip():
-                        text = clip(block["text"], 240)
-                    if text:
-                        yield f.tell(), sub + text
-                        text = None
-            elif kind == "system" and ev.get("subtype") == "task_started":
-                yield f.tell(), "  + subagent: %s" % clip(ev.get("description") or "", 120)
-            elif kind == "result":
-                yield f.tell(), "— turn ended: %s, %s" % (ev.get("subtype"), fmt_usd(ev.get("total_cost_usd")))
+    return feed(path, start)
 
 
 def cmd_logs(args) -> int:

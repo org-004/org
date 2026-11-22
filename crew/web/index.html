@@ -1,0 +1,604 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>crew</title>
+<style>
+/* Palette: neutral chrome, one blue ramp, and four reserved status colors.
+
+   Progress is drawn in the blue ramp alone (not started, running, done), so it reads without
+   hue: the steps were checked as an ordinal ramp in both themes. Status colors never carry
+   meaning by themselves: every state has its own icon shape and a label in ink, and a milestone
+   that ended partial or blocked is also named beside its bar. Green is deliberately absent from
+   the bar; next to the red of a blocked segment it is lost to red-green colour blindness. */
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --hair: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10); --wash: rgba(11,11,11,0.04);
+  --accent: #2a78d6; --accent-mid: #86b6ef; --accent-track: #cde2fb;
+  --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  --shadow: 0 1px 2px rgba(11,11,11,0.04);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --hair: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10); --wash: rgba(255,255,255,0.05);
+    --accent: #3987e5; --accent-mid: #1c5cab; --accent-track: #0d366b;
+    --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+  --hair: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10); --wash: rgba(255,255,255,0.05);
+  --accent: #3987e5; --accent-mid: #1c5cab; --accent-track: #0d366b;
+  --shadow: none;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+code, pre, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; }
+button { font: inherit; color: inherit; }
+a { color: var(--accent); }
+.shell { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 24px; max-width: 1480px; margin: 0 auto; padding: 20px 24px 40px; align-items: start; }
+@media (max-width: 1080px) { .shell { grid-template-columns: minmax(0, 1fr); } .chat { position: static !important; height: 560px !important; } }
+header.top { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 12px; }
+header.top h1 { font-size: 18px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+header.top .where { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+header.top .right { margin-left: auto; display: flex; gap: 12px; align-items: center; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.ghost { background: none; border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; cursor: pointer; color: var(--ink-2); font-size: 12px; }
+.ghost:hover { background: var(--wash); color: var(--ink); }
+.ghost.danger:hover { border-color: var(--critical); }
+main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; min-width: 0; }
+.stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.scroll-x { overflow-x: auto; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; box-shadow: var(--shadow); min-width: 0; }
+h2 { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin: 8px 2px 0; }
+.banner { grid-column: 1 / -1; border: 1px solid var(--border); border-left: 3px solid var(--serious); background: var(--surface); border-radius: 8px; padding: 10px 14px; display: none; }
+.banner.show { display: block; }
+
+/* lead: the one headline number, and its meter */
+.lead { display: grid; gap: 10px; }
+.lead .row { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.hero { font-size: 48px; font-weight: 650; line-height: 1; letter-spacing: -0.02em; }
+.lead .what { font-size: 15px; color: var(--ink-2); }
+.lead .reset { margin-left: auto; color: var(--ink-2); }
+.meter { height: 8px; border-radius: 999px; background: var(--accent-track); overflow: hidden; }
+.meter > i { display: block; height: 100%; border-radius: 999px; background: var(--accent); min-width: 2px; }
+.meter.warning { background: color-mix(in oklab, var(--warning) 26%, var(--surface)); } .meter.warning > i { background: var(--warning); }
+.meter.critical { background: color-mix(in oklab, var(--critical) 24%, var(--surface)); } .meter.critical > i { background: var(--critical); }
+.meter.thin { height: 4px; margin-top: 6px; }
+.lead .note { color: var(--muted); font-size: 12.5px; }
+
+.kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 720px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.kpi { padding: 12px 14px; }
+.kpi .label, .stat .label { color: var(--muted); font-size: 12px; }
+.kpi .value { font-size: 24px; font-weight: 600; line-height: 1.2; }
+.kpi .sub, .stat .sub { color: var(--ink-2); font-size: 12px; min-height: 17px; }
+
+/* a run */
+.run { display: grid; gap: 12px; }
+.run .head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.run .title { font-size: 15px; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.run .id { color: var(--muted); }
+.run .machine { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.badge { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px 2px 7px; border-radius: 999px; border: 1px solid var(--border); font-size: 12.5px; font-weight: 550; color: var(--ink); white-space: nowrap; background: var(--surface); }
+.badge svg { width: 14px; height: 14px; flex: none; }
+.r-accent { color: var(--accent); } .r-good { color: var(--good); } .r-warning { color: var(--warning); }
+.r-serious { color: var(--serious); } .r-critical { color: var(--critical); } .r-muted { color: var(--muted); }
+.segrow { display: flex; align-items: center; gap: 12px; }
+.seg { flex: 1; display: flex; gap: 2px; height: 8px; border-radius: 999px; overflow: hidden; min-width: 80px; }
+.seg > i { display: block; height: 100%; background: var(--accent-track); min-width: 6px; outline-offset: 2px; }
+.seg > i.done { background: var(--accent); } .seg > i.current { background: var(--accent-mid); }
+.seg > i.partial { background: var(--warning); } .seg > i.blocked { background: var(--critical); }
+.segrow .count { color: var(--ink-2); font-size: 12.5px; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px;
+  flex: 0 0 auto; min-width: 250px; justify-content: flex-end; }   /* a fixed column, so the bars of every run line up */
+@media (max-width: 720px) { .segrow { flex-wrap: wrap; } .segrow .seg { flex-basis: 100%; } .segrow .count { min-width: 0; justify-content: flex-start; white-space: normal; } }
+.segrow .count svg { width: 13px; height: 13px; }
+.lead .note svg { width: 13px; height: 13px; vertical-align: -2px; margin-right: 4px; }
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 720px) { .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.stat .value { font-size: 19px; font-weight: 600; line-height: 1.25; }
+.now { display: flex; gap: 10px; align-items: baseline; border-top: 1px solid var(--hair); padding-top: 10px; min-width: 0; }
+.now .k { color: var(--muted); font-size: 12px; flex: none; width: 44px; }
+.now .v { min-width: 0; overflow-wrap: anywhere; }
+.now .ago { color: var(--muted); font-size: 12px; white-space: nowrap; margin-left: auto; padding-left: 8px; }
+.chip { display: inline-block; border: 1px solid var(--border); border-radius: 999px; padding: 0 7px; font-size: 11.5px; color: var(--ink-2); margin-right: 6px; }
+.warn { display: flex; gap: 8px; align-items: flex-start; color: var(--ink-2); font-size: 13px; }
+.warn svg { width: 14px; height: 14px; flex: none; margin-top: 3px; }
+.actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.actions .spacer { flex: 1; }
+details.ms > summary { cursor: pointer; color: var(--ink-2); font-size: 12.5px; list-style-position: inside; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--hair); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ms table { margin-top: 8px; }
+.mstate { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+.mstate svg { width: 13px; height: 13px; }
+.empty { color: var(--ink-2); padding: 6px 0; }
+.drafts td:last-child { text-align: right; }
+
+/* chat */
+.chat { position: sticky; top: 16px; height: calc(100vh - 32px); display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+.chat .hd { padding: 14px 16px 10px; border-bottom: 1px solid var(--hair); }
+.chat .hd b { font-size: 14px; }
+.chat .hd p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.msgs { flex: 1; overflow-y: auto; padding: 14px 16px; display: grid; gap: 14px; align-content: start; }
+.msg .who { font-size: 11.5px; color: var(--muted); margin-bottom: 2px; }
+.msg.you .body { background: var(--wash); border-radius: 8px; padding: 7px 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg .err { color: var(--ink-2); border-left: 3px solid var(--critical); padding-left: 8px; }
+.composer { border-top: 1px solid var(--hair); padding: 10px 12px; display: flex; gap: 8px; align-items: flex-end; }
+.composer textarea { flex: 1; resize: none; min-height: 38px; max-height: 140px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--page); color: var(--ink); font: inherit; }
+.composer textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.primary { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer; font-weight: 600; }
+.primary:disabled { opacity: 0.5; cursor: default; }
+
+/* rendered markdown */
+.md { overflow-wrap: anywhere; }
+.md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }
+.md h1, .md h2, .md h3, .md h4 { margin: 16px 0 6px; line-height: 1.3; text-transform: none; letter-spacing: 0; color: var(--ink); }
+.md h1 { font-size: 18px; } .md h2 { font-size: 15.5px; } .md h3 { font-size: 14px; } .md h4 { font-size: 13px; color: var(--ink-2); }
+.md p { margin: 6px 0; } .md ul, .md ol { margin: 6px 0; padding-left: 20px; } .md li { margin: 2px 0; }
+.md pre { background: var(--wash); border-radius: 8px; padding: 10px 12px; overflow-x: auto; line-height: 1.5; }
+.md code { background: var(--wash); border-radius: 4px; padding: 0 4px; } .md pre code { background: none; padding: 0; }
+.md blockquote { margin: 6px 0; padding-left: 10px; border-left: 3px solid var(--hair); color: var(--ink-2); }
+.md .tw { overflow-x: auto; } .md table { width: auto; } .md th, .md td { padding-right: 16px; }
+.md table.kv th { color: var(--muted); font-weight: 500; padding-right: 18px; white-space: nowrap; }
+.md hr { border: 0; border-top: 1px solid var(--hair); margin: 12px 0; }
+
+/* drawer */
+.scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.32); display: none; z-index: 20; }
+.scrim.show { display: block; }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(780px, 100vw); background: var(--surface); border-left: 1px solid var(--border); display: none; flex-direction: column; z-index: 21; }
+.drawer.show { display: flex; }
+.drawer .hd { display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--hair); }
+.drawer .hd b { font-size: 15px; } .drawer .hd .sub { color: var(--muted); font-size: 12px; }
+.drawer .hd .x { margin-left: auto; }
+.drawer .bd { padding: 16px 20px 32px; overflow-y: auto; }
+.approve { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; display: grid; gap: 8px; }
+.approve ul { margin: 0; padding-left: 18px; color: var(--ink-2); font-size: 13px; }
+.tip { position: fixed; z-index: 30; background: var(--ink); color: var(--surface); font-size: 12px; padding: 5px 8px; border-radius: 6px; pointer-events: none; display: none; max-width: 320px; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="top">
+    <h1>crew</h1><span class="where" id="where"></span>
+    <span class="right"><span id="updated">connecting…</span><button class="ghost" id="theme" title="Switch between light, dark and the system setting">theme: auto</button></span>
+  </header>
+  <div class="banner" id="banner"></div>
+  <main>
+    <section class="card lead" id="lead" aria-label="Weekly limit"></section>
+    <section class="kpis" id="kpis" aria-label="Summary"></section>
+    <h2>Runs</h2>
+    <div id="runs" class="stack"></div>
+    <div id="draftsWrap" style="display:none"><h2 style="margin-bottom:8px">Drafts awaiting approval</h2><section class="card drafts scroll-x" id="drafts"></section></div>
+  </main>
+  <aside class="card chat" aria-label="Ask the manager">
+    <div class="hd"><b>Ask the manager</b><p>Read-only. Answers come from the ledger and the engineers' machines; no engineer is interrupted.</p></div>
+    <div class="msgs" id="msgs" aria-live="polite"></div>
+    <form class="composer" id="composer">
+      <textarea id="q" rows="1" placeholder="What is the export run doing?" aria-label="Question for the manager"></textarea>
+      <button class="primary" id="send" type="submit">Ask</button>
+    </form>
+  </aside>
+</div>
+<div class="scrim" id="scrim"></div>
+<div class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
+  <div class="hd"><div><b id="drawerTitle"></b><div class="sub" id="drawerSub"></div></div><button class="ghost x" id="drawerClose">Close</button></div>
+  <div class="bd" id="drawerBody"></div>
+</div>
+<div class="tip" id="tip" role="tooltip"></div>
+
+<script>
+"use strict";
+// ---------------------------------------------------------------- small helpers
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+function dur(s) {
+  if (s == null) return "—";
+  s = Math.max(0, Math.floor(s));
+  if (s < 60) return s + "s";
+  let m = Math.floor(s / 60); s %= 60;
+  if (m < 60) return m >= 10 ? m + "m" : m + "m" + String(s).padStart(2, "0") + "s";
+  let h = Math.floor(m / 60); m %= 60;
+  if (h < 24) return h + "h" + String(m).padStart(2, "0") + "m";
+  return Math.floor(h / 24) + "d" + (h % 24) + "h";
+}
+function usd(x) { return x == null ? "—" : "$" + (x < 100 ? x.toFixed(2) : Math.round(x).toLocaleString()); }
+function clock(ts) {
+  if (!ts) return "—";
+  const d = new Date(ts * 1000), n = new Date();
+  const hm = d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", hour12: false});
+  if (d.toDateString() === n.toDateString()) return hm;
+  if (Math.abs(d - n) < 6 * 86400e3) return d.toLocaleDateString([], {weekday: "short"}) + " " + hm;
+  return d.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + hm;
+}
+const nowS = () => Date.now() / 1000;
+function rel(ts) { if (!ts) return ""; const d = ts - nowS(); return d >= 0 ? "in " + dur(d) : dur(-d) + " ago"; }
+
+// ---------------------------------------------------------------- icons: one shape per meaning
+const ICON = {
+  dot: '<circle cx="7" cy="7" r="5" fill="currentColor"/>',
+  check: '<circle cx="7" cy="7" r="6.5" fill="currentColor"/><path d="M4 7.2l2.1 2.1L10 5.2" fill="none" stroke="var(--surface)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>',
+  cross: '<circle cx="7" cy="7" r="6.5" fill="currentColor"/><path d="M4.7 4.7l4.6 4.6M9.3 4.7l-4.6 4.6" fill="none" stroke="var(--surface)" stroke-width="1.7" stroke-linecap="round"/>',
+  half: '<circle cx="7" cy="7" r="5.6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7 1.4a5.6 5.6 0 000 11.2z" fill="currentColor"/>',
+  pause: '<rect x="3" y="2.5" width="3" height="9" rx="1" fill="currentColor"/><rect x="8" y="2.5" width="3" height="9" rx="1" fill="currentColor"/>',
+  square: '<rect x="2.5" y="2.5" width="9" height="9" rx="2" fill="currentColor"/>',
+  alert: '<path d="M7 1.2l6.2 11.3H.8z" fill="currentColor"/><path d="M7 5.4v3.3" stroke="var(--surface)" stroke-width="1.6" stroke-linecap="round"/><circle cx="7" cy="10.6" r=".9" fill="var(--surface)"/>',
+  ring: '<circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.8"/>',
+};
+const icon = (name, role) => '<svg viewBox="0 0 14 14" class="r-' + role + '" aria-hidden="true">' + ICON[name] + "</svg>";
+const STATE = {
+  provisioning: ["accent", "dot", "Provisioning"], dispatched: ["accent", "dot", "Starting"],
+  planning: ["accent", "dot", "Planning"], executing: ["accent", "dot", "Executing"], reporting: ["accent", "dot", "Reporting"],
+  waiting: ["warning", "pause", "Waiting for the limit"],
+  done: ["good", "check", "Done"], partial: ["warning", "half", "Partial"],
+  failed: ["critical", "cross", "Failed"], dispatch_failed: ["critical", "cross", "Dispatch failed"],
+  stopped: ["muted", "square", "Stopped"],
+};
+const HEALTH = {unreachable: "machine unreachable", stalled: "no heartbeat", dead: "runner died"};
+const MSTATE = {done: ["good", "check", "done"], partial: ["warning", "half", "partial"], blocked: ["critical", "cross", "blocked"],
+                current: ["accent", "dot", "running"], pending: ["muted", "ring", "not started"]};
+function badge(v) {
+  const s = STATE[v.state] || ["muted", "ring", v.state];
+  let out = '<span class="badge">' + icon(s[1], s[0]) + esc(s[2]) + "</span>";
+  if (HEALTH[v.health]) out += ' <span class="badge">' + icon("alert", "serious") + esc(HEALTH[v.health]) + "</span>";
+  return out;
+}
+
+// ---------------------------------------------------------------- markdown, small and safe
+function inline(s) {
+  s = esc(s);
+  const codes = [];
+  s = s.replace(/`([^`]+)`/g, (m, c) => { codes.push(c); return "\u0001" + (codes.length - 1) + "\u0001"; });
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[^*\w])\*([^*\s][^*]*)\*(?!\w)/g, "$1<em>$2</em>");
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  s = s.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
+  return s.replace(/\u0001(\d+)\u0001/g, (m, i) => "<code>" + codes[+i] + "</code>");
+}
+function md(src) {
+  const lines = String(src || "").replace(/\r\n/g, "\n").split("\n");
+  const out = [];
+  let i = 0;
+  if (lines[0] === "---") {                       // a spec's header: show it as a small table
+    let j = 1; const rows = [];
+    while (j < lines.length && lines[j] !== "---") { const k = lines[j].indexOf(":"); if (k > 0) rows.push([lines[j].slice(0, k).trim(), lines[j].slice(k + 1).trim()]); j++; }
+    if (j < lines.length) {
+      out.push('<table class="kv">' + rows.filter(r => r[1]).map(r => "<tr><th>" + esc(r[0]) + "</th><td>" + esc(r[1]) + "</td></tr>").join("") + "</table>");
+      i = j + 1;
+    }
+  }
+  const isBlock = l => /^(#{1,6}\s|```|\s*([-*]|\d+\.)\s|>|\s*$)/.test(l);
+  const cells = l => l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(c => c.trim());
+  while (i < lines.length) {
+    const line = lines[i];
+    let m;
+    if (/^```/.test(line)) {
+      const buf = []; i++;
+      while (i < lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]);
+      i++; out.push("<pre><code>" + esc(buf.join("\n")) + "</code></pre>"); continue;
+    }
+    if (/^\s*$/.test(line)) { i++; continue; }
+    if ((m = /^(#{1,6})\s+(.*)$/.exec(line))) { const n = Math.min(m[1].length, 4); out.push("<h" + n + ">" + inline(m[2]) + "</h" + n + ">"); i++; continue; }
+    if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) { out.push("<hr>"); i++; continue; }
+    if (line.includes("|") && i + 1 < lines.length && /^\s*\|?[\s:|-]*-{2,}[\s:|-]*$/.test(lines[i + 1])) {
+      const head = cells(line); i += 2; const body = [];
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim()) body.push(cells(lines[i++]));
+      out.push('<div class="tw"><table><thead><tr>' + head.map(c => "<th>" + inline(c) + "</th>").join("") + "</tr></thead><tbody>"
+        + body.map(r => "<tr>" + r.map(c => "<td>" + inline(c) + "</td>").join("") + "</tr>").join("") + "</tbody></table></div>");
+      continue;
+    }
+    if ((m = /^(\s*)([-*]|\d+\.)\s+(.*)$/.exec(line))) {
+      const ordered = /\d/.test(m[2]); const items = [];
+      while (i < lines.length) {
+        const mm = /^(\s*)([-*]|\d+\.)\s+(.*)$/.exec(lines[i]);
+        if (mm) { items.push([Math.floor(mm[1].length / 2), mm[3]]); i++; }
+        else if (/^\s{2,}\S/.test(lines[i]) && items.length) { items[items.length - 1][1] += " " + lines[i].trim(); i++; }
+        else break;
+      }
+      const tag = ordered ? "ol" : "ul";
+      out.push("<" + tag + ">" + items.map(([depth, text]) => {
+        const t = text.replace(/^\[ \]\s*/, "☐ ").replace(/^\[[xX]\]\s*/, "☑ ");
+        return "<li" + (depth ? ' style="margin-left:' + depth * 18 + 'px"' : "") + ">" + inline(t) + "</li>";
+      }).join("") + "</" + tag + ">");
+      continue;
+    }
+    if (/^>/.test(line)) {
+      const buf = [];
+      while (i < lines.length && /^>/.test(lines[i])) buf.push(lines[i++].replace(/^>\s?/, ""));
+      out.push("<blockquote>" + inline(buf.join(" ")) + "</blockquote>"); continue;
+    }
+    const buf = [line]; i++;
+    while (i < lines.length && !isBlock(lines[i])) buf.push(lines[i++]);
+    out.push("<p>" + inline(buf.join(" ")) + "</p>");
+  }
+  return out.join("\n");
+}
+
+// ---------------------------------------------------------------- talking to the server
+const tokenFromHash = (location.hash.match(/[#&]t=([^&]+)/) || [])[1];
+const themeFromHash = (location.hash.match(/[#&]theme=(light|dark|auto)/) || [])[1];
+if (themeFromHash) { try { localStorage.setItem("crew-theme", themeFromHash); } catch (e) {} }
+if (tokenFromHash) { try { localStorage.setItem("crew-token", tokenFromHash); } catch (e) {} history.replaceState(null, "", location.pathname); }
+let TOKEN = tokenFromHash; if (!TOKEN) { try { TOKEN = localStorage.getItem("crew-token"); } catch (e) {} }
+async function api(path, body) {
+  const opts = {headers: {"X-Crew-Token": TOKEN || ""}};
+  if (body !== undefined) { opts.method = "POST"; opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(data.error || ("HTTP " + r.status)), {status: r.status});
+  return data;
+}
+function banner(text) { const b = $("banner"); b.textContent = text || ""; b.classList.toggle("show", !!text); }
+
+// ---------------------------------------------------------------- rendering
+let state = null, fetchedAt = 0;
+const open = new Set();        // run ids whose milestone table is open
+const last = {};               // last rendered HTML per slot, so unchanged parts are left alone
+function put(id, html) { if (last[id] !== html) { last[id] = html; $(id).innerHTML = html; } }
+
+function renderLead(b) {
+  const w = b.weekly, rate = b.usd_per_pct || {};
+  let hero = "—", what = "weekly limit: no reading yet", reset = "", pct = 0, cls = "";
+  if (w && !w.stale && w.utilization != null) {
+    pct = Math.round(w.utilization * 100);
+    hero = pct + "%"; what = "of the weekly limit used";
+    reset = "resets " + clock(w.resets_at) + " · " + rel(w.resets_at);
+    cls = pct >= 90 ? "critical" : pct >= 75 ? "warning" : "";
+  } else if (w && w.stale) { what = "the weekly limit reset " + clock(w.resets_at) + "; no reading since"; }
+  else { what = "the first engineer turn reports the weekly limit"; }
+  const notes = [];
+  if (rate.value) notes.push("1% is about " + usd(rate.value) + " of work (" + (rate.source === "config" ? "set in config" : "learned from " + rate.runs + " run" + (rate.runs === 1 ? "" : "s")) + ")");
+  else notes.push("dollars per 1% not known yet: it is learned as runs finish");
+  if (b.crew_spend_this_window_usd != null) notes.push("crew has spent " + usd(b.crew_spend_this_window_usd) + " this window" + (b.crew_pct_this_window != null ? " (" + b.crew_pct_this_window.toFixed(1) + "%)" : ""));
+  if (w && w.at) notes.push("read " + rel(w.at));
+  const alarm = cls === "critical" ? icon("alert", "critical") + "Nearly exhausted: engineers will pause at the limit and resume after the reset. "
+    : cls === "warning" ? icon("alert", "warning") + "Getting close to the limit. " : "";
+  put("lead", '<div class="row"><span class="hero">' + hero + '</span><span class="what">' + esc(what) + '</span><span class="reset">' + esc(reset) + "</span></div>"
+    + '<div class="meter ' + cls + '" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '" aria-label="Weekly limit used"><i style="width:' + pct + '%"></i></div>'
+    + '<div class="note">' + alarm + esc(notes.join(" · ")) + "</div>");
+}
+
+function renderKpis(s) {
+  const live = s.runs.filter(v => !v.terminal), fin = s.runs.filter(v => v.terminal);
+  const n = st => fin.filter(v => v.state === st).length;
+  const sick = live.filter(v => v.health !== "ok").length;
+  const ready = s.drafts.filter(d => !d.errors.length).length;
+  const tile = (label, value, sub) => '<div class="card kpi"><div class="label">' + label + '</div><div class="value">' + value + '</div><div class="sub">' + esc(sub || "") + "</div></div>";
+  const parts = [["done", n("done")], ["partial", n("partial")], ["failed", n("failed") + n("dispatch_failed")], ["stopped", n("stopped")]].filter(p => p[1]).map(p => p[1] + " " + p[0]);
+  put("kpis", tile("Engineers working", live.length, sick ? sick + (sick === 1 ? " needs" : " need") + " attention" : (live.length ? "on " + new Set(live.map(v => v.machine.name)).size + " machine(s)" : "none in flight"))
+    + tile("Drafts awaiting approval", s.drafts.length, s.drafts.length ? ready + " ready, " + (s.drafts.length - ready) + " failing checks" : "")
+    + tile("Finished runs", fin.length, parts.join(" · "))
+    + tile("Spent by crew this window", usd(s.budget.crew_spend_this_window_usd), s.budget.crew_pct_this_window != null ? s.budget.crew_pct_this_window.toFixed(1) + "% of the weekly limit" : ""));
+}
+
+function milestoneState(m) { return m.outcome || (m.started_at ? "current" : "pending"); }
+function segments(v) {
+  const ms = (v.progress && v.progress.milestones) || [];
+  if (!ms.length) {
+    const txt = v.terminal ? "no milestones were run" : "milestones appear when the plan is frozen";
+    return '<div class="segrow"><div class="seg" role="img" aria-label="' + esc(txt) + '"><i style="flex:1"></i></div><span class="count">' + esc(txt) + "</span></div>";
+  }
+  const segs = ms.map(m => {
+    const st = milestoneState(m), label = MSTATE[st][2];
+    const took = m.ended_at ? dur(m.ended_at - m.started_at) : m.started_at ? dur(nowS() - m.started_at) + " so far" : "";
+    const tip = m.id + " " + m.title + " — " + label + (took ? ", " + took : "") + " (planned " + dur((m.est_minutes || 0) * 60) + ", " + usd(m.est_cost_usd) + ")";
+    return '<i class="' + st + '" style="flex:' + Math.max(m.est_minutes || 1, 0.5) + '" tabindex="0" data-tip="' + esc(tip) + '" aria-label="' + esc(tip) + '"></i>';
+  }).join("");
+  // A milestone that did not end cleanly is named here, with its icon: never by colour alone.
+  const flagged = ms.filter(m => m.outcome === "partial" || m.outcome === "blocked")
+    .map(m => icon(MSTATE[m.outcome][1], MSTATE[m.outcome][0]) + esc(m.id + " " + m.outcome)).join(" ");
+  return '<div class="segrow"><div class="seg" role="group" aria-label="Milestones, sized by planned time">' + segs + '</div><span class="count">'
+    + v.progress.done + " of " + v.progress.total + " milestones" + (flagged ? " · " + flagged : "") + "</span></div>";
+}
+function milestoneTable(v) {
+  const ms = (v.progress && v.progress.milestones) || [];
+  if (!ms.length) return "";
+  const rows = ms.map(m => {
+    const st = milestoneState(m), d = MSTATE[st];
+    const took = m.ended_at ? dur(m.ended_at - m.started_at) : m.started_at ? dur(nowS() - m.started_at) : "—";
+    return "<tr><td class='mono'>" + esc(m.id) + "</td><td>" + esc(m.title) + '</td><td><span class="mstate">' + icon(d[1], d[0]) + d[2] + "</span></td>"
+      + '<td class="num">' + dur((m.est_minutes || 0) * 60) + '</td><td class="num">' + took + '</td><td class="num">' + usd(m.est_cost_usd) + '</td><td class="num">' + usd(m.cost_usd) + "</td></tr>";
+  }).join("");
+  return '<details class="ms" data-run="' + esc(v.run_id) + '"' + (open.has(v.run_id) ? " open" : "") + "><summary>Milestones as a table</summary><div class='scroll-x'><table><thead><tr><th></th><th>Milestone</th><th>State</th>"
+    + '<th class="num">Planned</th><th class="num">Took</th><th class="num">Planned $</th><th class="num">Spent</th></tr></thead><tbody>' + rows + "</tbody></table></div></details>";
+}
+function stat(label, value, sub, extra) { return '<div class="stat"><div class="label">' + label + '</div><div class="value">' + value + '</div><div class="sub">' + esc(sub || "") + "</div>" + (extra || "") + "</div>"; }
+function runCard(v) {
+  const est = v.estimate || {}, live = !v.terminal;
+  const elapsed = live && v.health === "ok" && v.elapsed_s != null ? v.elapsed_s + (nowS() - fetchedAt) : v.elapsed_s;
+  let when;
+  if (live) {
+    if (v.state === "waiting" && v.waiting_until) when = stat("Resumes", clock(v.waiting_until), rel(v.waiting_until) + " · usage limit");
+    else when = stat("Estimated finish", v.eta_at ? clock(v.eta_at) : "—", v.eta_at ? rel(v.eta_at) + " · from " + (v.forecast_basis || "the plan") : (v.phase === "planning" ? "known once the plan is frozen" : ""));
+  } else when = stat("Finished", clock(v.finished_at), est.wall_minutes ? "planned " + dur(est.wall_minutes * 60) + " after planning" : "");
+  // spend against the tighter of the plan and the cap; the fill carries severity
+  const ref = v.cost_cap_usd || est.cost_usd, ratio = ref && v.cost_usd != null ? v.cost_usd / ref : null;
+  const sev = ratio == null ? "" : (v.cost_cap_usd ? (ratio >= 0.9 ? "critical" : ratio >= 0.7 ? "warning" : "") : (ratio > 1.5 ? "critical" : ratio > 1 ? "warning" : ""));
+  const meter = ratio == null ? "" : '<div class="meter thin ' + sev + '" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + Math.round(Math.min(ratio, 1) * 100)
+    + '" aria-label="Spend against ' + (v.cost_cap_usd ? "the cap" : "the plan") + '"><i style="width:' + Math.min(ratio, 1) * 100 + '%"></i></div>';
+  const spendSub = [est.cost_usd != null ? "planned " + usd(est.cost_usd) : "", v.cost_cap_usd ? "cap " + usd(v.cost_cap_usd) : "",
+                    live && v.forecast_cost_usd != null ? "heading for " + usd(v.forecast_cost_usd) : ""].filter(Boolean).join(" · ");
+  const share = v.weekly_pct != null ? stat("Share of the weekly limit", v.weekly_pct.toFixed(1) + "%", "this run alone") : stat("Share of the weekly limit", "—", "rate not known yet");
+  let now;
+  if (live) {
+    const chips = (v.agents_running ? '<span class="chip">' + v.agents_running + " subagent" + (v.agents_running === 1 ? "" : "s") + "</span>" : "");
+    now = '<div class="now"><span class="k">Now</span><span class="v">' + chips + esc(v.activity || v.detail || "starting") + '</span><span class="ago">' + (v.activity_at ? rel(v.activity_at) : "") + "</span></div>"
+      + (v.detail && v.activity ? '<div class="now" style="border:0;padding-top:0"><span class="k">Phase</span><span class="v">' + esc(v.detail) + "</span></div>" : "");
+  } else {
+    const r = v.result || {};
+    now = '<div class="now"><span class="k">Result</span><span class="v">' + esc(r.msg || v.detail || "") + "</span></div>";
+    if (r.acceptance && r.acceptance.length) {
+      const pass = r.acceptance.filter(a => a.verdict === "pass").length;
+      now += '<div class="now" style="border:0;padding-top:0"><span class="k">Checks</span><span class="v">' + pass + " of " + r.acceptance.length + " acceptance criteria pass"
+        + (pass < r.acceptance.length ? ": " + esc(r.acceptance.filter(a => a.verdict !== "pass").map(a => a.id + " " + a.verdict).join(", ")) : "") + "</span></div>";
+    }
+  }
+  const warns = (v.warnings || []).map(w => '<div class="warn">' + icon("alert", "serious") + "<span>" + esc(w) + "</span></div>").join("");
+  const btn = (name, label) => '<button class="ghost" data-doc="' + name + '" data-run="' + esc(v.run_id) + '">' + label + "</button>";
+  const actions = btn("spec", "Spec") + (v.has_plan ? btn("plan", "Plan") : "") + (v.has_report ? btn("report", "Report") + btn("review", "Plan vs outcome") : "") + btn("activity", "Activity")
+    + '<span class="spacer"></span>' + (live ? '<button class="ghost danger" data-stop="' + esc(v.run_id) + '">Stop</button>' : "");
+  return '<section class="card run"><div class="head">' + badge(v) + '<span class="title">' + esc(v.title || v.run_id) + '</span><span class="id mono">' + esc(v.run_id) + "</span>"
+    + '<span class="machine">' + esc((v.machine.kind || "") + " · " + (v.machine.name || "") + (v.machine.removed ? " (deleted)" : "")) + (v.model ? " · " + esc(v.model) : "") + "</span></div>"
+    + segments(v)
+    + '<div class="stats">' + stat("Elapsed", dur(elapsed), "started " + clock(v.started_at)) + when + stat("Spend", usd(v.cost_usd), spendSub, meter) + share + "</div>"
+    + now + warns + milestoneTable(v) + '<div class="actions">' + actions + "</div></section>";
+}
+function renderRuns(s) {
+  const host = $("runs");
+  if (!s.runs.length) { put("runs", '<section class="card empty">No runs yet. <code>crew talk</code> starts a conversation with the manager; approving a spec dispatches an engineer.</section>'); return; }
+  if (last.runs) { last.runs = null; host.innerHTML = ""; }
+  const want = s.runs.map(v => v.run_id);
+  [...host.children].forEach(el => { if (!want.includes(el.dataset.id)) el.remove(); });
+  s.runs.forEach((v, i) => {
+    let el = [...host.children].find(c => c.dataset.id === v.run_id);
+    if (!el) { el = document.createElement("div"); el.dataset.id = v.run_id; host.appendChild(el); }
+    if (host.children[i] !== el) host.insertBefore(el, host.children[i]);
+    const html = runCard(v);
+    if (el._html !== html && !el.contains(document.activeElement)) { el._html = html; el.innerHTML = html; }
+  });
+}
+function renderDrafts(s) {
+  $("draftsWrap").style.display = s.drafts.length ? "" : "none";
+  put("drafts", '<table><thead><tr><th>Spec</th><th>Title</th><th>Checks</th><th>sha256</th><th></th></tr></thead><tbody>' + s.drafts.map(d =>
+    "<tr><td class='mono'>" + esc(d.id) + "</td><td>" + esc(d.title || "") + (d.state === "revised" ? ' <span class="chip">revision of an approved spec</span>' : "") + "</td>"
+    + '<td><span class="mstate">' + (d.errors.length ? icon("alert", "serious") + d.errors.length + " failing" : icon("check", "good") + "ready to approve") + "</span></td>"
+    + "<td class='mono'>" + esc((d.sha || "").slice(0, 12)) + '</td><td><button class="ghost" data-draft="' + esc(d.id) + '">Review</button></td></tr>').join("") + "</tbody></table>");
+}
+function render() {
+  if (!state) return;
+  $("where").textContent = state.home;
+  renderLead(state.budget); renderKpis(state); renderRuns(state); renderDrafts(state);
+  const sync = state.synced_at ? "machines read " + rel(state.synced_at) : "reading machines…";
+  $("updated").textContent = sync + (state.sync_error ? " · sync error" : "");
+}
+async function load() {
+  if (!TOKEN) { banner("This page needs the access token. Open the full link that `crew dash` printed."); return; }
+  try { state = await api("/api/state"); fetchedAt = nowS(); banner(""); render(); }
+  catch (e) { banner(e.status === 401 ? "The access token was not accepted. Open the full link that `crew dash` printed." : "The dashboard server is not answering (" + e.message + "). Engineers are unaffected; restart `crew dash`."); }
+}
+
+// ---------------------------------------------------------------- drawer: documents and approval
+function showDrawer(title, sub, html) {
+  $("drawerTitle").textContent = title; $("drawerSub").textContent = sub || ""; $("drawerBody").innerHTML = html;
+  $("drawer").classList.add("show"); $("scrim").classList.add("show"); $("drawerClose").focus();
+}
+function hideDrawer() { $("drawer").classList.remove("show"); $("scrim").classList.remove("show"); }
+async function openDoc(run, name) {
+  showDrawer("Loading…", run, "");
+  try { const d = await api("/api/doc?run=" + encodeURIComponent(run) + "&name=" + encodeURIComponent(name)); showDrawer(d.title, run, '<div class="md">' + md(d.markdown) + "</div>"); }
+  catch (e) { showDrawer("Could not load", run, "<p>" + esc(e.message) + "</p>"); }
+}
+async function openDraft(id) {
+  showDrawer("Loading…", id, "");
+  try {
+    const d = await api("/api/draft?spec=" + encodeURIComponent(id));
+    const sha12 = d.sha.slice(0, 12);
+    const checks = d.errors.map(e => "<li>" + esc(e) + "</li>").join("");
+    const warns = d.warnings.map(w => "<li>" + esc(w) + "</li>").join("");
+    const box = '<div class="approve"><div><b>' + (d.errors.length ? "Not ready to approve" : "Ready to approve") + '</b> <span class="mono" style="color:var(--muted)">sha256 ' + esc(sha12) + "</span></div>"
+      + (checks ? "<div>Failing checks</div><ul>" + checks + "</ul>" : "") + (warns ? "<div>Worth a look</div><ul>" + warns + "</ul>" : "")
+      + '<div style="color:var(--ink-2);font-size:13px">Approving freezes exactly this text and dispatches an engineer, which spends from the weekly limit. To change the draft, talk to the manager (<code>crew talk</code>).</div>'
+      + '<div><button class="primary" id="approveBtn"' + (d.errors.length ? " disabled" : "") + ">Approve and dispatch</button> <span id=\"approveMsg\" style=\"margin-left:8px\"></span></div></div>";
+    showDrawer(d.state === "revised" ? "Revised draft" : "Draft spec", d.id, box + '<div class="md">' + md(d.markdown) + "</div>");
+    const btn = $("approveBtn");
+    if (btn) btn.onclick = async () => {
+      if (!confirm("Approve " + d.id + " (sha256 " + sha12 + ") and dispatch an engineer?")) return;
+      btn.disabled = true; $("approveMsg").textContent = "Approving and dispatching…";
+      try {
+        const r = await api("/api/approve", {spec: d.id, sha: d.sha});
+        $("approveMsg").textContent = r.dispatched ? "Approved as v" + r.version + ". Engineer dispatched: " + r.run_id : "Approved as v" + r.version + ", but dispatch failed: " + r.error;
+        load();
+      } catch (e) { $("approveMsg").textContent = e.message; btn.disabled = false; }
+    };
+  } catch (e) { showDrawer("Could not load", id, "<p>" + esc(e.message) + "</p>"); }
+}
+document.addEventListener("click", async ev => {
+  const t = ev.target.closest("button"); if (!t) return;
+  if (t.dataset.doc) openDoc(t.dataset.run, t.dataset.doc);
+  else if (t.dataset.draft) openDraft(t.dataset.draft);
+  else if (t.dataset.stop) {
+    if (!confirm("Stop the engineer on " + t.dataset.stop + "? Its work so far stays on its machine and in whatever it has pushed.")) return;
+    try { const r = await api("/api/stop", {run: t.dataset.stop}); banner(r.ok ? "" : "Could not stop: " + r.error); load(); } catch (e) { banner("Could not stop: " + e.message); }
+  }
+});
+document.addEventListener("toggle", ev => { const d = ev.target; if (d.matches && d.matches("details.ms")) { d.open ? open.add(d.dataset.run) : open.delete(d.dataset.run); } }, true);
+$("drawerClose").onclick = hideDrawer; $("scrim").onclick = hideDrawer;
+document.addEventListener("keydown", ev => { if (ev.key === "Escape") hideDrawer(); });
+
+// ---------------------------------------------------------------- tooltip for the milestone segments
+const tip = $("tip");
+function showTip(el) {
+  tip.textContent = el.dataset.tip; tip.style.display = "block";
+  const r = el.getBoundingClientRect(), w = tip.offsetWidth;
+  tip.style.left = Math.max(8, Math.min(window.innerWidth - w - 8, r.left + r.width / 2 - w / 2)) + "px";
+  tip.style.top = (r.bottom + 8) + "px";
+}
+const hideTip = () => { tip.style.display = "none"; };
+document.addEventListener("mouseover", ev => { const el = ev.target.closest && ev.target.closest("[data-tip]"); el ? showTip(el) : hideTip(); });
+document.addEventListener("focusin", ev => { const el = ev.target.closest && ev.target.closest("[data-tip]"); if (el) showTip(el); });
+document.addEventListener("focusout", hideTip); window.addEventListener("scroll", hideTip, true);
+
+// ---------------------------------------------------------------- chat
+let chat = []; try { chat = JSON.parse(sessionStorage.getItem("crew-chat") || "[]"); } catch (e) {}
+let asking = false;
+function renderChat(streaming) {
+  const box = $("msgs");
+  const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+  const items = chat.map(m => m.role === "you"
+    ? '<div class="msg you"><div class="who">You</div><div class="body">' + esc(m.text) + "</div></div>"
+    : '<div class="msg"><div class="who">Manager' + (m.cost != null ? " · " + usd(m.cost) : "") + '</div><div class="body md">' + md(m.text) + "</div>" + (m.error ? '<div class="err">' + esc(m.error) + "</div>" : "") + "</div>");
+  if (streaming != null) items.push('<div class="msg"><div class="who">Manager</div><div class="body md">' + (streaming ? md(streaming) : '<span style="color:var(--muted)">reading the current state…</span>') + "</div></div>");
+  if (!items.length) items.push('<div class="empty">Ask about any run: what it is doing, why it is late, what it has spent, what its report says.</div>');
+  box.innerHTML = items.join("");
+  if (stick) box.scrollTop = box.scrollHeight;
+}
+function saveChat() { try { sessionStorage.setItem("crew-chat", JSON.stringify(chat.slice(-40))); } catch (e) {} }
+async function ask(question) {
+  if (asking || !question.trim()) return;
+  asking = true; $("send").disabled = true;
+  chat.push({role: "you", text: question.trim()}); saveChat();
+  let text = "", done = null; renderChat("");
+  try {
+    const r = await fetch("/api/ask", {method: "POST", headers: {"X-Crew-Token": TOKEN || "", "Content-Type": "application/json"}, body: JSON.stringify({question})});
+    if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || ("HTTP " + r.status)); }
+    const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "";
+    for (;;) {
+      const {value, done: end} = await reader.read();
+      if (end) break;
+      buf += dec.decode(value, {stream: true});
+      let k;
+      while ((k = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, k); buf = buf.slice(k + 2);
+        if (!frame.startsWith("data: ")) continue;
+        const ev = JSON.parse(frame.slice(6));
+        if (ev.t) { text += ev.t; renderChat(text); }
+        if (ev.done) done = ev;
+      }
+    }
+    chat.push({role: "manager", text: (done && done.text) || text, cost: done ? done.cost_usd : null, error: done && done.error && done.error !== text.trim() ? done.error : null});
+  } catch (e) { chat.push({role: "manager", text: text, error: e.message}); }
+  saveChat(); asking = false; $("send").disabled = false; renderChat(); $("q").focus();
+}
+$("composer").addEventListener("submit", ev => { ev.preventDefault(); const q = $("q").value; $("q").value = ""; $("q").style.height = ""; ask(q); });
+$("q").addEventListener("keydown", ev => { if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); $("composer").requestSubmit(); } });
+$("q").addEventListener("input", ev => { ev.target.style.height = ""; ev.target.style.height = Math.min(ev.target.scrollHeight, 140) + "px"; });
+
+// ---------------------------------------------------------------- theme, and go
+const THEMES = ["auto", "light", "dark"];
+function applyTheme(t) { if (t === "auto") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", t); $("theme").textContent = "theme: " + t; }
+let theme = "auto"; try { theme = localStorage.getItem("crew-theme") || "auto"; } catch (e) {}
+applyTheme(theme);
+$("theme").onclick = () => { theme = THEMES[(THEMES.indexOf(theme) + 1) % 3]; try { localStorage.setItem("crew-theme", theme); } catch (e) {} applyTheme(theme); };
+renderChat(); load();
+setInterval(load, 5000);
+setInterval(() => { if (state && !document.hidden) render(); }, 1000);   // keeps elapsed times and "ago" moving between polls
+</script>
+</body>
+</html>

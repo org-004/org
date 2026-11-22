@@ -17,6 +17,7 @@ Unknown event types and missing fields are ignored: the stream grows new ones be
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, Optional
 
 from . import pricing
@@ -76,6 +77,45 @@ def weekly_window(rate_limit: Optional[dict]) -> Optional[dict]:
     if not rate_limit:
         return None
     return (rate_limit.get("windows") or {}).get("seven_day")
+
+
+def feed(path, start: int = 0):
+    """Yield (next offset, line) for each human-readable line in an event log, from a byte offset.
+
+    This is the activity feed behind `crew logs`, `crew peek` and the dashboard's activity view.
+    """
+    try:
+        f = open(path, "rb")
+    except FileNotFoundError:
+        return
+    with f:
+        f.seek(start)
+        while True:
+            raw = f.readline()
+            if not raw or not raw.endswith(b"\n"):
+                return
+            try:
+                ev = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(ev, dict):
+                continue
+            kind = ev.get("type")
+            lead = "  ↳ " if ev.get("parent_tool_use_id") else "  "
+            if kind == "assistant":
+                for block in (ev.get("message") or {}).get("content") or []:
+                    text = None
+                    if block.get("type") == "tool_use":
+                        text = describe_tool(block.get("name") or "tool", block.get("input"))
+                    elif block.get("type") == "text" and (block.get("text") or "").strip():
+                        text = clip(block["text"], 240)
+                    if text:
+                        yield f.tell(), lead + text
+            elif kind == "system" and ev.get("subtype") == "task_started":
+                yield f.tell(), "  + subagent: %s" % clip(ev.get("description") or "", 120)
+            elif kind == "result":
+                cost = sum((m.get("costUSD") or 0) for m in (ev.get("model_usage_since_last_result") or {}).values())
+                yield f.tell(), "— turn ended: %s, $%.2f" % (ev.get("subtype"), cost)
 
 
 class Meter:

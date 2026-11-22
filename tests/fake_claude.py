@@ -62,6 +62,8 @@ def label_of(prompt):
         return "report"
     if "Plan the implementation of the spec" in prompt:
         return "plan"
+    if "Question:" in prompt:
+        return "ask"
     return "other"
 
 
@@ -171,6 +173,15 @@ def main():
     if entry.get("budget"):
         emit(dict(base, subtype="error_max_budget_usd", is_error=True, result="Reached maximum budget"))
         return 1
+    if entry.get("say"):
+        # The manager's question mode: text streamed as partial-message deltas, then the result.
+        words = entry["say"].split(" ")
+        if "--include-partial-messages" in flags:
+            for i, w in enumerate(words):
+                emit({"type": "stream_event", "session_id": sid, "parent_tool_use_id": None, "event": {
+                    "type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": w + (" " if i < len(words) - 1 else "")}}})
+        emit(dict(base, subtype="success", is_error=False, result=entry["say"]))
+        return 0
     if entry.get("prose") or "structured" not in entry:
         emit(dict(base, subtype="success", is_error=False, result=entry.get("prose") or "Done. Want me to continue?"))
         return 0

@@ -53,8 +53,24 @@ OUTWARD_API = ["gh api * -X *", "gh api * --method *", "gh api -X *", "gh api --
                "gh api * --field *", "gh api * --raw-field *", "gh api * --input *"]
 
 
+# Reading is the manager's job, anywhere on the machine. Inside the sandbox every shell command is
+# allowed automatically and the operating system stops the writes; where the sandbox is off or not
+# available, the harness allows read-only commands only inside the working directory, and a
+# manager that has to ask before every `ls` of a checkout is no use. These are the read-only forms.
+READ_SHELL = ["ls", "cat", "head", "tail", "wc", "stat", "file", "du", "tree", "rg", "grep", "find", "jq", "which", "pwd", "date"]
+GIT_READ = ["status", "log", "show", "diff", "blame", "ls-files", "ls-remote", "rev-parse", "describe", "shortlog", "grep",
+            "branch --list", "branch -a", "branch -r", "branch -vv", "remote -v", "remote show", "remote get-url", "worktree list"]
+GH_READ = ["pr view", "pr list", "pr diff", "pr checks", "pr status", "issue view", "issue list", "repo view", "repo list",
+           "run view", "run list", "release view", "release list", "search", "api", "auth status"]
+
+
 def _crew(commands) -> list:
     return ["Bash(crew %s *)" % c for c in commands]
+
+
+def _read_rules() -> list:
+    return (["Bash(%s *)" % c for c in READ_SHELL] + ["Bash(git %s *)" % c for c in GIT_READ]
+            + ["Bash(git -C * %s *)" % c for c in GIT_READ] + ["Bash(gh %s *)" % c for c in GH_READ])
 
 
 def settings(ledger: Ledger, mode: str) -> dict:
@@ -62,7 +78,9 @@ def settings(ledger: Ledger, mode: str) -> dict:
     mgr = ledger.config().get("manager") or {}
     desk, root = str(ledger.desk), str(ledger.root)
     perms = {
-        "allow": ["Read", "Grep", "Glob"] + _crew(READ_COMMANDS),
+        # Read(//**) as well as Read: the harness checks the paths given to ls, cat and the like
+        # against read rules by path, and a rule without a path does not satisfy that check.
+        "allow": ["Read", "Read(//**)", "Grep", "Glob"] + _crew(READ_COMMANDS) + _read_rules(),
         "ask": _crew(HUMAN_COMMANDS) + ["Bash(orb *)", "Bash(ssh *)"],
         # An absolute path in a rule is written with a second leading slash.
         "deny": ["Bash(%s *)" % c for c in OUTWARD] + ["Bash(%s)" % c for c in OUTWARD_API]

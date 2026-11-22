@@ -188,7 +188,7 @@ def render(state: dict, width: Optional[int] = None) -> str:
     lines = [budget_line(state["budget"]), ""]
     runs = state["runs"]
     if runs:
-        rows = [["RUN", "STATE", "DONE", "ELAPSED", "ETA", "SPEND", "PLAN", "MACHINE", "NOW"]]
+        rows = [["RUN", "STATE", "DONE", "ELAPSED", "ETA", "SPEND", "PLAN", "CAP", "MACHINE", "NOW"]]
         for v in runs:
             p = v["progress"]
             spend = fmt_usd(v["cost_usd"])
@@ -208,7 +208,8 @@ def render(state: dict, width: Optional[int] = None) -> str:
                 else:
                     eta = fmt_clock(v["eta_at"]) if v["eta_at"] else "—"
             rows.append([v["run_id"], state_label(v), "%d/%d" % (p.get("done", 0), p.get("total", 0)) if p.get("total") else "—",
-                         fmt_dur(v["elapsed_s"]), eta, spend, plan, clip(v["machine"]["name"] or "", 22), what])
+                         fmt_dur(v["elapsed_s"]), eta, spend, plan, fmt_usd(v["cost_cap_usd"]) if v["cost_cap_usd"] else "—",
+                         clip(v["machine"]["name"] or "", 22), what])
         lines += _table(rows, width)
         for v in runs:
             for w in v["warnings"]:
