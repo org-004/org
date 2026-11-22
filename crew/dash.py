@@ -141,7 +141,7 @@ class Handler(BaseHTTPRequestHandler):
                 text = read_text(ledger.draft_path(spec_id))
                 if text is None:
                     return self._json(404, {"error": "no draft for %s" % spec_id})
-                errors, warnings = spec.check(text)
+                errors, warnings = spec.check(text, spec.default_machine(ledger))
                 return self._json(200, {"id": spec_id, "markdown": text, "sha": spec.draft_sha(ledger, spec_id),
                                         "errors": errors, "warnings": warnings, "state": spec.state_of(ledger, spec_id)})
         except LookupError as e:
@@ -170,10 +170,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._ask(str(body.get("question") or ""))
             if url.path == "/api/approve":
                 spec_id = ledger.resolve_spec(str(body.get("spec") or ""))
+                before = ledger.spec_meta(spec_id) or {}
                 try:
                     meta = spec.approve(ledger, spec_id, str(body.get("sha") or ""))
                 except spec.ApprovalError as e:
                     return self._json(400, {"error": str(e)})
+                if before.get("sha256") == meta["sha256"] and ledger.runs_for(spec_id):
+                    return self._json(200, {"approved": True, "version": meta["version"], "dispatched": False, "log": [],
+                                            "error": "this text was already approved and has run (%s); `crew dispatch` runs it again"
+                                                     % ", ".join(ledger.runs_for(spec_id))})
                 log = []
                 try:
                     run_id, _ = dispatch.dispatch(ledger, spec_id, log=log.append)

@@ -92,7 +92,11 @@ def run_view(ledger: Ledger, run_id: str, rate: Optional[float]) -> dict:
 
 def collect(ledger: Ledger, do_sync: bool = False) -> dict:
     if do_sync:
-        sync_all(ledger)
+        # Someone is waiting on this. A machine that does not answer within a few seconds is
+        # shown as it was last seen, marked unreachable; the long timeout and the bulk of the
+        # event log are left to the dashboard's loop and to `crew sync`.
+        quick = float((ledger.config().get("status") or {}).get("sync_timeout_s") or 8)
+        sync_all(ledger, timeout=quick, slices=1)
     rate = budget.usd_per_pct(ledger)
     week = budget.weekly(ledger)
     runs = [run_view(ledger, r, rate["value"]) for r in ledger.run_ids()]
@@ -107,7 +111,7 @@ def collect(ledger: Ledger, do_sync: bool = False) -> dict:
         if state == "approved":
             continue  # the draft is identical to the approved text: nothing pending
         text = read_text(ledger.draft_path(spec_id)) or ""
-        errors, warnings = spec.check(text)
+        errors, warnings = spec.check(text, spec.default_machine(ledger))
         meta, _ = spec.parse(text)
         drafts.append({
             "id": spec_id,

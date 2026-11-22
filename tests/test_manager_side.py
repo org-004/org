@@ -103,6 +103,19 @@ class SpecChecks(unittest.TestCase):
             errors, _ = spec.check(text)
             self.assertTrue(any(expected in e for e in errors), "%r not reported in %r" % (expected, errors))
 
+    def test_a_repo_must_be_reachable_from_the_engineers_machine(self):
+        local_path = GOOD.replace("repos: gasblaster/acme-web, gasblaster/acme-api", "repos: /Users/me/src/acme-web")
+        errors, _ = spec.check(local_path)
+        self.assertTrue(any("path on this machine" in e and "orb" in e for e in errors), errors)
+        self.assertTrue(any("path on this machine" in e for e in spec.check(local_path.replace("delivery: pr", "delivery: pr\nmachine: ssh:gpu"))[0]))
+        # on the same machine a path is a perfectly good repository
+        self.assertEqual(spec.check(local_path.replace("delivery: pr", "delivery: pr\nmachine: local"))[0], [])
+        self.assertEqual(spec.check(local_path, default_machine="local")[0], [])
+
+    def test_effort_is_checked(self):
+        self.assertEqual(spec.check(GOOD.replace("delivery: pr", "delivery: pr\neffort: xhigh"))[0], [])
+        self.assertTrue(any("effort must be one of" in e for e in spec.check(GOOD.replace("delivery: pr", "delivery: pr\neffort: heroic"))[0]))
+
     def test_warnings_do_not_block(self):
         text = GOOD.replace("max_cost_usd: 40\nmax_hours: 6\n", "").replace("(MUST)", "(SHOULD)")
         errors, warnings = spec.check(text)
@@ -187,6 +200,23 @@ class ManagerSide(unittest.TestCase):
         meta2 = spec.approve(self.ledger, spec_id, spec.draft_sha(self.ledger, spec_id)[:12])
         self.assertEqual(meta2["version"], 2)
         self.assertTrue((self.ledger.spec_dir(spec_id) / "spec.v1.md").exists())
+
+    def test_a_spec_can_be_named_by_its_draft_path(self):
+        spec_id = spec.new_draft(self.ledger, "CSV export", "acme")
+        self.assertEqual(self.ledger.resolve_spec(str(self.ledger.draft_path(spec_id))), spec_id)
+        self.assertEqual(self.ledger.resolve_spec(spec_id + ".md"), spec_id)
+        self.assertEqual(self.ledger.resolve_spec("1"), spec_id)
+
+    def test_status_does_not_wait_long_for_a_machine(self):
+        seen = []
+        original = status.sync_all
+        status.sync_all = lambda ledger, **kw: seen.append(kw) or []
+        self.addCleanup(setattr, status, "sync_all", original)
+        status.collect(self.ledger, do_sync=True)
+        write_json(self.ledger.config_path, {"status": {"sync_timeout_s": 2}})
+        status.collect(self.ledger, do_sync=True)
+        status.collect(self.ledger)
+        self.assertEqual(seen, [{"timeout": 8.0, "slices": 1}, {"timeout": 2.0, "slices": 1}], "and none at all without do_sync")
 
     def test_draft_that_fails_its_checks_cannot_be_approved(self):
         spec_id = spec.new_draft(self.ledger, "Vague idea")
@@ -332,6 +362,29 @@ class ManagerSide(unittest.TestCase):
         self.assertEqual(view["state"], "dispatch_failed")
         self.assertIn("orb clone", view["detail"])
 
+    def test_an_existing_run_directory_on_a_shared_host_is_not_overwritten(self):
+        shared = self.tmp / "shared-host-home"
+        shared.mkdir()
+        cfg = {"machines": {"default": "local", "detach": "nohup", "local": {"enabled": True, "home": str(shared)}},
+               "engineer": {"retry_backoff_s": 0.05}}
+        write_json(self.ledger.config_path, cfg)
+        spec_id = self.approved()
+        run_id, _ = dispatch.dispatch(self.ledger, spec_id, log=lambda m: None)
+        self.wait_final(run_id)
+        # A second ledger, same host, same first spec: the run id collides.
+        other = Ledger(self.tmp / "other-ledger")
+        other.init()
+        write_json(other.config_path, cfg)
+        other_spec = spec.new_draft(other, "CSV export", "acme")
+        other.draft_path(other_spec).write_text(GOOD)
+        spec.approve(other, other_spec, spec.draft_sha(other, other_spec)[:10])
+        report_before = (shared / "crew-runs" / run_id / "report.md").read_text()
+        with self.assertRaises(dispatch.DispatchError) as ctx:
+            dispatch.dispatch(other, other_spec, log=lambda m: None)
+        self.assertIn("already has a run directory", str(ctx.exception))
+        self.assertEqual((shared / "crew-runs" / run_id / "report.md").read_text(), report_before)
+        self.assertEqual(other.run(run_id)["state"], "dispatch_failed")
+
     def test_unreachable_machine_is_reported_not_fatal(self):
         spec_id = self.approved()
         self.scenario(dict(TURNS, **{"milestone:M1": dict(TURNS["milestone:M1"], sleep=60)}))
@@ -407,8 +460,16 @@ class ManagerSide(unittest.TestCase):
         self.assertIn("turn ended", peek)
         self.assertIn("Bash: echo working on plan", crew("logs", "1", "--all").stdout)
         self.assertIn("eng-001-csv-export-r1", crew("machine", "ls").stdout)
-        self.assertIn("deleted", crew("machine", "rm", "1").stdout)
+        # approving the same text again must not start a second engineer
+        again = crew("approve", spec_id, "--sha", sha).stdout
+        self.assertIn("already approved", again)
+        self.assertIn("nothing dispatched", again)
+        self.assertEqual(self.ledger.runs_for(spec_id), ["001-csv-export-r1"])
+        self.assertIn("dispatched 001-csv-export-r2", crew("dispatch", spec_id).stdout, "asking for another run is explicit")
+        self.wait_final("001-csv-export-r2")
+        self.assertIn("deleted", crew("machine", "rm", "001-csv-export-r1").stdout)
         self.assertIn("v1", crew("spec", "ls").stdout)
+        self.assertIn(str(self.ledger.draft_path(spec_id)), crew("spec", "check", str(self.ledger.draft_path(spec_id))).stdout)
 
 
 if __name__ == "__main__":

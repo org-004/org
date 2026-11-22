@@ -146,6 +146,8 @@ def main() -> int:
     ap.add_argument("--home", default=None, help="ledger directory to use (default: a new temporary one)")
     ap.add_argument("--timeout", type=int, default=3600, help="seconds to wait for the run")
     ap.add_argument("--recheck", metavar="RUN", help="only repeat the independent check for a run already in --home")
+    ap.add_argument("--ssh-host", help="with --machine ssh:<name>: define that machine here instead of in ~/.crew/config.json")
+    ap.add_argument("--ssh-option", action="append", default=[], help="an ssh option for --ssh-host, e.g. --ssh-option=-p --ssh-option=2222")
     args = ap.parse_args()
 
     ledger = Ledger(args.home or tempfile.mkdtemp(prefix="crew-e2e-"))
@@ -160,6 +162,8 @@ def main() -> int:
     machines["local"] = {"enabled": args.machine == "local"}
     if args.base:
         machines["orb"] = dict(machines.get("orb") or {}, base=args.base)
+    if args.ssh_host and args.machine.startswith("ssh:"):
+        machines["ssh"] = dict(machines.get("ssh") or {}, **{args.machine[4:]: {"host": args.ssh_host, "options": args.ssh_option}})
     write_json(ledger.config_path, {"machines": machines})
     print("ledger:  %s" % ledger.root)
 

@@ -4,9 +4,11 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -259,6 +261,26 @@ class RunnerCase(unittest.TestCase):
         st = self.status()
         self.assertEqual(st["state"], "stopped")
         self.assertLess(st["elapsed_s"], 20)
+
+    def test_a_second_runner_refuses_to_start(self):
+        # `crew resume` on a run whose runner is alive must not put two engineers in one workspace.
+        self.job({"plan": PLAN_TURN, "milestone:M1": dict(DONE("M1"), sleep=30)})
+        env = dict(os.environ, PYTHONPATH=str(ROOT))
+        first = subprocess.Popen([sys.executable, "-m", "crew", "engineer", "run", str(self.run_dir)], env=env,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(first.wait)
+        self.addCleanup(first.kill)
+        deadline = time.time() + 20
+        while time.time() < deadline and (self.status() or {}).get("state") != "executing":
+            time.sleep(0.2)
+        self.assertEqual(self.status()["state"], "executing")
+        calls_before = len(self.calls())
+        self.assertEqual(self.go(), 3)
+        self.assertIn("already has a live runner", self.output)
+        self.assertEqual(len(self.calls()), calls_before, "the second runner started no engineer")
+        (self.run_dir / "STOP").write_text("")
+        first.wait(timeout=30)
+        self.assertEqual(self.status()["state"], "stopped")
 
     def test_engineer_can_replan_the_remainder(self):
         new = [{"id": "M2a", "title": "Half", "est_minutes": 5, "est_cost_usd": 0.2}, {"id": "M2b", "title": "Other half", "est_minutes": 5, "est_cost_usd": 0.2}]

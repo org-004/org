@@ -198,6 +198,12 @@ def dispatch(ledger: Ledger, spec_id: str, machine_override: Optional[str] = Non
                 log("warning: no ~/.claude/oauth-token here; the engineer will use whatever login the machine has")
         job = build_job(ledger, meta, run_id, machine)
         data = build_bundle(ledger, meta, job)
+        # A shared host may already hold a run with this id, from another ledger or an earlier
+        # life of this one. Its work is not ours to overwrite.
+        taken = tr.run('test -e "%s/job.json" && echo taken || echo free' % record["remote_dir"], timeout=60).stdout.decode().strip()
+        if taken == "taken":
+            raise DispatchError("%s already has a run directory %s (from another ledger?). Remove it there, or dispatch elsewhere."
+                                % (tr.describe(), record["remote_dir"]))
         tr.run('mkdir -p "%s" && base64 -d | tar xzf - -C "%s"' % (record["remote_dir"], record["remote_dir"]),
                input=base64.b64encode(data), timeout=120)
         log("bundle unpacked (%d kB)" % (len(data) // 1024))

@@ -66,7 +66,7 @@ None
 # Header keys and how each is read.
 LIST_KEYS = {"repos"}
 NUMBER_KEYS = {"max_cost_usd", "max_weekly_pct", "max_hours"}
-ENUMS = {"delivery": {"pr", "branch", "merge", "none"}}
+ENUMS = {"delivery": {"pr", "branch", "merge", "none"}, "effort": {"low", "medium", "high", "xhigh", "max"}}
 KNOWN_KEYS = {"title", "project", "repos", "delivery", "machine", "model", "effort"} | NUMBER_KEYS
 
 REQUIRED_SECTIONS = ["Intent", "Requirements", "Acceptance criteria"]
@@ -125,8 +125,11 @@ def acceptance_ids(body: str) -> List[str]:
     return seen
 
 
-def check(text: str) -> Tuple[List[str], List[str]]:
-    """Return (errors, warnings). Errors block approval."""
+def check(text: str, default_machine: str = "orb") -> Tuple[List[str], List[str]]:
+    """Return (errors, warnings). Errors block approval.
+
+    `default_machine` is where the spec would run if its header does not say.
+    """
     errors: List[str] = []
     warnings: List[str] = []
     meta, body = parse(text)
@@ -148,6 +151,13 @@ def check(text: str) -> Tuple[List[str], List[str]]:
     machine = str(meta.get("machine") or "")
     if machine and not re.match(r"^(orb|local|ssh:[A-Za-z0-9_.-]+)$", machine):
         errors.append("header: machine must be orb, local or ssh:<name>")
+    # The engineer works on another machine. A path on this one is not a repository it can clone.
+    where = machine or default_machine or "orb"
+    if where != "local":
+        for repo in meta.get("repos") or []:
+            if str(repo).startswith(("/", "~", "./", "../", "file:")):
+                errors.append("header: repo %s is a path on this machine, which an engineer on %s cannot reach. "
+                              "Name its remote (owner/name or a URL); if it has none, it must be pushed first" % (repo, where))
 
     secs = sections(body)
     for name in REQUIRED_SECTIONS:
@@ -179,6 +189,15 @@ def check(text: str) -> Tuple[List[str], List[str]]:
 
 
 # ---------------------------------------------------------------- lifecycle
+
+
+def default_machine(ledger: Ledger) -> str:
+    return str((ledger.config().get("machines") or {}).get("default") or "orb")
+
+
+def check_draft(ledger: Ledger, spec_id: str) -> Tuple[List[str], List[str]]:
+    """check() for a draft in the ledger, knowing where this ledger sends engineers by default."""
+    return check(read_text(ledger.draft_path(spec_id)) or "", default_machine(ledger))
 
 
 def new_draft(ledger: Ledger, title: str, project: str = "") -> str:
@@ -214,7 +233,7 @@ def approve(ledger: Ledger, spec_id: str, sha_prefix: str, by: Optional[str] = N
         raise ApprovalError(
             "sha mismatch: the draft is now %s, not %s. It changed since it was reviewed." % (sha[:12], sha_prefix)
         )
-    errors, _ = check(text)
+    errors, _ = check(text, default_machine(ledger))
     if errors:
         raise ApprovalError("the draft does not pass its checks:\n  - " + "\n  - ".join(errors))
 

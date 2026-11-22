@@ -16,6 +16,7 @@ Nothing here talks to the manager's machine. The manager pulls.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import queue
@@ -105,6 +106,7 @@ class Runner:
         self._last_said = None
         self._events = None
         self._log = None
+        self._lock = None
 
     # ------------------------------------------------------------ state and status
     def _new_state(self) -> dict:
@@ -957,6 +959,15 @@ class Runner:
         if st.get("phase") == "finished":
             print("run %s already finished: %s" % (self.job["run_id"], st.get("state")))
             return 0
+        # One runner per run. `crew resume` on a run whose runner is in fact alive must not start
+        # a second engineer in the same session and workspace.
+        self._lock = open(self.dir / ".runner.lock", "w")
+        try:
+            fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("run %s already has a live runner; not starting another" % self.job["run_id"])
+            self._lock.close()
+            return 3
         self.prepare()
         self.say("run %s on %s, model %s" % (self.job["run_id"], os.uname().nodename, self.job.get("model")))
         try:
@@ -1001,7 +1012,7 @@ class Runner:
                 pass
             return 1
         finally:
-            for f in (self._events, self._log):
+            for f in (self._events, self._log, self._lock):
                 try:
                     if f:
                         f.close()
@@ -1020,7 +1031,7 @@ def pid_alive(pid) -> bool:
         return False
 
 
-def snapshot(run_dir, events_from: int = 0, max_bytes: int = 400_000) -> dict:
+def snapshot(run_dir, events_from: int = 0, max_bytes: int = 2_000_000) -> dict:
     """Everything the manager's side needs about a run, as one JSON document.
 
     Reads only. Events are returned incrementally from a byte offset and cut at a line boundary.

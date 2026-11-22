@@ -19,8 +19,12 @@ from .transport import TransportError, for_machine
 from .util import now, read_json, write_text
 
 
-def sync_run(ledger: Ledger, run_id: str, timeout: float = 45) -> dict:
-    """Pull one run. If another process is already pulling it, return what the ledger has."""
+def sync_run(ledger: Ledger, run_id: str, timeout: float = 45, slices: int = 6) -> dict:
+    """Pull one run. If another process is already pulling it, return what the ledger has.
+
+    `slices` bounds how much of the event log one call copies; a long log catches up over
+    several syncs.
+    """
     rec = ledger.run(run_id)
     if not rec or rec.get("state") in ("provisioning", "dispatch_failed") or rec.get("final") or rec.get("machine_removed_at"):
         return rec
@@ -31,32 +35,38 @@ def sync_run(ledger: Ledger, run_id: str, timeout: float = 45) -> dict:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             return rec
-        return _sync_locked(ledger, run_id, ledger.run(run_id), timeout)
+        return _sync_locked(ledger, run_id, ledger.run(run_id), timeout, slices)
 
 
-def _sync_locked(ledger: Ledger, run_id: str, rec: dict, timeout: float) -> dict:
+def _sync_locked(ledger: Ledger, run_id: str, rec: dict, timeout: float, slices: int) -> dict:
     if rec.get("final"):
         return rec
     cfg = ledger.config()
-    script = ('cd "%s" && PYTHONPATH=.crew python3 -m crew engineer snapshot . --events-from %d'
-              % (rec["remote_dir"], int(rec.get("events_offset") or 0)))
-    try:
-        out = for_machine(rec["machine"], cfg).run(script, timeout=timeout).stdout
-        snap = json.loads(out.decode("utf-8", "replace"))
-    except (TransportError, ValueError, KeyError) as e:
-        rec.update(reachable=False, last_error=str(e)[:400], last_attempt_at=now())
-        ledger.save_run(run_id, rec)
-        return rec
-
     mirror = ledger.mirror_dir(run_id)
-    mirror.mkdir(parents=True, exist_ok=True)
-    for name, text in (snap.get("files") or {}).items():
-        if text is not None:
-            write_text(mirror / name, text)
-    events = snap.get("events") or {}
-    if events.get("data"):
-        with open(mirror / "events.jsonl", "a", encoding="utf-8") as f:
-            f.write(events["data"])
+    snap, events = None, {}
+    for _ in range(max(1, slices)):
+        script = ('cd "%s" && PYTHONPATH=.crew python3 -m crew engineer snapshot . --events-from %d'
+                  % (rec["remote_dir"], int(rec.get("events_offset") or 0)))
+        try:
+            out = for_machine(rec["machine"], cfg).run(script, timeout=timeout).stdout
+            snap = json.loads(out.decode("utf-8", "replace"))
+        except (TransportError, ValueError, KeyError) as e:
+            rec.update(reachable=False, last_error=str(e)[:400], last_attempt_at=now())
+            ledger.save_run(run_id, rec)
+            return rec
+        mirror.mkdir(parents=True, exist_ok=True)
+        for name, text in (snap.get("files") or {}).items():
+            if text is not None:
+                write_text(mirror / name, text)
+        events = snap.get("events") or {}
+        if events.get("data"):
+            with open(mirror / "events.jsonl", "a", encoding="utf-8") as f:
+                f.write(events["data"])
+        # Saved after every slice: an interrupted sync must not fetch the same slice twice.
+        rec["events_offset"] = events.get("offset", rec.get("events_offset", 0))
+        ledger.save_run(run_id, rec)
+        if not events.get("data") or events.get("offset", 0) >= events.get("size", 0):
+            break
     if snap.get("log_tail"):
         write_text(mirror / "runner.log.tail", snap["log_tail"])
 
@@ -81,10 +91,10 @@ def _sync_locked(ledger: Ledger, run_id: str, rec: dict, timeout: float) -> dict
     return rec
 
 
-def sync_all(ledger: Ledger, only: Optional[List[str]] = None) -> List[dict]:
+def sync_all(ledger: Ledger, only: Optional[List[str]] = None, timeout: float = 45, slices: int = 6) -> List[dict]:
     """Sync every run that can still change, several machines at a time."""
     ids = only or [r for r in ledger.run_ids() if not ledger.run(r).get("final")]
     if not ids:
         return []
     with ThreadPoolExecutor(max_workers=min(8, len(ids))) as pool:
-        return list(pool.map(lambda r: sync_run(ledger, r), ids))
+        return list(pool.map(lambda r: sync_run(ledger, r, timeout, slices), ids))

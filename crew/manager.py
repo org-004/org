@@ -95,7 +95,11 @@ def settings(ledger: Ledger, mode: str) -> dict:
                 "enabled": True,
                 "autoAllowBashIfSandboxed": True,
                 "allowUnsandboxedCommands": False,
-                "excludedCommands": ["crew", "crew *"],
+                # Outside the sandbox, and so under the permission rules above instead: crew itself
+                # (it writes the ledger and reaches the machines) and gh (on macOS its token is in
+                # the keychain, which a sandboxed process cannot read). manager.sandbox_exclude
+                # adds more, e.g. "git clone *" if private clones fail inside the sandbox.
+                "excludedCommands": ["crew", "crew *", "gh", "gh *"] + list(mgr.get("sandbox_exclude") or []),
                 "network": {"allowedDomains": list(mgr.get("network_allow") or [])},
             }
     return out
@@ -133,13 +137,19 @@ def _claude(ledger: Ledger) -> Optional[str]:
     return shutil.which(ledger.config().get("claude_bin") or "claude", path=launch_env(ledger)["PATH"])
 
 
-def talk(ledger: Ledger, prompt: Optional[str] = None, project: Optional[str] = None, resume: bool = False) -> int:
+def talk(ledger: Ledger, prompt: Optional[str] = None, project: Optional[str] = None, resume: bool = False,
+         dry_run: bool = False) -> int:
     """Replace this process with the manager's interactive session."""
     ledger.init()
     claude = _claude(ledger)
     if not claude:
         print("crew: the claude CLI is not on PATH", file=sys.stderr)
         return 127
+    if dry_run:
+        print("would run, in %s:\n  %s --append-system-prompt <persona, %d characters> --settings <below> --name 'crew manager'\n"
+              % (ledger.desk, claude, len(persona(ledger))))
+        print(json.dumps(settings(ledger, "talk"), indent=2))
+        return 0
     try:
         sync_all(ledger)  # so the persona opens with what the machines say now
     except Exception:

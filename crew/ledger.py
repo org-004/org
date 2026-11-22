@@ -45,7 +45,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "manager": {
         "model": None,  # None: whatever the user's Claude Code settings say
         "effort": None,
+        "ask_model": "sonnet",  # the dashboard's question box: status questions do not need the big model
+        "ask_effort": "low",
         "sandbox": True,
+        "sandbox_exclude": [],  # more command patterns to run outside the sandbox, under permission rules
         "permission_mode": None,
         "network_allow": ["github.com", "*.github.com", "*.githubusercontent.com"],
     },
@@ -63,7 +66,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "usd_per_weekly_pct": None,
     },
     "pricing": {},
-    "dash": {"port": 8787, "sync_interval_s": 15},
+    # How long `crew status` waits for a machine before showing it as last seen.
+    "status": {"sync_timeout_s": 8},
+    "dash": {"port": 8787, "sync_interval_s": 10},
 }
 
 # What `crew init` writes: only the knobs a person is likely to turn. Everything else comes from
@@ -186,8 +191,10 @@ class Ledger:
         return (max(seqs) + 1) if seqs else 1
 
     def resolve_spec(self, ref: str) -> str:
-        """Accept a full id, its number ("7", "007"), or a unique prefix."""
+        """Accept a full id, its number ("7", "007"), a unique prefix, or the path of its draft."""
         ids = self.spec_ids()
+        if "/" in ref or ref.endswith(".md"):
+            ref = Path(ref).name[:-3] if ref.endswith(".md") else Path(ref).name
         if ref in ids:
             return ref
         if ref.isdigit():

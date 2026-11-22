@@ -15,6 +15,7 @@
     crew logs <run> [-f]            its activity feed
     crew stop|resume <run>          stop the engineer, or restart a runner that died
     crew machine rm <run>           delete the OrbStack machine a run used
+    crew doctor                     check that this machine is ready to manage engineers
 
 A <run> may be a run id, a unique prefix, or a spec reference (meaning that spec's latest run).
 A <spec> may be its id, its number, or a unique prefix.
@@ -108,7 +109,7 @@ def cmd_spec(args) -> int:
         text = read_text(ledger.draft_path(spec_id))
         if text is None:
             die("no draft for %s" % spec_id)
-        errors, warnings = spec.check(text)
+        errors, warnings = spec.check(text, spec.default_machine(ledger))
         for e in errors:
             print("error:   " + e)
         for w in warnings:
@@ -132,10 +133,16 @@ def cmd_approve(args) -> int:
 
     ledger = Ledger(args.home)
     spec_id = need_spec(ledger, args.spec)
+    before = ledger.spec_meta(spec_id) or {}
     try:
         meta = spec.approve(ledger, spec_id, args.sha)
     except spec.ApprovalError as e:
         die(e)
+    if before.get("sha256") == meta["sha256"] and ledger.runs_for(spec_id):
+        # Approving the same text twice must not quietly start a second engineer on it.
+        print("%s v%d is already approved with exactly this text; runs: %s" % (spec_id, meta["version"], ", ".join(ledger.runs_for(spec_id))))
+        print("nothing dispatched; `crew dispatch %s` starts another engineer on it" % spec_id)
+        return 0
     print("approved %s v%d (sha256 %s)" % (spec_id, meta["version"], meta["sha256"][:12]))
     live = [r for r in ledger.runs_for(spec_id) if not ledger.run(r).get("final") and ledger.run(r).get("state") != "dispatch_failed"]
     if live:
@@ -411,7 +418,7 @@ def cmd_project(args) -> int:
 def cmd_talk(args) -> int:
     from . import manager
 
-    return manager.talk(Ledger(args.home), args.prompt, project=args.project, resume=args.resume)
+    return manager.talk(Ledger(args.home), args.prompt, project=args.project, resume=args.resume, dry_run=args.dry_run)
 
 
 def cmd_ask(args) -> int:
@@ -426,6 +433,12 @@ def cmd_dash(args) -> int:
     return dash.serve(Ledger(args.home), port=args.port, open_browser=not args.no_open)
 
 
+def cmd_doctor(args) -> int:
+    from . import doctor
+
+    return doctor.run(Ledger(args.home))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="crew", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--home", help="ledger directory (default $CREW_HOME or ~/.crew)")
@@ -433,11 +446,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd")
 
     sub.add_parser("init", help="create the ledger").set_defaults(fn=cmd_init)
+    sub.add_parser("doctor", help="check that this machine is ready to manage engineers").set_defaults(fn=cmd_doctor)
 
     s = sub.add_parser("talk", help="talk to the manager")
     s.add_argument("prompt", nargs="?", help="an opening message")
     s.add_argument("--project")
     s.add_argument("--resume", action="store_true", help="continue the previous conversation")
+    s.add_argument("--dry-run", action="store_true", help="print the session's settings instead of starting it")
     s.set_defaults(fn=cmd_talk)
 
     s = sub.add_parser("ask", help="one answer from the manager about the current state")
