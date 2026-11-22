@@ -1,4 +1,4 @@
-"""`crew doctor`: is this machine ready to manage engineers?
+"""`org doctor`: is this machine ready to manage engineers?
 
 Checks what dispatch and the manager need, and says what to do about each thing that is missing.
 Nothing here changes anything.
@@ -18,7 +18,7 @@ from .manager import launch_env
 from .transport import Ssh, TransportError
 from .util import fmt_usd
 
-BIN = Path(__file__).resolve().parent.parent / "bin" / "crew"
+BIN = Path(__file__).resolve().parent.parent / "bin" / "org"
 
 
 def _out(argv: List[str], timeout: float = 15) -> Tuple[int, str]:
@@ -38,13 +38,13 @@ def checks(ledger: Ledger) -> List[Tuple[str, str, str, str]]:
     def add(ok, name, found, fix="", soft=False):
         rows.append(("ok" if ok else ("warn" if soft else "fail"), name, found, "" if ok else fix))
 
-    add(sys.version_info >= (3, 9), "python", platform.python_version(), "crew needs Python 3.9 or later")
+    add(sys.version_info >= (3, 9), "python", platform.python_version(), "org needs Python 3.9 or later")
     claude = shutil.which(cfg.get("claude_bin") or "claude", path=launch_env(ledger)["PATH"])
     version = _out([claude, "--version"])[1].splitlines()[0] if claude else "not found"
     add(bool(claude), "claude CLI", version, "install Claude Code: https://claude.ai/install.sh")
-    on_path = shutil.which("crew")
-    add(bool(on_path), "crew on PATH", on_path or "not found", "ln -s %s ~/.local/bin/crew" % BIN, soft=True)
-    add(ledger.config_path.exists(), "ledger", str(ledger.root), "crew init")
+    on_path = shutil.which("org")
+    add(bool(on_path), "org on PATH", on_path or "not found", "ln -s %s ~/.local/bin/org" % BIN, soft=True)
+    add(ledger.config_path.exists(), "ledger", str(ledger.root), "org init")
 
     default = (machines.get("default") or "orb").strip()
     uses_orb = default == "orb"
@@ -79,7 +79,7 @@ def checks(ledger: Ledger) -> List[Tuple[str, str, str, str]]:
     else:
         missing = [c for c in ("bwrap", "socat") if not shutil.which(c)]
         add(not missing, "manager sandbox", "bubblewrap and socat" if not missing else "missing " + ", ".join(missing),
-            "install them, or accept that `crew talk` relies on permission rules alone here (it asks before shell writes)", soft=True)
+            "install them, or accept that `org talk` relies on permission rules alone here (it asks before shell writes)", soft=True)
 
     rate = budget.usd_per_pct(ledger)
     week = budget.weekly(ledger)

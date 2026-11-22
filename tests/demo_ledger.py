@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Write a ledger full of made-up runs in every state, for looking at the status page.
 
-    python3 tests/demo_ledger.py /tmp/crew-demo
-    crew --home /tmp/crew-demo status
-    crew --home /tmp/crew-demo dash
+    python3 tests/demo_ledger.py /tmp/org-demo
+    org --home /tmp/org-demo status
+    org --home /tmp/org-demo dash
 
 Nothing here runs an engineer or contacts a machine: each run is marked as fully synced, so the
-page and `crew status` show exactly what this file wrote. Times are relative to now.
+page and `org status` show exactly what this file wrote. Times are relative to now.
 """
 import sys
 import time
@@ -15,9 +15,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from crew import spec  # noqa: E402
-from crew.ledger import Ledger  # noqa: E402
-from crew.util import write_json, write_text  # noqa: E402
+from org import spec  # noqa: E402
+from org.ledger import Ledger  # noqa: E402
+from org.util import write_json, write_text  # noqa: E402
 
 NOW = time.time()
 MIN, HOUR = 60.0, 3600.0
@@ -26,7 +26,7 @@ RESET = NOW + 2 * 86400 + 5 * HOUR
 GOOD_DRAFT = """---
 title: Per-key rate limits for the public API
 project: acme
-repos: gasblaster/acme-api, gasblaster/acme-gateway
+repos: acme/api, acme/gateway
 delivery: pr
 max_cost_usd: 60
 max_hours: 8
@@ -112,7 +112,7 @@ def run(ledger, run_id, title, state, started_ago, machine, **kw):
     if kw.get("report"):
         write_text(mirror / "report.md", kw["report"])
     record = {"run_id": run_id, "spec_id": spec_id, "spec_version": 1, "title": title, "machine": machine, "state": state,
-              "remote_dir": "$HOME/crew-runs/" + run_id, "dispatched_at": NOW - started_ago - 20, "last_sync_at": NOW,
+              "remote_dir": "$HOME/org-runs/" + run_id, "dispatched_at": NOW - started_ago - 20, "last_sync_at": NOW,
               "reachable": True, "alive": finished is None, "heartbeat_age_s": 3.0, "final": True, "events_offset": 0}
     record.update(kw.get("record", {}))
     ledger.save_run(run_id, record)
@@ -155,8 +155,8 @@ def build(root) -> Ledger:
                     milestone("M3", "Open the pull request", 5, 0.3, 273 * MIN, 3 * MIN, "done", 0.2)],
         result={"status": "done", "msg": "README rewritten; every command in it was run and its output checked.",
                 "acceptance": [{"id": "AC%d" % i, "verdict": "pass", "evidence": "ran"} for i in (1, 2, 3)],
-                "artifacts": [{"repo": "gasblaster/acme-cli", "branch": "crew/006-readme-refresh", "pr_url": "https://example.test/gasblaster/acme-cli/pull/41"},
-                              {"repo": "gasblaster/acme-docs", "branch": "crew/006-readme-refresh", "pr_url": "https://example.test/gasblaster/acme-docs/pull/7"}]})
+                "artifacts": [{"repo": "acme/cli", "branch": "org/006-readme-refresh", "pr_url": "https://example.test/acme/cli/pull/41"},
+                              {"repo": "acme/docs", "branch": "org/006-readme-refresh", "pr_url": "https://example.test/acme/docs/pull/7"}]})
     run(ledger, "005-payments-webhooks-r1", "Retry and dead-letter queue for payment webhooks", "partial", 26 * HOUR, orb("005-payments-webhooks-r1"),
         finished_ago=22 * HOUR, cost=38.6, cap=40.0, estimate={"wall_minutes": 150, "cost_usd": 24.0}, plan=plan, report="# Report\n\n## Outcome\n\npartial.\n",
         milestones=[milestone("M1", "Retry policy and schema", 30, 5, 26 * HOUR, 41 * MIN, "done", 7.9),

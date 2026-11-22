@@ -3,13 +3,13 @@
 
     python3 tests/live_manager_refine.py
 
-Two headless turns under the settings and persona `crew talk` uses, about this repository:
+Two headless turns under the settings and persona `org talk` uses, about this repository:
 
   1. a loose request whose premise is false (it blames a serial sync that is in fact parallel)
   2. "go with your recommendation", to see the draft, the check and the request for approval
 
 It prints what the manager said and did each turn, and then checks the parts a program can:
-the manager read the code before answering, a draft exists and passes `crew spec check`, nothing
+the manager read the code before answering, a draft exists and passes `org spec check`, nothing
 was approved, and nothing outside the desk changed. Whether the pushback is any good is for a
 person to judge from the printed replies; that is the point of running it.
 
@@ -28,12 +28,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from crew import manager, spec  # noqa: E402
-from crew.ledger import Ledger  # noqa: E402
-from crew.util import write_json  # noqa: E402
+from org import manager, spec  # noqa: E402
+from org.ledger import Ledger  # noqa: E402
+from org.util import write_json  # noqa: E402
 
-REQUEST = """`crew status` is slow when a few engineers are running, because it syncs every machine one at a
-time before printing. Make it fast. The project is "crew" and its checkout is at {repo}."""
+REQUEST = """`org status` is slow when a few engineers are running, because it syncs every machine one at a
+time before printing. Make it fast. The project is "org" and its checkout is at {repo}."""
 REPLY = """Go with what you recommend, and decide the open points yourself with sensible defaults. Keep it small:
 cap it at $5 and one hour, delivery `branch`. Write the spec and show me what I would be approving."""
 
@@ -67,9 +67,9 @@ def main() -> int:
     ap.add_argument("--keep", action="store_true", help="leave the temporary ledger in place")
     args = ap.parse_args()
 
-    ledger = Ledger(tempfile.mkdtemp(prefix="crew-refine-"))
+    ledger = Ledger(tempfile.mkdtemp(prefix="org-refine-"))
     ledger.init()
-    write_json(ledger.projects_path, {"crew": {"repos": [], "path": str(ROOT)}})
+    write_json(ledger.projects_path, {"org": {"repos": [], "path": str(ROOT)}})
     env = manager.launch_env(ledger)
     claude = shutil.which(ledger.config().get("claude_bin") or "claude", path=env["PATH"])
     if not claude:
@@ -99,7 +99,7 @@ def main() -> int:
     checks = [
         ("read the sync code before answering", read_code),
         ("wrote a draft in the desk", bool(drafts)),
-        ("the draft passes `crew spec check`", not errors),
+        ("the draft passes `org spec check`", not errors),
         ("nothing was approved", not ledger.approved_ids()),
         ("no run was dispatched", not ledger.run_ids()),
     ]

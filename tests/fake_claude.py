@@ -96,7 +96,7 @@ def main():
         f.write(json.dumps({"label": label, "attempt": attempt, "opts": {k: v for k, v in opts.items() if k != "--append-system-prompt"},
                             "flags": sorted(flags), "prompt": prompt, "cwd": os.getcwd(),
                             "system_prompt": opts.get("--append-system-prompt", "")[:200],
-                            "env": {k: os.environ.get(k) for k in ("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "IS_SANDBOX", "CREW_RUN_DIR")}}) + "\n")
+                            "env": {k: os.environ.get(k) for k in ("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "IS_SANDBOX", "ORG_RUN_DIR")}}) + "\n")
 
     resume = opts.get("--resume")
     sid = resume or opts.get("--session-id") or str(uuid.uuid4())
@@ -111,7 +111,7 @@ def main():
     (sessions / sid).write_text(json.dumps(prior))
 
     model = MODELS.get(opts.get("--model", "fable"), opts.get("--model", "claude-fable-5-2"))
-    run_dir = os.environ.get("CREW_RUN_DIR", "")
+    run_dir = os.environ.get("ORG_RUN_DIR", "")
     emit({"type": "system", "subtype": "init", "session_id": sid, "model": model, "cwd": os.getcwd(), "tools": []})
 
     util = scenario.get("utilization", 0.2) + 0.01 * sum(counts.values())

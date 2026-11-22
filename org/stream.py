@@ -82,7 +82,7 @@ def weekly_window(rate_limit: Optional[dict]) -> Optional[dict]:
 def feed(path, start: int = 0):
     """Yield (next offset, line) for each human-readable line in an event log, from a byte offset.
 
-    This is the activity feed behind `crew logs`, `crew peek` and the dashboard's activity view.
+    This is the activity feed behind `org logs`, `org peek` and the dashboard's activity view.
     """
     try:
         f = open(path, "rb")

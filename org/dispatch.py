@@ -28,7 +28,7 @@ from .transport import Local, Orb, Ssh, Transport, TransportError, for_machine
 from .util import now, read_json, read_text
 
 PACKAGE = Path(__file__).parent
-REMOTE_ROOT = "$HOME/crew-runs"
+REMOTE_ROOT = "$HOME/org-runs"
 
 
 class DispatchError(Exception):
@@ -109,9 +109,9 @@ def build_bundle(ledger: Ledger, meta: dict, job: dict) -> bytes:
             if not p.is_file() or "__pycache__" in rel.parts or rel.parts[0] == "web":
                 continue
             if p.suffix in (".py", ".md"):
-                add(tar, ".crew/crew/" + rel.as_posix(), p.read_bytes())
+                add(tar, ".org/org/" + rel.as_posix(), p.read_bytes())
         add(tar, "spec.md", spec_text, 0o444)
-        add(tar, ".crew/spec.md", spec_text, 0o444)  # the runner restores spec.md from this copy
+        add(tar, ".org/spec.md", spec_text, 0o444)  # the runner restores spec.md from this copy
         add(tar, "meta.json", json.dumps(meta, indent=2, sort_keys=True).encode())
         add(tar, "job.json", json.dumps(job, indent=2, sort_keys=True).encode())
         brief = read_text(ledger.briefs / ((job.get("project") or "") + ".md")) if job.get("project") else None
@@ -126,12 +126,12 @@ def start_script(run_id: str, detach: str = "auto") -> str:
         'if command -v setsid >/dev/null 2>&1; then nohup setsid bash -c "$START" >>"$RUN/runner.out" 2>&1 </dev/null & '
         'else nohup bash -c "$START" >>"$RUN/runner.out" 2>&1 </dev/null & fi; echo nohup'
     )
-    tmux = 'command -v tmux >/dev/null 2>&1 && tmux new-session -d -s "crew-%s" "$START" 2>/dev/null' % run_id
+    tmux = 'command -v tmux >/dev/null 2>&1 && tmux new-session -d -s "org-%s" "$START" 2>/dev/null' % run_id
     return "\n".join([
         'RUN="%s"' % remote_dir(run_id),
         'export PATH="$HOME/.local/bin:$PATH"',
         # $RUN expands here, on the machine; the single quotes then travel inside START.
-        "START=\"cd '$RUN' && PYTHONPATH='$RUN/.crew' exec python3 -m crew engineer run '$RUN'\"",
+        "START=\"cd '$RUN' && PYTHONPATH='$RUN/.org' exec python3 -m org engineer run '$RUN'\"",
         plain if detach == "nohup" else "if %s; then echo tmux; else %s; fi" % (tmux, plain),
     ]) + "\n"
 
@@ -241,11 +241,11 @@ def resume(ledger: Ledger, run_id: str) -> str:
 
 
 def remove_machine(ledger: Ledger, run_id: str) -> str:
-    """Delete the OrbStack machine a run used. Other kinds of machine are not crew's to delete."""
+    """Delete the OrbStack machine a run used. Other kinds of machine are not org's to delete."""
     rec = ledger.run(run_id)
     machine = rec.get("machine") or {}
     if machine.get("kind") != "orb":
-        return "nothing to delete: %s machines are not created by crew" % machine.get("kind")
+        return "nothing to delete: %s machines are not created by org" % machine.get("kind")
     Orb.delete(machine["name"])
     rec["machine_removed_at"] = now()
     ledger.save_run(run_id, rec)

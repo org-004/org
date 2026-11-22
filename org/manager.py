@@ -8,13 +8,13 @@ Two ways in, one persona:
              the working directory, which is the desk
            - permissions.blockWritesOutsideWorkingDirectories confines the file tools to it
            - deny rules refuse the commands that change remote state (push, pull requests, ...)
-         `crew` itself is excluded from the sandbox, because it must write the ledger and reach
+         `org` itself is excluded from the sandbox, because it must write the ledger and reach
          the machines, and goes through permission rules instead: its read commands are allowed,
          and the ones that are a human's decision (approve, dispatch, stop) always ask. That
          prompt is the approval step: the model can propose it, only the person can accept it.
 
   ask    one headless, read-only answer about the current state, for the dashboard's chat box and
-         `crew ask`. Nothing that would need permission can run at all.
+         `org ask`. Nothing that would need permission can run at all.
 """
 from __future__ import annotations
 
@@ -64,8 +64,8 @@ GH_READ = ["pr view", "pr list", "pr diff", "pr checks", "pr status", "issue vie
            "run view", "run list", "release view", "release list", "search", "api", "auth status"]
 
 
-def _crew(commands) -> list:
-    return ["Bash(crew %s *)" % c for c in commands]
+def _org(commands) -> list:
+    return ["Bash(org %s *)" % c for c in commands]
 
 
 def _read_rules() -> list:
@@ -80,8 +80,8 @@ def settings(ledger: Ledger, mode: str) -> dict:
     perms = {
         # Read(//**) as well as Read: the harness checks the paths given to ls, cat and the like
         # against read rules by path, and a rule without a path does not satisfy that check.
-        "allow": ["Read", "Read(//**)", "Grep", "Glob"] + _crew(READ_COMMANDS) + _read_rules(),
-        "ask": _crew(HUMAN_COMMANDS) + ["Bash(orb *)", "Bash(ssh *)"],
+        "allow": ["Read", "Read(//**)", "Grep", "Glob"] + _org(READ_COMMANDS) + _read_rules(),
+        "ask": _org(HUMAN_COMMANDS) + ["Bash(orb *)", "Bash(ssh *)"],
         # An absolute path in a rule is written with a second leading slash.
         "deny": ["Bash(%s *)" % c for c in OUTWARD] + ["Bash(%s)" % c for c in OUTWARD_API]
         + ["Edit(/%s/specs/**)" % root, "Edit(/%s/runs/**)" % root, "Edit(/%s/config.json)" % root],
@@ -89,17 +89,17 @@ def settings(ledger: Ledger, mode: str) -> dict:
     }
     out = {"permissions": perms}
     if mode == "talk":
-        perms["allow"] += _crew(DRAFT_COMMANDS) + ["Edit(/%s/**)" % desk, "WebSearch", "WebFetch"]
+        perms["allow"] += _org(DRAFT_COMMANDS) + ["Edit(/%s/**)" % desk, "WebSearch", "WebFetch"]
         if mgr.get("sandbox", True):
             out["sandbox"] = {
                 "enabled": True,
                 "autoAllowBashIfSandboxed": True,
                 "allowUnsandboxedCommands": False,
-                # Outside the sandbox, and so under the permission rules above instead: crew itself
+                # Outside the sandbox, and so under the permission rules above instead: org itself
                 # (it writes the ledger and reaches the machines) and gh (on macOS its token is in
                 # the keychain, which a sandboxed process cannot read). manager.sandbox_exclude
                 # adds more, e.g. "git clone *" if private clones fail inside the sandbox.
-                "excludedCommands": ["crew", "crew *", "gh", "gh *"] + list(mgr.get("sandbox_exclude") or []),
+                "excludedCommands": ["org", "org *", "gh", "gh *"] + list(mgr.get("sandbox_exclude") or []),
                 "network": {"allowedDomains": list(mgr.get("network_allow") or [])},
             }
     return out
@@ -108,12 +108,12 @@ def settings(ledger: Ledger, mode: str) -> dict:
 def launch_env(ledger: Ledger) -> dict:
     env = dict(os.environ)
     env["PATH"] = str(BIN) + os.pathsep + env.get("PATH", "")
-    env["CREW_HOME"] = str(ledger.root)
+    env["ORG_HOME"] = str(ledger.root)
     # On the Mac the manager uses the Mac's own login. Inside an OrbStack machine the only login
     # that works is the long-lived token `box` copies in, and only shells started by zsh export
     # it; a process started any other way falls back to an expired session. Same rule as zshrc.
     token = Path.home() / ".claude" / "oauth-token"
-    in_box = os.path.isdir("/opt/orbstack-guest") or env.get("CREW_USE_TOKEN_FILE") == "1"
+    in_box = os.path.isdir("/opt/orbstack-guest") or env.get("ORG_USE_TOKEN_FILE") == "1"
     if in_box and not env.get("CLAUDE_CODE_OAUTH_TOKEN") and not env.get("ANTHROPIC_API_KEY") and token.is_file():
         env["CLAUDE_CODE_OAUTH_TOKEN"] = token.read_text().strip()
     return env
@@ -143,10 +143,10 @@ def talk(ledger: Ledger, prompt: Optional[str] = None, project: Optional[str] = 
     ledger.init()
     claude = _claude(ledger)
     if not claude:
-        print("crew: the claude CLI is not on PATH", file=sys.stderr)
+        print("org: the claude CLI is not on PATH", file=sys.stderr)
         return 127
     if dry_run:
-        print("would run, in %s:\n  %s --append-system-prompt <persona, %d characters> --settings <below> --name 'crew manager'\n"
+        print("would run, in %s:\n  %s --append-system-prompt <persona, %d characters> --settings <below> --name 'org manager'\n"
               % (ledger.desk, claude, len(persona(ledger))))
         print(json.dumps(settings(ledger, "talk"), indent=2))
         return 0
@@ -156,7 +156,7 @@ def talk(ledger: Ledger, prompt: Optional[str] = None, project: Optional[str] = 
         pass
     mgr = ledger.config().get("manager") or {}
     cmd = [claude, "--append-system-prompt", persona(ledger), "--settings", json.dumps(settings(ledger, "talk")),
-           "--name", "crew manager"]
+           "--name", "org manager"]
     for flag, key in (("--model", "model"), ("--effort", "effort"), ("--permission-mode", "permission_mode")):
         if mgr.get(key):
             cmd += [flag, str(mgr[key])]
@@ -266,6 +266,6 @@ def ask_cli(ledger: Ledger, question: str) -> int:
     sys.stdout.write("\n")
     if out.get("error"):
         if out["error"].strip() != (out.get("text") or "").strip():
-            print("crew: %s" % out["error"], file=sys.stderr)
+            print("org: %s" % out["error"], file=sys.stderr)
         return 1
     return 0

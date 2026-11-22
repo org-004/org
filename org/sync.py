@@ -1,6 +1,6 @@
 """Sync: pull each run's state from its machine into the ledger's mirror.
 
-One read-only command per run per sync (`crew engineer snapshot`, running from the bundle already
+One read-only command per run per sync (`org engineer snapshot`, running from the bundle already
 on the machine). It returns status, plan, report and the next slice of the event log as one JSON
 document. Nothing is written on the engineer's machine and the engineer's session is not touched,
 which is the whole of "asking about a run without interrupting it".
@@ -28,7 +28,7 @@ def sync_run(ledger: Ledger, run_id: str, timeout: float = 45, slices: int = 6) 
     rec = ledger.run(run_id)
     if not rec or rec.get("state") in ("provisioning", "dispatch_failed") or rec.get("final") or rec.get("machine_removed_at"):
         return rec
-    # The dashboard's sync loop and a `crew status` in a terminal may overlap; the event log is
+    # The dashboard's sync loop and a `org status` in a terminal may overlap; the event log is
     # appended by offset, so two pulls of the same slice would duplicate it.
     with open(ledger.run_dir(run_id) / ".sync.lock", "w") as lock:
         try:
@@ -45,7 +45,7 @@ def _sync_locked(ledger: Ledger, run_id: str, rec: dict, timeout: float, slices:
     mirror = ledger.mirror_dir(run_id)
     snap, events = None, {}
     for _ in range(max(1, slices)):
-        script = ('cd "%s" && PYTHONPATH=.crew python3 -m crew engineer snapshot . --events-from %d'
+        script = ('cd "%s" && PYTHONPATH=.org python3 -m org engineer snapshot . --events-from %d'
                   % (rec["remote_dir"], int(rec.get("events_offset") or 0)))
         try:
             out = for_machine(rec["machine"], cfg).run(script, timeout=timeout).stdout

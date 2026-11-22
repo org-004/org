@@ -16,15 +16,15 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import demo_ledger  # noqa: E402
-from crew import dash, manager, spec  # noqa: E402
-from crew.util import read_json, write_json  # noqa: E402
+from org import dash, manager, spec  # noqa: E402
+from org.util import read_json, write_json  # noqa: E402
 
-PAGE = ROOT / "crew" / "web" / "index.html"
+PAGE = ROOT / "org" / "web" / "index.html"
 
 
 class DashCase(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="crew-dash-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="org-dash-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.old_env = dict(os.environ)
         self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self.old_env)))
@@ -46,7 +46,7 @@ class DashCase(unittest.TestCase):
 
     def call(self, method, path, body=None, token=True, headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
-        h = {"X-Crew-Token": self.server.token} if token else {}
+        h = {"X-Org-Token": self.server.token} if token else {}
         if body is not None:
             h["Content-Type"] = "application/json"
         h.update(headers or {})
@@ -76,9 +76,9 @@ class DashCase(unittest.TestCase):
             self.assertFalse(attr.startswith(("http:", "https:", "//")), attr)
         self.assertNotIn("@import", html)
 
-    @unittest.skipUnless(shutil.which("node", path=os.environ.get("CREW_TEST_NODE_PATH", "") + os.pathsep + "/usr/bin:/usr/local/bin"), "node not installed")
+    @unittest.skipUnless(shutil.which("node", path=os.environ.get("ORG_TEST_NODE_PATH", "") + os.pathsep + "/usr/bin:/usr/local/bin"), "node not installed")
     def test_page_script_parses(self):
-        node = shutil.which("node", path=os.environ.get("CREW_TEST_NODE_PATH", "") + os.pathsep + "/usr/bin:/usr/local/bin")
+        node = shutil.which("node", path=os.environ.get("ORG_TEST_NODE_PATH", "") + os.pathsep + "/usr/bin:/usr/local/bin")
         js = re.search(r"<script>(.*)</script>", PAGE.read_text(), re.S).group(1)
         script = self.tmp / "page.js"
         script.write_text(js)
@@ -88,7 +88,7 @@ class DashCase(unittest.TestCase):
     # ------------------------------------------------------------ who gets in
     def test_api_needs_the_token(self):
         self.assertEqual(self.get("/api/state", token=False)[0], 401)
-        self.assertEqual(self.get("/api/state", token=False, headers={"X-Crew-Token": "guess"})[0], 401)
+        self.assertEqual(self.get("/api/state", token=False, headers={"X-Org-Token": "guess"})[0], 401)
         self.assertEqual(self.post("/api/stop", {"run": "007"}, token=False)[0], 401)
         self.assertEqual(self.get("/api/state")[0], 200)
 
@@ -165,7 +165,7 @@ class DashCase(unittest.TestCase):
         self.assertIn("007-csv-export-r1", call["prompt"], "each question carries the current state")
         self.assertIn("$40.00", call["prompt"], "including each run's cap")
         allowed = json.loads(call["opts"]["--settings"])["permissions"]
-        self.assertIn("Bash(crew peek *)", allowed["allow"])
+        self.assertIn("Bash(org peek *)", allowed["allow"])
         self.assertFalse([r for r in allowed["allow"] if "approve" in r or "stop" in r or "Edit" in r or "dispatch" in r])
         # a second question continues the same conversation
         self.call("POST", "/api/ask", body={"question": "And the search index?"})
@@ -177,9 +177,9 @@ class ManagerSettings(unittest.TestCase):
     """The rules the manager's interactive session runs under."""
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="crew-mgr-settings-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="org-mgr-settings-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        from crew.ledger import Ledger
+        from org.ledger import Ledger
 
         self.ledger = Ledger(self.tmp / "ledger")
         self.ledger.init()
@@ -194,14 +194,14 @@ class ManagerSettings(unittest.TestCase):
         self.assertIn("Edit(/%s/specs/**)" % self.ledger.root, p["deny"], "approved specs cannot be edited")
         self.assertEqual(s["sandbox"]["enabled"], True)
         self.assertEqual(s["sandbox"]["allowUnsandboxedCommands"], False, "no escape hatch out of the sandbox")
-        self.assertIn("crew *", s["sandbox"]["excludedCommands"])
+        self.assertIn("org *", s["sandbox"]["excludedCommands"])
 
     def test_approval_always_asks_the_person(self):
         for mode in ("talk", "ask"):
             p = manager.settings(self.ledger, mode)["permissions"]
             for cmd in ("approve", "dispatch", "stop", "machine rm"):
-                self.assertIn("Bash(crew %s *)" % cmd, p["ask"], cmd)
-                self.assertNotIn("Bash(crew %s *)" % cmd, p["allow"], cmd)
+                self.assertIn("Bash(org %s *)" % cmd, p["ask"], cmd)
+                self.assertNotIn("Bash(org %s *)" % cmd, p["allow"], cmd)
             self.assertIn("Bash(git push *)", p["deny"])
             self.assertIn("Bash(gh pr create *)", p["deny"])
         self.assertNotIn("sandbox", manager.settings(self.ledger, "ask"), "question mode runs nothing that needs one")

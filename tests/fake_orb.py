@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A stand-in for OrbStack's `orb`, covering exactly the commands crew (and `box`) use.
+"""A stand-in for OrbStack's `orb`, covering exactly the commands org (and `box`) use.
 
 Each "machine" is a directory under $FAKE_ORB_ROOT with its own home, so a command run "in" a
 machine sees a different $HOME from the test process and from other machines. That is enough to

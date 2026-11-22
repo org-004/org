@@ -12,15 +12,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from crew import budget, dispatch, spec, status, sync  # noqa: E402
-from crew.ledger import Ledger  # noqa: E402
-from crew.transport import Ssh, TransportError  # noqa: E402
-from crew.util import read_json, write_json  # noqa: E402
+from org import budget, dispatch, spec, status, sync  # noqa: E402
+from org.ledger import Ledger  # noqa: E402
+from org.transport import Ssh, TransportError  # noqa: E402
+from org.util import read_json, write_json  # noqa: E402
 
 GOOD = """---
 title: CSV export
 project: acme
-repos: gasblaster/acme-web, gasblaster/acme-api
+repos: acme/web, acme/api
 delivery: pr
 max_cost_usd: 40
 max_hours: 6
@@ -69,7 +69,7 @@ TURNS = {
     "milestone:M1": {"structured": {"milestone_id": "M1", "outcome": "done", "summary": "endpoint verified"}, "cost": 2.5},
     "report": {"structured": {"status": "done", "msg": "Both criteria pass.",
                               "acceptance": [{"id": "AC1", "verdict": "pass", "evidence": "ran"}, {"id": "AC2", "verdict": "pass", "evidence": "ran"}],
-                              "artifacts": [{"repo": "gasblaster/acme-api", "branch": "crew/001-csv-export", "pr_url": "https://example.test/pr/1"}]},
+                              "artifacts": [{"repo": "acme/api", "branch": "org/001-csv-export", "pr_url": "https://example.test/pr/1"}]},
                "files": {"$RUN/report.md": "# Report\n\nDelivered.\n"}, "cost": 0.3},
 }
 
@@ -80,7 +80,7 @@ class SpecChecks(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(warnings, [])
         meta, body = spec.parse(GOOD)
-        self.assertEqual(meta["repos"], ["gasblaster/acme-web", "gasblaster/acme-api"])
+        self.assertEqual(meta["repos"], ["acme/web", "acme/api"])
         self.assertEqual(meta["max_cost_usd"], 40.0)
         self.assertEqual(spec.acceptance_ids(body), ["AC1", "AC2"])
 
@@ -104,7 +104,7 @@ class SpecChecks(unittest.TestCase):
             self.assertTrue(any(expected in e for e in errors), "%r not reported in %r" % (expected, errors))
 
     def test_a_repo_must_be_reachable_from_the_engineers_machine(self):
-        local_path = GOOD.replace("repos: gasblaster/acme-web, gasblaster/acme-api", "repos: /Users/me/src/acme-web")
+        local_path = GOOD.replace("repos: acme/web, acme/api", "repos: /Users/me/src/acme-web")
         errors, _ = spec.check(local_path)
         self.assertTrue(any("path on this machine" in e and "orb" in e for e in errors), errors)
         self.assertTrue(any("path on this machine" in e for e in spec.check(local_path.replace("delivery: pr", "delivery: pr\nmachine: ssh:gpu"))[0]))
@@ -113,11 +113,11 @@ class SpecChecks(unittest.TestCase):
         self.assertEqual(spec.check(local_path, default_machine="local")[0], [])
 
     def test_a_placeholder_repo_is_not_ready(self):
-        for name in ("OWNER/crew", "owner/name", "<org>/acme-api", "your-org/acme", "TBD"):
-            errors, _ = spec.check(GOOD.replace("repos: gasblaster/acme-web, gasblaster/acme-api", "repos: " + name))
+        for name in ("OWNER/org", "owner/name", "<org>/acme-api", "your-org/acme", "TBD"):
+            errors, _ = spec.check(GOOD.replace("repos: acme/web, acme/api", "repos: " + name))
             self.assertTrue(any("placeholder" in e for e in errors), name)
-        for name in ("gasblaster/acme-web", "https://github.com/gasblaster/pkm.git", "git@github.com:gasblaster/pkm.git", "ownerly/repository"):
-            errors, _ = spec.check(GOOD.replace("repos: gasblaster/acme-web, gasblaster/acme-api", "repos: " + name))
+        for name in ("acme/web", "https://github.com/acme/web.git", "git@github.com:acme/web.git", "ownerly/repository"):
+            errors, _ = spec.check(GOOD.replace("repos: acme/web, acme/api", "repos: " + name))
             self.assertEqual(errors, [], name)
 
     def test_effort_is_checked(self):
@@ -134,7 +134,7 @@ class SpecChecks(unittest.TestCase):
 
 class ManagerSide(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="crew-mgr-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="org-mgr-"))
         self.addCleanup(self._cleanup)
         self.old_env = dict(os.environ)
         # A home of our own: nothing here reads or copies the real login token.
@@ -247,8 +247,8 @@ class ManagerSide(unittest.TestCase):
         token = home / ".claude" / "oauth-token"
         self.assertEqual(token.read_text().strip(), "sk-ant-oat01-not-a-real-token")
         self.assertEqual(token.stat().st_mode & 0o077, 0, "the token is private to the machine's user")
-        remote = home / "crew-runs" / run_id
-        self.assertTrue((remote / ".crew" / "crew" / "runner.py").exists())
+        remote = home / "org-runs" / run_id
+        self.assertTrue((remote / ".org" / "org" / "runner.py").exists())
         self.assertEqual((remote / "spec.md").read_text(), GOOD)
         job = read_json(remote / "job.json")
         self.assertEqual(job["caps"], {"max_cost_usd": 40.0, "max_hours": 6.0})
@@ -287,7 +287,7 @@ class ManagerSide(unittest.TestCase):
         # the next run of any spec is told how this estimate turned out
         run2, _ = dispatch.dispatch(self.ledger, spec_id, log=log.append)
         self.assertEqual(run2, "001-csv-export-r2")
-        job2 = read_json(self.machine_home(run2) / "crew-runs" / run2 / "job.json")
+        job2 = read_json(self.machine_home(run2) / "org-runs" / run2 / "job.json")
         self.assertEqual(len(job2["history"]["runs"]), 1)
         self.assertAlmostEqual(job2["history"]["cost_ratio"], 2.8 / 5.0, places=2)
         plan_prompt = None
@@ -386,11 +386,11 @@ class ManagerSide(unittest.TestCase):
         other_spec = spec.new_draft(other, "CSV export", "acme")
         other.draft_path(other_spec).write_text(GOOD)
         spec.approve(other, other_spec, spec.draft_sha(other, other_spec)[:10])
-        report_before = (shared / "crew-runs" / run_id / "report.md").read_text()
+        report_before = (shared / "org-runs" / run_id / "report.md").read_text()
         with self.assertRaises(dispatch.DispatchError) as ctx:
             dispatch.dispatch(other, other_spec, log=lambda m: None)
         self.assertIn("already has a run directory", str(ctx.exception))
-        self.assertEqual((shared / "crew-runs" / run_id / "report.md").read_text(), report_before)
+        self.assertEqual((shared / "org-runs" / run_id / "report.md").read_text(), report_before)
         self.assertEqual(other.run(run_id)["state"], "dispatch_failed")
 
     def test_unreachable_machine_is_reported_not_fatal(self):
@@ -439,45 +439,45 @@ class ManagerSide(unittest.TestCase):
         self.assertEqual(budget.usd_per_pct(self.ledger), {"value": 4.5, "source": "config", "runs": 0})
 
     def test_cli_round_trip(self):
-        def crew(*args, ok=True):
-            p = subprocess.run([sys.executable, "-m", "crew", "--home", str(self.ledger.root)] + list(args),
+        def org(*args, ok=True):
+            p = subprocess.run([sys.executable, "-m", "org", "--home", str(self.ledger.root)] + list(args),
                                capture_output=True, text=True, cwd=str(ROOT), timeout=60)
             if ok:
                 self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
             return p
 
-        out = crew("spec", "new", "CSV export", "--project", "acme").stdout.split()
+        out = org("spec", "new", "CSV export", "--project", "acme").stdout.split()
         spec_id, path = out[0], out[1]
-        self.assertEqual(crew("spec", "check", spec_id, ok=False).returncode, 1)
+        self.assertEqual(org("spec", "check", spec_id, ok=False).returncode, 1)
         Path(path).write_text(GOOD)
-        check = crew("spec", "check", "1").stdout
+        check = org("spec", "check", "1").stdout
         self.assertIn("ready to approve", check)
         sha = check.split("sha256 ")[1].split()[0]
-        self.assertIn("draft", crew("status", "--no-sync").stdout)
-        self.assertEqual(crew("approve", spec_id, "--sha", "0000000000", ok=False).returncode, 1)
-        approve = crew("approve", spec_id, "--sha", sha).stdout
+        self.assertIn("draft", org("status", "--no-sync").stdout)
+        self.assertEqual(org("approve", spec_id, "--sha", "0000000000", ok=False).returncode, 1)
+        approve = org("approve", spec_id, "--sha", sha).stdout
         self.assertIn("dispatched 001-csv-export-r1", approve)
         self.wait_final("001-csv-export-r1")
-        self.assertIn("done ✓", crew("status").stdout)
-        self.assertEqual(json.loads(crew("status", "--json").stdout)["runs"][0]["state"], "done")
-        self.assertIn("# Plan", crew("plan", "001").stdout)
-        self.assertIn("Delivered.", crew("report", "1").stdout)
-        self.assertIn("cost after planning", crew("review", "001-csv-export-r1").stdout)
-        peek = crew("peek", "1").stdout
+        self.assertIn("done ✓", org("status").stdout)
+        self.assertEqual(json.loads(org("status", "--json").stdout)["runs"][0]["state"], "done")
+        self.assertIn("# Plan", org("plan", "001").stdout)
+        self.assertIn("Delivered.", org("report", "1").stdout)
+        self.assertIn("cost after planning", org("review", "001-csv-export-r1").stdout)
+        peek = org("peek", "1").stdout
         self.assertIn("result:    done — Both criteria pass.", peek)
         self.assertIn("turn ended", peek)
-        self.assertIn("Bash: echo working on plan", crew("logs", "1", "--all").stdout)
-        self.assertIn("eng-001-csv-export-r1", crew("machine", "ls").stdout)
+        self.assertIn("Bash: echo working on plan", org("logs", "1", "--all").stdout)
+        self.assertIn("eng-001-csv-export-r1", org("machine", "ls").stdout)
         # approving the same text again must not start a second engineer
-        again = crew("approve", spec_id, "--sha", sha).stdout
+        again = org("approve", spec_id, "--sha", sha).stdout
         self.assertIn("already approved", again)
         self.assertIn("nothing dispatched", again)
         self.assertEqual(self.ledger.runs_for(spec_id), ["001-csv-export-r1"])
-        self.assertIn("dispatched 001-csv-export-r2", crew("dispatch", spec_id).stdout, "asking for another run is explicit")
+        self.assertIn("dispatched 001-csv-export-r2", org("dispatch", spec_id).stdout, "asking for another run is explicit")
         self.wait_final("001-csv-export-r2")
-        self.assertIn("deleted", crew("machine", "rm", "001-csv-export-r1").stdout)
-        self.assertIn("v1", crew("spec", "ls").stdout)
-        self.assertIn(str(self.ledger.draft_path(spec_id)), crew("spec", "check", str(self.ledger.draft_path(spec_id))).stdout)
+        self.assertIn("deleted", org("machine", "rm", "001-csv-export-r1").stdout)
+        self.assertIn("v1", org("spec", "ls").stdout)
+        self.assertIn(str(self.ledger.draft_path(spec_id)), org("spec", "check", str(self.ledger.draft_path(spec_id))).stdout)
 
 
 if __name__ == "__main__":

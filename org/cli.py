@@ -1,21 +1,21 @@
-"""The `crew` command.
+"""The `org` command.
 
-    crew talk                       talk to the manager: refine a spec, or ask about runs
-    crew status [--watch]           what every run is doing, time, ETA, spend
-    crew dash                       the same as a local web page, with the manager chat beside it
-    crew ask "question"             one answer from the manager about the current state
+    org talk                       talk to the manager: refine a spec, or ask about runs
+    org status [--watch]           what every run is doing, time, ETA, spend
+    org dash                       the same as a local web page, with the manager chat beside it
+    org ask "question"             one answer from the manager about the current state
 
-    crew spec new "<title>"         start a draft            crew spec check <spec>
-    crew spec show <spec>           print a draft or spec    crew spec ls
-    crew approve <spec> --sha <8+>  freeze the draft and dispatch an engineer
-    crew dispatch <spec>            run an approved spec again
+    org spec new "<title>"         start a draft            org spec check <spec>
+    org spec show <spec>           print a draft or spec    org spec ls
+    org approve <spec> --sha <8+>  freeze the draft and dispatch an engineer
+    org dispatch <spec>            run an approved spec again
 
-    crew plan|report|review <run>   the frozen plan, the report, plan against outcome
-    crew peek <run>                 what the engineer is doing right now
-    crew logs <run> [-f]            its activity feed
-    crew stop|resume <run>          stop the engineer, or restart a runner that died
-    crew machine rm <run>           delete the OrbStack machine a run used
-    crew doctor                     check that this machine is ready to manage engineers
+    org plan|report|review <run>   the frozen plan, the report, plan against outcome
+    org peek <run>                 what the engineer is doing right now
+    org logs <run> [-f]            its activity feed
+    org stop|resume <run>          stop the engineer, or restart a runner that died
+    org machine rm <run>           delete the OrbStack machine a run used
+    org doctor                     check that this machine is ready to manage engineers
 
 A <run> may be a run id, a unique prefix, or a spec reference (meaning that spec's latest run).
 A <spec> may be its id, its number, or a unique prefix.
@@ -34,7 +34,7 @@ from .util import clip, fmt_clock, fmt_dur, fmt_stamp, fmt_usd, now, read_json, 
 
 
 def die(msg: str, code: int = 1):
-    print("crew: " + str(msg), file=sys.stderr)
+    print("org: " + str(msg), file=sys.stderr)
     sys.exit(code)
 
 
@@ -123,7 +123,7 @@ def cmd_spec(args) -> int:
         if not approved.exists():
             die("%s is not approved; edit its draft directly" % spec_id)
         print(ledger.draft_path(spec_id))
-        print("Edit the draft; `crew approve` will record it as the next version and start a new run.")
+        print("Edit the draft; `org approve` will record it as the next version and start a new run.")
         return 0
     return 2
 
@@ -141,14 +141,14 @@ def cmd_approve(args) -> int:
     if before.get("sha256") == meta["sha256"] and ledger.runs_for(spec_id):
         # Approving the same text twice must not quietly start a second engineer on it.
         print("%s v%d is already approved with exactly this text; runs: %s" % (spec_id, meta["version"], ", ".join(ledger.runs_for(spec_id))))
-        print("nothing dispatched; `crew dispatch %s` starts another engineer on it" % spec_id)
+        print("nothing dispatched; `org dispatch %s` starts another engineer on it" % spec_id)
         return 0
     print("approved %s v%d (sha256 %s)" % (spec_id, meta["version"], meta["sha256"][:12]))
     live = [r for r in ledger.runs_for(spec_id) if not ledger.run(r).get("final") and ledger.run(r).get("state") != "dispatch_failed"]
     if live:
-        print("note: %s is still running against an earlier approval; `crew stop %s` if it should not continue" % (", ".join(live), live[-1]))
+        print("note: %s is still running against an earlier approval; `org stop %s` if it should not continue" % (", ".join(live), live[-1]))
     if args.no_dispatch:
-        print("not dispatched; `crew dispatch %s` starts an engineer" % spec_id)
+        print("not dispatched; `org dispatch %s` starts an engineer" % spec_id)
         return 0
     return _dispatch(ledger, spec_id, args.machine)
 
@@ -163,7 +163,7 @@ def _dispatch(ledger: Ledger, spec_id: str, machine) -> int:
     print("dispatched %s" % run_id)
     if rec.get("attach"):
         print("watch it:  %s" % rec["attach"])
-    print("status:    crew status")
+    print("status:    org status")
     return 0
 
 
@@ -377,7 +377,7 @@ def cmd_machine(args) -> int:
     rec = sync.sync_run(ledger, run_id)
     status = read_json(ledger.mirror_dir(run_id) / "status.json") or {}
     if not rec.get("final") and not args.force:
-        die("%s is not finished and fully synced (state %s); `crew stop` it first, or pass --force to delete the machine anyway"
+        die("%s is not finished and fully synced (state %s); `org stop` it first, or pass --force to delete the machine anyway"
             % (run_id, rec.get("state")))
     if status.get("warnings") and not args.force:
         die("the run left warnings (work that may exist only on the machine):\n  " + "\n  ".join(status["warnings"])
@@ -443,9 +443,9 @@ def cmd_doctor(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="crew", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--home", help="ledger directory (default $CREW_HOME or ~/.crew)")
-    p.add_argument("--version", action="version", version="crew " + __version__)
+    p = argparse.ArgumentParser(prog="org", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--home", help="ledger directory (default $ORG_HOME or ~/.org)")
+    p.add_argument("--version", action="version", version="org " + __version__)
     sub = p.add_subparsers(dest="cmd")
 
     sub.add_parser("init", help="create the ledger").set_defaults(fn=cmd_init)
@@ -477,7 +477,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("approve", help="freeze a draft and dispatch an engineer")
     s.add_argument("spec")
-    s.add_argument("--sha", required=True, help="first 8+ characters of the draft's sha256, from `crew spec check`")
+    s.add_argument("--sha", required=True, help="first 8+ characters of the draft's sha256, from `org spec check`")
     s.add_argument("--machine", help="orb, ssh:<name> or local (overrides the spec header)")
     s.add_argument("--no-dispatch", action="store_true")
     s.set_defaults(fn=cmd_approve)

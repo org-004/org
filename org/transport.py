@@ -48,7 +48,7 @@ class Transport:
 
 
 class Local(Transport):
-    """This machine, with no isolation. For trying crew out and for its tests."""
+    """This machine, with no isolation. For trying org out and for its tests."""
 
     kind = "local"
 
@@ -67,7 +67,7 @@ class Local(Transport):
         return e
 
     def attach_hint(self, run_id: str) -> str:
-        return "tmux attach -t crew-%s" % run_id
+        return "tmux attach -t org-%s" % run_id
 
 
 class Orb(Transport):
@@ -82,7 +82,7 @@ class Orb(Transport):
         return ["orb", "-m", self.name, "bash", "-c", script]
 
     def attach_hint(self, run_id: str) -> str:
-        return "orb -m %s tmux attach -t crew-%s" % (self.name, run_id)
+        return "orb -m %s tmux attach -t org-%s" % (self.name, run_id)
 
     @staticmethod
     def _orb(args: List[str], timeout: float = 180) -> subprocess.CompletedProcess:
@@ -126,7 +126,7 @@ class Ssh(Transport):
                 + [self.host, "bash -c " + shlex.quote(script)])
 
     def attach_hint(self, run_id: str) -> str:
-        return "ssh -t %s %s tmux attach -t crew-%s" % (" ".join(self.options), self.host, run_id)
+        return "ssh -t %s %s tmux attach -t org-%s" % (" ".join(self.options), self.host, run_id)
 
 
 def for_machine(machine: dict, cfg: dict) -> Transport:

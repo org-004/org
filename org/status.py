@@ -1,6 +1,6 @@
 """The state of everything as one document, and its rendering for a terminal.
 
-`collect()` is the single source for `crew status`, the dashboard's API and the manager chatbot:
+`collect()` is the single source for `org status`, the dashboard's API and the manager chatbot:
 all three show the same numbers because all three read this.
 """
 from __future__ import annotations
@@ -97,7 +97,7 @@ def collect(ledger: Ledger, do_sync: bool = False) -> dict:
     if do_sync:
         # Someone is waiting on this. A machine that does not answer within a few seconds is
         # shown as it was last seen, marked unreachable; the long timeout and the bulk of the
-        # event log are left to the dashboard's loop and to `crew sync`.
+        # event log are left to the dashboard's loop and to `org sync`.
         quick = float((ledger.config().get("status") or {}).get("sync_timeout_s") or 8)
         sync_all(ledger, timeout=quick, slices=1)
     rate = budget.usd_per_pct(ledger)
@@ -136,8 +136,8 @@ def collect(ledger: Ledger, do_sync: bool = False) -> dict:
         "budget": {
             "weekly": week,
             "usd_per_pct": rate,
-            "crew_spend_this_window_usd": spent if window_start else None,
-            "crew_pct_this_window": (spent / rate["value"]) if (window_start and rate["value"]) else None,
+            "org_spend_this_window_usd": spent if window_start else None,
+            "org_pct_this_window": (spent / rate["value"]) if (window_start and rate["value"]) else None,
         },
         "runs": runs,
         "drafts": drafts,
@@ -169,10 +169,10 @@ def budget_line(b: dict) -> str:
         head += " · 1%% ≈ %s (%s)" % (fmt_usd(rate["value"]), src)
     else:
         head += " · dollars per 1% not known yet"
-    if b.get("crew_spend_this_window_usd") is not None:
-        head += " · crew spent %s this window" % fmt_usd(b["crew_spend_this_window_usd"])
-        if b.get("crew_pct_this_window") is not None:
-            head += " (%.1f%%)" % b["crew_pct_this_window"]
+    if b.get("org_spend_this_window_usd") is not None:
+        head += " · engineers spent %s this window" % fmt_usd(b["org_spend_this_window_usd"])
+        if b.get("org_pct_this_window") is not None:
+            head += " (%.1f%%)" % b["org_pct_this_window"]
     return head
 
 
@@ -241,7 +241,7 @@ def scorecard(ledger: Ledger, run_id: str) -> str:
     a = read_json(mirror / "actuals.json")
     result = read_json(mirror / "result.json") or {}
     if not a:
-        return "%s has not finished (no actuals.json in %s). Run `crew sync` if it should have." % (run_id, mirror)
+        return "%s has not finished (no actuals.json in %s). Run `org sync` if it should have." % (run_id, mirror)
 
     def ratio(actual, est):
         return "%.2fx" % (actual / est) if actual and est else "—"

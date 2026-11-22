@@ -15,8 +15,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from crew import runner, schemas  # noqa: E402
-from crew.util import read_json, sha256_bytes  # noqa: E402
+from org import runner, schemas  # noqa: E402
+from org.util import read_json, sha256_bytes  # noqa: E402
 
 FAKE = ROOT / "tests" / "fake_claude.py"
 SPEC = "---\ntitle: Test spec\n---\n\n## Intent\n\nProve the runner.\n"
@@ -34,12 +34,12 @@ REPORT = {"structured": {"status": "done", "msg": "All criteria pass.", "accepta
 
 class RunnerCase(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="crew-test-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="org-test-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.run_dir = self.tmp / "run"
-        (self.run_dir / ".crew").mkdir(parents=True)
+        (self.run_dir / ".org").mkdir(parents=True)
         (self.run_dir / "spec.md").write_text(SPEC)
-        (self.run_dir / ".crew" / "spec.md").write_text(SPEC)
+        (self.run_dir / ".org" / "spec.md").write_text(SPEC)
         self.scen = self.tmp / "scen"
         self.scen.mkdir()
         os.environ["FAKE_CLAUDE_SCENARIO"] = str(self.scen / "scenario.json")
@@ -263,10 +263,10 @@ class RunnerCase(unittest.TestCase):
         self.assertLess(st["elapsed_s"], 20)
 
     def test_a_second_runner_refuses_to_start(self):
-        # `crew resume` on a run whose runner is alive must not put two engineers in one workspace.
+        # `org resume` on a run whose runner is alive must not put two engineers in one workspace.
         self.job({"plan": PLAN_TURN, "milestone:M1": dict(DONE("M1"), sleep=30)})
         env = dict(os.environ, PYTHONPATH=str(ROOT))
-        first = subprocess.Popen([sys.executable, "-m", "crew", "engineer", "run", str(self.run_dir)], env=env,
+        first = subprocess.Popen([sys.executable, "-m", "org", "engineer", "run", str(self.run_dir)], env=env,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(first.wait)
         self.addCleanup(first.kill)

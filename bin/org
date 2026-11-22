@@ -1,6 +1,6 @@
 #!/bin/sh
 # Launcher: run the package from this checkout with whatever python3 is on the machine.
-# Symlink it onto PATH (ln -s "$PWD/bin/crew" ~/.local/bin/crew); the link is followed back here.
+# Symlink it onto PATH (ln -s "$PWD/bin/org" ~/.local/bin/org); the link is followed back here.
 self="$0"
 while [ -L "$self" ]; do
   target=$(readlink "$self")
@@ -10,4 +10,4 @@ while [ -L "$self" ]; do
   esac
 done
 root=$(cd "$(dirname "$self")/.." && pwd)
-PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m crew "$@"
+PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m org "$@"

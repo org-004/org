@@ -346,7 +346,7 @@ class Runner:
         token = Path.home() / ".claude" / "oauth-token"
         if not env.get("CLAUDE_CODE_OAUTH_TOKEN") and not env.get("ANTHROPIC_API_KEY") and token.is_file():
             env["CLAUDE_CODE_OAUTH_TOKEN"] = token.read_text().strip()
-        env["CREW_RUN_DIR"] = str(self.dir)
+        env["ORG_RUN_DIR"] = str(self.dir)
         return env
 
     # ------------------------------------------------------------ one CLI invocation
@@ -595,7 +595,7 @@ class Runner:
 
     def check_spec(self) -> None:
         """The spec is read-only. If the copy in the run directory changed, put it back."""
-        spec, pristine = self.dir / "spec.md", self.dir / ".crew" / "spec.md"
+        spec, pristine = self.dir / "spec.md", self.dir / ".org" / "spec.md"
         want = self.job.get("spec_sha")
         if want and sha256_file(spec) != want and pristine.exists() and sha256_file(pristine) == want:
             try:
@@ -959,7 +959,7 @@ class Runner:
         if st.get("phase") == "finished":
             print("run %s already finished: %s" % (self.job["run_id"], st.get("state")))
             return 0
-        # One runner per run. `crew resume` on a run whose runner is in fact alive must not start
+        # One runner per run. `org resume` on a run whose runner is in fact alive must not start
         # a second engineer in the same session and workspace.
         self._lock = open(self.dir / ".runner.lock", "w")
         try:

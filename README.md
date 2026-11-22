@@ -1,4 +1,4 @@
-# crew
+# org
 
 A product manager on your machine, engineers in theirs.
 
@@ -14,11 +14,11 @@ state is files.
 ```
  your Mac                                   engineer machines (several at once)
  ┌───────────────────────────────┐          ┌──────────────────────────────────┐
- │ crew talk    refine a spec    │ approve  │ OrbStack clone of `base`         │
- │ crew dash    status + chat    │ ───────▶ │   runner ─▶ claude -p (bypass)   │
- │ crew status  the same, in a   │          │   plan ▸ milestones ▸ report     │
+ │ org talk    refine a spec    │ approve  │ OrbStack clone of `base`         │
+ │ org dash    status + chat    │ ───────▶ │   runner ─▶ claude -p (bypass)   │
+ │ org status  the same, in a   │          │   plan ▸ milestones ▸ report     │
  │              terminal         │ ◀─────── │   status.json  plan.md  report.md│
- │ ledger: ~/.crew               │   pull   ├──────────────────────────────────┤
+ │ ledger: ~/.org               │   pull   ├──────────────────────────────────┤
  └───────────────────────────────┘          │ or a remote VM over ssh          │
                                             └──────────────────────────────────┘
 ```
@@ -31,9 +31,9 @@ stay isolated, and reading a run's state never touches the engineer's session.
 On the Mac:
 
 ```sh
-git clone <this repo> ~/crew && ln -s ~/crew/bin/crew ~/.local/bin/crew
-crew init          # creates the ledger at ~/.crew ($CREW_HOME to move it)
-crew doctor        # says what is missing
+git clone <this repo> ~/org && ln -s ~/org/bin/org ~/.local/bin/org
+org init          # creates the ledger at ~/.org ($ORG_HOME to move it)
+org doctor        # says what is missing
 ```
 
 What it needs:
@@ -43,39 +43,39 @@ What it needs:
   The default name is `base`; each engineer runs in a fresh `orb clone` of it.
 - `~/.claude/oauth-token`: a long-lived token from `claude setup-token`. It is copied into each
   engineer's machine over stdin, mode 600, the same way `box <name>` does it.
-- For remote VMs, an entry per host in `~/.crew/config.json` (below). The host needs `python3`,
+- For remote VMs, an entry per host in `~/.org/config.json` (below). The host needs `python3`,
   `git`, `claude` with a working login, and key-based ssh.
 
-The first `crew talk` asks once, as Claude Code does for any new folder, whether to trust
-`~/.crew/desk`. That folder is the manager's desk and holds only what crew and the manager put
+The first `org talk` asks once, as Claude Code does for any new folder, whether to trust
+`~/.org/desk`. That folder is the manager's desk and holds only what org and the manager put
 there.
 
 ## The flow
 
 ```sh
-crew talk "add CSV export to the table view"
+org talk "add CSV export to the table view"
 ```
 
 1. **Refine.** The manager restates what you are after, reads the repositories (cloning into its
    scratch space to build and test), checks what is already running, challenges the request and
    offers alternatives. It asks only what is yours to decide.
-2. **Review.** It writes `~/.crew/desk/drafts/<spec>.md` and runs `crew spec check`, which prints
-   the draft's sha256. Read the draft there, or in `crew dash` under "Drafts awaiting approval".
-3. **Approve.** Say so. The manager runs `crew approve <spec> --sha <prefix>` and Claude Code asks
+2. **Review.** It writes `~/.org/desk/drafts/<spec>.md` and runs `org spec check`, which prints
+   the draft's sha256. Read the draft there, or in `org dash` under "Drafts awaiting approval".
+3. **Approve.** Say so. The manager runs `org approve <spec> --sha <prefix>` and Claude Code asks
    you to confirm that command. That confirmation is the approval: the rules the manager runs
    under make the command always ask, and the hash ties it to the text you read. If the draft
    changed after you looked, the hash no longer matches and nothing happens. You can also approve
    from a terminal or from the dashboard.
-4. **Watch.** `crew status`, `crew dash`, or `crew ask "why is the export run late?"`.
-5. **Afterwards.** `crew report <run>` is the engineer's report. `crew review <run>` sets the
-   frozen plan against what happened. `crew machine rm <run>` deletes the OrbStack machine once
+4. **Watch.** `org status`, `org dash`, or `org ask "why is the export run late?"`.
+5. **Afterwards.** `org report <run>` is the engineer's report. `org review <run>` sets the
+   frozen plan against what happened. `org machine rm <run>` deletes the OrbStack machine once
    the work is pushed.
 
 ## The manager
 
 One persona, two ways in.
 
-`crew talk` is an interactive Claude Code session. It can read everything and run anything, and it
+`org talk` is an interactive Claude Code session. It can read everything and run anything, and it
 can change nothing that matters:
 
 | It can | It cannot |
@@ -87,11 +87,11 @@ can change nothing that matters:
 
 Three layers hold that, each for what it can see: Claude Code's Bash sandbox confines shell
 commands to the desk; `blockWritesOutsideWorkingDirectories` confines the file tools to it; deny
-rules refuse the commands that change remote state. `crew talk --dry-run` prints the exact
+rules refuse the commands that change remote state. `org talk --dry-run` prints the exact
 settings. `python3 tests/live_manager_rules.py` checks them against the real harness.
 
-`crew ask` and the dashboard's chat box are the same persona, headless and read-only: nothing
-that would need permission can run. It answers from the ledger and from `crew peek`, and runs on
+`org ask` and the dashboard's chat box are the same persona, headless and read-only: nothing
+that would need permission can run. It answers from the ledger and from `org peek`, and runs on
 a cheaper model (`manager.ask_model`, default `sonnet`).
 
 The manager keeps a brief per project (`desk/projects/<name>.md`): how to build and test, hot
@@ -123,7 +123,7 @@ The runner, not the engineer, owns the things that must not depend on a model re
 - **Recovery.** A turn that crashes or ends in prose is resumed with a nudge. A usage limit is
   waited out until the reset. A session that cannot be resumed is replaced, and the engineer is
   told to read its own plan and the repositories. A runner that dies is restarted with
-  `crew resume` and continues from the last finished step.
+  `org resume` and continues from the last finished step.
 - **Honesty.** `done` is lowered to `partial` unless every acceptance criterion in the spec is
   reported as passing. The spec in the run directory is read-only and is restored if it changes.
 
@@ -137,7 +137,7 @@ One Markdown file with a flat header:
 ---
 title: CSV export for the table view
 project: acme
-repos: gasblaster/acme-web, gasblaster/acme-api
+repos: acme/web, acme/api
 delivery: pr            # pr | branch | merge | none
 machine: orb            # orb | ssh:<name> | local
 max_cost_usd: 40        # hard caps; set at least one
@@ -150,7 +150,7 @@ effort: high
 
 and these sections: Intent, Context, Requirements (`- R1 (MUST): ...`, `- R2 (SHOULD): ...`), Out of
 scope, Acceptance criteria (`- AC1: <command> <expected observation>`), Constraints, Alternatives
-considered, Open questions (which must read `None`). `crew spec check` enforces the parts a
+considered, Open questions (which must read `None`). `org spec check` enforces the parts a
 program can check. Changing an approved spec means revising the draft and approving again, which
 records a new version and starts a new run.
 
@@ -161,7 +161,7 @@ records a new version and starts a new run.
 - **The weekly limit** is the account-wide figure the CLI reports at the start of every engineer
   turn. It is exact and shared with everything else you do with Claude.
 - **A run's share of the weekly limit** needs the exchange rate between the two, which is not
-  published. crew learns it from finished runs (the largest dollars-per-point any run observed,
+  published. org learns it from finished runs (the largest dollars-per-point any run observed,
   since other activity only inflates the movement), or you set `budget.usd_per_weekly_pct`.
   Until one of those exists the share shows as unknown instead of as a guess.
 - **ETA** starts as the plan's estimate and is re-derived from the pace of finished milestones.
@@ -171,15 +171,15 @@ records a new version and starts a new run.
 ## Commands
 
 ```
-crew talk [message]             talk to the manager        crew ask "question"
-crew status [--watch|--json]    every run                  crew dash
-crew spec new|check|show|ls|revise
-crew approve <spec> --sha <8+>  freeze and dispatch        crew dispatch <spec> [--machine M]
-crew peek <run>                 one run, in words          crew logs <run> [-f]
-crew plan|report|review <run>
-crew stop <run>                 crew resume <run>          crew machine ls | rm <run>
-crew project add <name> --repo owner/name [--path ~/checkout]
-crew doctor                     crew init
+org talk [message]             talk to the manager        org ask "question"
+org status [--watch|--json]    every run                  org dash
+org spec new|check|show|ls|revise
+org approve <spec> --sha <8+>  freeze and dispatch        org dispatch <spec> [--machine M]
+org peek <run>                 one run, in words          org logs <run> [-f]
+org plan|report|review <run>
+org stop <run>                 org resume <run>          org machine ls | rm <run>
+org project add <name> --repo owner/name [--path ~/checkout]
+org doctor                     org init
 ```
 
 A `<run>` may be a run id, a unique prefix, or a spec reference (its latest run). A `<spec>` may
@@ -187,7 +187,7 @@ be its id, its number, or a unique prefix.
 
 ## Configuration
 
-`~/.crew/config.json`. Everything is optional; these are the knobs most likely to matter.
+`~/.org/config.json`. Everything is optional; these are the knobs most likely to matter.
 
 ```json
 {
@@ -206,7 +206,7 @@ be its id, its number, or a unique prefix.
 ## Where things are
 
 ```
-~/.crew/
+~/.org/
   desk/drafts/<spec>.md      specs under refinement      (the manager may write here)
   desk/projects/<name>.md    project briefs
   desk/scratch/              the manager's throwaway clones
@@ -216,9 +216,9 @@ be its id, its number, or a unique prefix.
   budget.json                weekly-limit readings
 
 on an engineer's machine:
-  ~/crew-runs/<run>/         spec.md, job.json, status.json, plan.md, report.md, events.jsonl
+  ~/org-runs/<run>/         spec.md, job.json, status.json, plan.md, report.md, events.jsonl
   ~/work/<run>/              the engineer's clones
-  tmux session crew-<run>    the runner's live feed
+  tmux session org-<run>    the runner's live feed
 ```
 
 `claude --resume <session id from status.json>` on the engineer's machine reopens the engineer's
@@ -226,7 +226,7 @@ own conversation, which is the most direct way to ask why it did something after
 
 ## The dashboard
 
-`crew dash` serves one self-contained page on `127.0.0.1` and prints its URL. The part after `#`
+`org dash` serves one self-contained page on `127.0.0.1` and prints its URL. The part after `#`
 is an access token: the page can approve specs and stop runs, so every request must carry it, and
 requests not addressed to this machine are refused. Stopping the dashboard does not affect
 engineers.
@@ -236,7 +236,7 @@ engineers.
 ```sh
 python3 -m unittest discover -s tests       # no tokens spent: a scripted stand-in for
                                             # the claude CLI and a simulated `orb`
-python3 tests/demo_ledger.py /tmp/demo && crew --home /tmp/demo dash   # the page, with made-up runs
+python3 tests/demo_ledger.py /tmp/demo && org --home /tmp/demo dash   # the page, with made-up runs
 python3 tests/live_manager_rules.py         # the manager's confinement, real harness (a few cents)
 python3 tests/e2e.py --machine orb          # a real engineer on a real machine (well under $1)
 ```
@@ -254,9 +254,9 @@ Built and tested inside one Linux OrbStack machine, which cannot run `orb` or ma
   dashboard in a real browser; the whole suite under Python 3.9 and 3.14.
 - **Simulated only:** OrbStack. The `orb` commands are the ones `box` already uses (`orb clone`,
   `orb start`, `orb -m <name> <argv>`, `orb delete -f`), tested against a stand-in.
-- **Not exercised:** the macOS Bash sandbox, and `crew talk` as an interactive session.
+- **Not exercised:** the macOS Bash sandbox, and `org talk` as an interactive session.
 
-First things to run on the Mac: `crew doctor`, `python3 tests/live_manager_rules.py`, then
+First things to run on the Mac: `org doctor`, `python3 tests/live_manager_rules.py`, then
 `python3 tests/e2e.py --machine orb`.
 
 ## Limits worth knowing

@@ -1,11 +1,11 @@
-"""The dashboard: `crew status` as a local web page, with the manager's chat beside it.
+"""The dashboard: `org status` as a local web page, with the manager's chat beside it.
 
 A small HTTP server bound to 127.0.0.1. A background thread pulls from the engineers' machines
 every few seconds; the page polls the server. Nothing here talks to an engineer's session.
 
 The page can do two things that matter: approve a spec (which dispatches an engineer and spends
 money) and stop a run. So every /api/ request must carry a token that only the person who started
-`crew dash` has (it is in the URL the command prints, after the #, where it is never sent to a
+`org dash` has (it is in the URL the command prints, after the #, where it is never sent to a
 server or written to a log), and requests whose Host is not this machine are refused, which is
 what stops another site's JavaScript from reaching the dashboard through the browser.
 """
@@ -73,7 +73,7 @@ def document(ledger: Ledger, run_id: str, name: str) -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "crew"
+    server_version = "org"
 
     def log_message(self, fmt, *args):  # the terminal that started the dashboard stays quiet
         pass
@@ -103,14 +103,14 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _authorized(self) -> bool:
-        return hmac.compare_digest(self.headers.get("X-Crew-Token") or "", self.server.token)
+        return hmac.compare_digest(self.headers.get("X-Org-Token") or "", self.server.token)
 
     def _guard(self) -> bool:
         if not self._local():
             self._json(403, {"error": "this dashboard only answers requests addressed to this machine"})
             return False
         if not self._authorized():
-            self._json(401, {"error": "missing or wrong token: open the URL that `crew dash` printed"})
+            self._json(401, {"error": "missing or wrong token: open the URL that `org dash` printed"})
             return False
         return True
 
@@ -177,7 +177,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(400, {"error": str(e)})
                 if before.get("sha256") == meta["sha256"] and ledger.runs_for(spec_id):
                     return self._json(200, {"approved": True, "version": meta["version"], "dispatched": False, "log": [],
-                                            "error": "this text was already approved and has run (%s); `crew dispatch` runs it again"
+                                            "error": "this text was already approved and has run (%s); `org dispatch` runs it again"
                                                      % ", ".join(ledger.runs_for(spec_id))})
                 log = []
                 try:
@@ -254,11 +254,11 @@ def serve(ledger: Ledger, port=None, open_browser: bool = True) -> int:
     try:
         httpd = make_server(ledger, port)
     except OSError as e:
-        print("crew: cannot listen on 127.0.0.1:%d (%s). Is the dashboard already running? Try --port." % (port, e))
+        print("org: cannot listen on 127.0.0.1:%d (%s). Is the dashboard already running? Try --port." % (port, e))
         return 1
     url = "http://127.0.0.1:%d/#t=%s" % (port, httpd.token)
     threading.Thread(target=_sync_loop, args=(httpd,), daemon=True).start()
-    print("crew dashboard: %s" % url, flush=True)
+    print("org dashboard: %s" % url, flush=True)
     print("ledger: %s   (ctrl-c stops the dashboard; engineers keep running)" % ledger.root, flush=True)
     if open_browser:
         try:

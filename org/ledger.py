@@ -1,13 +1,13 @@
 """The ledger: everything the manager's side keeps on disk.
 
-    $CREW_HOME/                 default ~/.crew
+    $ORG_HOME/                 default ~/.org
       config.json               machines, budget calibration, model defaults
       projects.json             name -> repos
       desk/                     the only place the manager chat may write
         drafts/<spec-id>.md     specs under refinement
         projects/<name>.md      project briefs: conventions, test commands, lessons from past runs
         scratch/                throwaway clones and experiments
-      specs/<spec-id>/          approved specs; written only by `crew approve`
+      specs/<spec-id>/          approved specs; written only by `org approve`
         spec.md                 read-only once approved
         meta.json               sha256, version, approval, parsed frontmatter
         spec.v<N>.md            earlier approved versions
@@ -58,7 +58,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "orb": {"base": "base", "prefix": "eng-", "push_token": True},
         # name -> {"host": "user@host", "options": ["-p", "2222"], "push_token": false}
         "ssh": {},
-        # Runs on this machine with no isolation. For trying crew out and for its tests.
+        # Runs on this machine with no isolation. For trying org out and for its tests.
         "local": {"enabled": False},
     },
     "budget": {
@@ -66,12 +66,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "usd_per_weekly_pct": None,
     },
     "pricing": {},
-    # How long `crew status` waits for a machine before showing it as last seen.
+    # How long `org status` waits for a machine before showing it as last seen.
     "status": {"sync_timeout_s": 8},
     "dash": {"port": 8787, "sync_interval_s": 10},
 }
 
-# What `crew init` writes: only the knobs a person is likely to turn. Everything else comes from
+# What `org init` writes: only the knobs a person is likely to turn. Everything else comes from
 # DEFAULT_CONFIG at load time, so new defaults reach existing ledgers.
 STARTER_CONFIG = {
     "machines": {"default": "orb", "orb": {"base": "base"}, "ssh": {}},
@@ -96,7 +96,7 @@ def deep_merge(base: dict, over: dict) -> dict:
 
 class Ledger:
     def __init__(self, root=None):
-        chosen = root or os.environ.get("CREW_HOME") or (Path.home() / ".crew")
+        chosen = root or os.environ.get("ORG_HOME") or (Path.home() / ".org")
         self.root = Path(chosen).expanduser().resolve()
 
     # ------------------------------------------------------------ paths
