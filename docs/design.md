@@ -190,7 +190,7 @@ can read.
 | Token | What it is | What it can do |
 |---|---|---|
 | Claude | what `claude setup-token` prints | model requests only; documented as unable to fetch the account's claude.ai connectors |
-| GitHub | a fine-grained token whose resource owner is one organization; Contents and Pull requests, read and write | read and push code and open pull requests there; it cannot create repositories, change settings or edit workflow files |
+| GitHub | a fine-grained token whose resource owner is one organization; Contents, read and write | read and push code there; it cannot create repositories, change settings or edit workflow files |
 
 `org/secrets.py` is the only reader. Dispatch copies both into each engineer's container over
 stdin, into that container's own `/run/org`, and the runner exports them to the session as
@@ -504,11 +504,16 @@ engineer's reach on GitHub, and keeps `org-host`, in a personal account, outside
 ruleset and secret scanning it applies need a public repository. The price is that everything
 engineers write is published and that strangers can write back.
 
-**The pull-request rule is an audit trail, not an approval gate.** The person and the engineers
-are the same GitHub account. `org-host`'s `org-github` makes each default branch
-pull-request-only with nobody exempt, which records what was merged; it does not stop an
-engineer merging its own pull request. For this repository the gate is `org upgrade`, where the
-person reads the diff before the code runs beside the tokens.
+**Nothing on GitHub stands between an engineer and the default branch.** Pull requests are not
+used. The default delivery is `merge`: the engineer rebases its branch onto the default
+branch's tip, squashes it into one commit locally, and pushes that commit; its working branch
+stays on the remote as the record of how the work went. The person and the engineers are the
+same GitHub account, so a rule requiring review could not tell them apart, and the owner chose
+one commit per piece of work over a pull request per piece of work. `org-host`'s `org-github`
+keeps two rules on each default branch, with nobody exempt: no force push and no deletion, so
+what landed stays in the history. `delivery: branch` is for work the person wants to see
+first. For this repository the gate is `org upgrade`, where the person reads the diff before
+the code runs beside the tokens.
 
 **Public repositories are an input channel.** Text a stranger writes in an issue, a pull request
 or a comment can reach the manager or an engineer. Both prompts say that such text is something
@@ -532,8 +537,8 @@ first is a rule a model follows; only the second is a setting.
   no device but its disk and an isolated network card, and behind it a VM with nothing of the
   Mac's in it. Outside the container an engineer can do exactly what the two tokens allow, and it
   can reach the internet, so it could also send the tokens anywhere. Their scope is the limit:
-  one organization's code and pull requests, and model requests. The default delivery is a pull
-  request, and an engineer could merge it.
+  one organization's code, and model requests. The default delivery lands on the default
+  branch directly.
 - All engineers and the manager share the VM's kernel. A kernel exploit from a container reaches
   the VM, which holds both tokens, the ledger and every engineer, and still nothing of the Mac's.
 - The `org` user is the control plane. It holds both tokens and can enter every engineer's
@@ -567,8 +572,9 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
 
 Not yet exercised:
 
-- The manager chat and `org ask` in the VM, and an engineer delivering a pull request to a
-  repository on GitHub (the smoke spec pushes to a repository inside its own container).
+- The manager chat and `org ask` in the VM, and an engineer landing a commit on the default
+  branch of a repository on GitHub (the smoke spec pushes to a repository inside its own
+  container).
 - `tests/live_manager_rules.py` and `tests/live_manager_refine.py` in this layout.
 - `org upgrade` and its rollback against a real repository.
 - `org drain`, `org undrain` and `org resume --interrupted` on a real installation.
@@ -630,7 +636,7 @@ none is claimed for this layout.
 ## Known gaps
 
 - Nothing in this layout has made a real model call yet; see what has been checked.
-- An engineer can merge its own pull request. The ruleset records; it does not gate.
+- An engineer lands its own work on the default branch; nothing on GitHub reviews it first.
 - An engineer holds both tokens and reaches the internet. Their scope bounds what a leaked one
   can do; nothing prevents the leak.
 - All engineers and the manager share one kernel, and the `org` user holds both tokens and can

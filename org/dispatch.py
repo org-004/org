@@ -134,7 +134,7 @@ def build_job(ledger: Ledger, meta: dict, run_id: str, machine: dict, facts: Opt
         "title": meta.get("title"),
         "project": header.get("project"),
         "repos": header.get("repos") or [],
-        "delivery": header.get("delivery") or "pr",
+        "delivery": header.get("delivery") or "merge",
         "model": header.get("model") or eng.get("model") or "fable",
         "effort": header.get("effort") or eng.get("effort") or "high",
         "caps": {k: header[k] for k in ("max_cost_usd", "max_weekly_pct", "max_hours") if header.get(k)},

@@ -27,7 +27,7 @@ GOOD = """---
 title: CSV export
 project: acme
 repos: acme/web, acme/api
-delivery: pr
+delivery: merge
 max_cost_usd: 40
 max_hours: 6
 ---
@@ -101,8 +101,8 @@ class SpecChecks(unittest.TestCase):
             "requirements need ids": GOOD.replace("- R1 (MUST):", "-").replace("- R2 (SHOULD):", "-"),
             "'## Intent' is missing": GOOD.replace("## Intent", "## Motivation"),
             "max_cost_usd must be a number": GOOD.replace("max_cost_usd: 40", "max_cost_usd: forty"),
-            "delivery must be one of": GOOD.replace("delivery: pr", "delivery: yolo"),
-            "machine must be": GOOD.replace("delivery: pr", "delivery: pr\nmachine: the big one"),
+            "delivery must be one of": GOOD.replace("delivery: merge", "delivery: yolo"),
+            "machine must be": GOOD.replace("delivery: merge", "delivery: merge\nmachine: the big one"),
             "title is required": GOOD.replace("title: CSV export\n", ""),
         }
         for expected, text in cases.items():
@@ -113,9 +113,9 @@ class SpecChecks(unittest.TestCase):
         local_path = GOOD.replace("repos: acme/web, acme/api", "repos: /Users/me/src/acme-web")
         errors, _ = spec.check(local_path, default_machine="incus")
         self.assertTrue(any("path on this machine" in e and "incus" in e for e in errors), errors)
-        self.assertTrue(any("path on this machine" in e for e in spec.check(local_path.replace("delivery: pr", "delivery: pr\nmachine: ssh:gpu"))[0]))
+        self.assertTrue(any("path on this machine" in e for e in spec.check(local_path.replace("delivery: merge", "delivery: merge\nmachine: ssh:gpu"))[0]))
         # on the same machine a path is a perfectly good repository
-        self.assertEqual(spec.check(local_path.replace("delivery: pr", "delivery: pr\nmachine: local"))[0], [])
+        self.assertEqual(spec.check(local_path.replace("delivery: merge", "delivery: merge\nmachine: local"))[0], [])
         self.assertEqual(spec.check(local_path, default_machine="local")[0], [])
 
     def test_a_placeholder_repo_is_not_ready(self):
@@ -127,8 +127,8 @@ class SpecChecks(unittest.TestCase):
             self.assertEqual(errors, [], name)
 
     def test_effort_is_checked(self):
-        self.assertEqual(spec.check(GOOD.replace("delivery: pr", "delivery: pr\neffort: xhigh"))[0], [])
-        self.assertTrue(any("effort must be one of" in e for e in spec.check(GOOD.replace("delivery: pr", "delivery: pr\neffort: heroic"))[0]))
+        self.assertEqual(spec.check(GOOD.replace("delivery: merge", "delivery: merge\neffort: xhigh"))[0], [])
+        self.assertTrue(any("effort must be one of" in e for e in spec.check(GOOD.replace("delivery: merge", "delivery: merge\neffort: heroic"))[0]))
 
     def test_warnings_do_not_block(self):
         text = GOOD.replace("max_cost_usd: 40\nmax_hours: 6\n", "").replace("(MUST)", "(SHOULD)")
@@ -273,7 +273,7 @@ class ManagerSide(unittest.TestCase):
         job = read_json(remote / "job.json")
         self.assertEqual(job["caps"], {"max_cost_usd": 40.0, "max_hours": 6.0})
         self.assertEqual(job["acceptance_ids"], ["AC1", "AC2"])
-        self.assertEqual(job["delivery"], "pr")
+        self.assertEqual(job["delivery"], "merge")
 
         self.wait_final(run_id)
         mirror = self.ledger.mirror_dir(run_id)

@@ -595,7 +595,7 @@ class Runner:
             run_dir=self.dir,
             workspace=self.workspace,
             model=self.job.get("model") or "fable",
-            delivery=self.job.get("delivery") or "pr",
+            delivery=self.job.get("delivery") or "merge",
             price_table=pricing.prompt_table(self.prices),
             machine_facts=machine_facts(self.job.get("facts") or {}),
         )

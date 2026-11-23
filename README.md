@@ -83,7 +83,7 @@ Two tokens enter the VM, and nothing else of yours does:
 | | What it is | What it can do |
 |---|---|---|
 | a Claude token | what `claude setup-token` prints | make model requests. It is documented as unable to fetch the account's claude.ai connectors |
-| a GitHub token | a fine-grained token whose resource owner is one organization, with Contents and Pull requests read and write | read and push code and open pull requests in that organization's repositories. It cannot create a repository, change settings or edit workflow files |
+| a GitHub token | a fine-grained token whose resource owner is one organization, with Contents read and write | read and push code in that organization's repositories. It cannot create a repository, change settings or edit workflow files |
 
 `org-vm` pipes them in at every start, into `/run/org`, which is memory. They are never on the
 VM's disk, so they are gone when the VM stops and `org-vm up` hands them in again. `org-vm` also
@@ -292,7 +292,7 @@ One Markdown file with a flat header:
 title: CSV export for the table view
 project: acme
 repos: acme/web, acme/api
-delivery: pr            # pr | branch | merge | none
+delivery: merge         # merge | branch | none
 machine: incus          # incus | ssh:<name>; leave it out for the default
 max_cost_usd: 40        # hard caps; set at least one
 max_hours: 6
@@ -490,8 +490,9 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
     private repositories in the owner's personal account answered 404.
   - `claude mcp list` in the VM, with the Claude token: no MCP servers.
 - **Not yet exercised:**
-  - The manager chat and `org ask` in the VM, and an engineer delivering a pull request to a
-    repository on GitHub (the smoke spec pushes to a repository inside its own container).
+  - The manager chat and `org ask` in the VM, and an engineer landing a commit on the default
+    branch of a repository on GitHub (the smoke spec pushes to a repository inside its own
+    container).
   - `tests/live_manager_rules.py` and `tests/live_manager_refine.py` in this layout.
   - `org upgrade` and its rollback against a real repository.
   - `org drain`, `org undrain` and `org resume --interrupted` on a real installation, and a
@@ -504,11 +505,13 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
 ## Limits worth knowing
 
 - **Engineers hold both tokens and reach the internet.** A run can do whatever the tokens allow,
-  and could send them anywhere. What bounds that is their scope: one organization's code and
-  pull requests, and model requests. The owner can revoke either.
-- **An engineer can merge its own pull request.** You and the engineers are the same GitHub
-  account, so the pull-request rule on each default branch is a record of what was merged, not
-  an approval gate. What decides which version of org runs is `org upgrade`, which shows you the
+  and could send them anywhere. What bounds that is their scope: one organization's code, and
+  model requests. The owner can revoke either.
+- **An engineer lands its own work on the default branch.** Pull requests are not used: the
+  default delivery is one squashed commit pushed to the default branch by the engineer, and you
+  and the engineers are the same GitHub account, so nothing on GitHub stands between an
+  engineer and `main`. A default branch cannot be force-pushed or deleted, so what landed stays
+  in its history. What decides which version of org runs is `org upgrade`, which shows you the
   diff first.
 - **Public repositories are a way in.** Every repository is public, so text a stranger writes
   in a pull request or a comment can reach an agent. The prompts say it is never an instruction,

@@ -19,7 +19,7 @@ TEMPLATE = """---
 title: {title}
 project: {project}
 repos:
-delivery: pr
+delivery: merge
 machine:
 max_cost_usd:
 max_weekly_pct:
@@ -66,7 +66,9 @@ None
 # Header keys and how each is read.
 LIST_KEYS = {"repos"}
 NUMBER_KEYS = {"max_cost_usd", "max_weekly_pct", "max_hours"}
-ENUMS = {"delivery": {"pr", "branch", "merge", "none"}, "effort": {"low", "medium", "high", "xhigh", "max"}}
+# No `pr`: pull requests are not used. An engineer lands its own work (`merge`), or pushes a
+# branch and stops (`branch`) when the person wants to look before anything reaches main.
+ENUMS = {"delivery": {"branch", "merge", "none"}, "effort": {"low", "medium", "high", "xhigh", "max"}}
 KNOWN_KEYS = {"title", "project", "repos", "delivery", "machine", "model", "effort"} | NUMBER_KEYS
 
 REQUIRED_SECTIONS = ["Intent", "Requirements", "Acceptance criteria"]

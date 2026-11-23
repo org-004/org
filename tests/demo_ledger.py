@@ -27,7 +27,7 @@ GOOD_DRAFT = """---
 title: Per-key rate limits for the public API
 project: acme
 repos: acme/api, acme/gateway
-delivery: pr
+delivery: merge
 max_cost_usd: 60
 max_hours: 8
 ---

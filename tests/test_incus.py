@@ -576,12 +576,12 @@ class Names(unittest.TestCase):
             "machine: local": "the local machine is disabled",
         }
         for header, expected in cases.items():
-            errors, _ = spec.check_text(self.ledger, GOOD.replace("delivery: pr", "delivery: pr\n" + header))
+            errors, _ = spec.check_text(self.ledger, GOOD.replace("delivery: merge", "delivery: merge\n" + header))
             self.assertTrue(any(expected in e for e in errors), "%s: %r not in %r" % (header, expected, errors))
         self.assertEqual(spec.check_text(self.ledger, GOOD)[0], [])
         write_json(self.ledger.config_path, {"machines": {"plugins": ["org.backends.docker"], "ssh": {"gpu": {"host": "me@gpu"}}}})
         for header in ("machine: docker", "machine: docker:local", "machine: ssh:gpu", "machine: incus"):
-            self.assertEqual(spec.check_text(self.ledger, GOOD.replace("delivery: pr", "delivery: pr\n" + header))[0], [], header)
+            self.assertEqual(spec.check_text(self.ledger, GOOD.replace("delivery: merge", "delivery: merge\n" + header))[0], [], header)
         write_json(self.ledger.config_path, {"machines": {"plugins": ["org.backends.nothing_here"]}})
         with self.assertRaises(backends.BackendError):
             backends.load(self.ledger.config())
