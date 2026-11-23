@@ -142,7 +142,7 @@ class Handler(BaseHTTPRequestHandler):
                 text = read_text(ledger.draft_path(spec_id))
                 if text is None:
                     return self._json(404, {"error": "no draft for %s" % spec_id})
-                errors, warnings = spec.check(text, spec.default_machine(ledger))
+                errors, warnings = spec.check_draft(ledger, spec_id)
                 return self._json(200, {"id": spec_id, "markdown": text, "sha": spec.draft_sha(ledger, spec_id),
                                         "errors": errors, "warnings": warnings, "state": spec.state_of(ledger, spec_id)})
         except LookupError as e:

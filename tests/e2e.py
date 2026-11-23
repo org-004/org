@@ -115,7 +115,8 @@ def independent_check(ledger: Ledger, run_id: str, spec_id: str) -> bool:
     """
     import re
 
-    from org.transport import TransportError, for_machine
+    from org.backends import for_machine
+    from org.transport import TransportError
 
     try:
         out = for_machine(ledger.run(run_id)["machine"], ledger.config()).run(CHECK.replace("{spec_id}", spec_id), timeout=180).stdout.decode()

@@ -129,7 +129,8 @@ def acceptance_ids(body: str) -> List[str]:
 def check(text: str, default_machine: str = "orb") -> Tuple[List[str], List[str]]:
     """Return (errors, warnings). Errors block approval.
 
-    `default_machine` is where the spec would run if its header does not say.
+    `default_machine` is where the spec would run if its header does not say. Whether that
+    machine exists is a question for a ledger: see check_draft.
     """
     errors: List[str] = []
     warnings: List[str] = []
@@ -150,8 +151,8 @@ def check(text: str, default_machine: str = "orb") -> Tuple[List[str], List[str]
         if key not in KNOWN_KEYS:
             warnings.append("header: unknown key %r is ignored" % key)
     machine = str(meta.get("machine") or "")
-    if machine and not re.match(r"^(docker(:[A-Za-z0-9_.-]+)?|orb|local|ssh:[A-Za-z0-9_.-]+)$", machine):
-        errors.append("header: machine must be docker, docker:<node>, orb, ssh:<name> or local")
+    if machine and not re.match(r"^[a-z][a-z0-9]*(:[A-Za-z0-9_.-]+)?$", machine):
+        errors.append("header: machine must be a kind or kind:name, such as orb or ssh:bigbox")
     for repo in meta.get("repos") or []:
         if PLACEHOLDER_REPO_RE.search(str(repo)):
             errors.append("header: repo %s is a placeholder; an engineer would have nothing to clone. "
@@ -200,9 +201,23 @@ def default_machine(ledger: Ledger) -> str:
     return str((ledger.config().get("machines") or {}).get("default") or "orb")
 
 
+def check_text(ledger: Ledger, text: str) -> Tuple[List[str], List[str]]:
+    """check(), and whether this ledger could give the spec the machine it asks for."""
+    from . import backends  # here, not at the top: the engineer's side parses specs and starts no machines
+
+    errors, warnings = check(text, default_machine(ledger))
+    if not any(e.startswith("header: machine") for e in errors):
+        cfg = ledger.config()
+        want = str(parse(text)[0].get("machine") or default_machine(ledger)).strip()
+        try:
+            backends.resolve(cfg, want).choose(cfg, want, "check")
+        except backends.BackendError as e:
+            errors.append("header: machine %s: %s" % (want, e))
+    return errors, warnings
+
+
 def check_draft(ledger: Ledger, spec_id: str) -> Tuple[List[str], List[str]]:
-    """check() for a draft in the ledger, knowing where this ledger sends engineers by default."""
-    return check(read_text(ledger.draft_path(spec_id)) or "", default_machine(ledger))
+    return check_text(ledger, read_text(ledger.draft_path(spec_id)) or "")
 
 
 def new_draft(ledger: Ledger, title: str, project: str = "") -> str:
@@ -238,7 +253,7 @@ def approve(ledger: Ledger, spec_id: str, sha_prefix: str, by: Optional[str] = N
         raise ApprovalError(
             "sha mismatch: the draft is now %s, not %s. It changed since it was reviewed." % (sha[:12], sha_prefix)
         )
-    errors, _ = check(text, default_machine(ledger))
+    errors, _ = check_text(ledger, text)
     if errors:
         raise ApprovalError("the draft does not pass its checks:\n  - " + "\n  - ".join(errors))
 

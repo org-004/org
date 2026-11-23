@@ -51,7 +51,8 @@ class DockerCase(unittest.TestCase):
 
     def configure(self, slots=2, nodes=None):
         nodes = nodes or {"local": {"host": None, "slots": slots}}
-        write_json(self.ledger.config_path, {"machines": {"default": "docker", "detach": "nohup", "docker": {"nodes": nodes}},
+        write_json(self.ledger.config_path, {"machines": {"plugins": ["org.backends.docker"], "default": "docker", "detach": "nohup",
+                                                          "docker": {"nodes": nodes}},
                                              "engineer": {"retry_backoff_s": 0.05, "max_turn_retries": 1}})
 
     def scenario(self, turns):
@@ -110,7 +111,7 @@ class DockerCase(unittest.TestCase):
         self.wait_final(run_id)
         view = status.collect(self.ledger)["runs"][0]
         self.assertEqual((view["state"], view["machine"]["kind"], view["machine"]["node"]), ("done", "docker", "local"))
-        self.assertEqual(dispatch.pool(self.ledger), [{"node": "local", "host": None, "slots": 2, "used": 0}], "a finished run frees its slot")
+        self.assertEqual(dispatch.pool(self.ledger), [{"kind": "docker", "node": "local", "host": None, "slots": 2, "used": 0}], "a finished run frees its slot")
         self.assertIn("deleted", dispatch.remove_machine(self.ledger, run_id))
         self.assertFalse(self.box(run_id).exists())
         self.assertTrue((self.ledger.mirror_dir(run_id) / "report.md").exists(), "the record outlives the container")

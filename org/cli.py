@@ -16,7 +16,8 @@
     org stop|resume <run>          stop the engineer, or restart a runner that died
     org ls|cat|diff <run> [path]   look at the files on a run's machine, read-only
     org exec <run> -- <command>    run a command on a run's machine
-    org pool                       the Docker nodes, their slots, and what is queued
+    org pool                       how many engineers may run at once, and what is queued
+    org config get|set <key>       read or change config.json
     org machine rm <run>           delete the container or OrbStack machine a run used
     org login                      the logins engineers are given: Claude, GitHub, git identity
     org doctor                     check that this machine is ready to manage engineers
@@ -113,7 +114,7 @@ def cmd_spec(args) -> int:
         text = read_text(ledger.draft_path(spec_id))
         if text is None:
             die("no draft for %s" % spec_id)
-        errors, warnings = spec.check(text, spec.default_machine(ledger))
+        errors, warnings = spec.check_draft(ledger, spec_id)
         for e in errors:
             print("error:   " + e)
         for w in warnings:
@@ -498,8 +499,12 @@ def cmd_pool(args) -> int:
     from . import dispatch
 
     ledger = Ledger(args.home)
-    for p in dispatch.pool(ledger):
-        print("%-14s %d of %d slot(s) in use   %s" % (p["node"], p["used"], p["slots"], p["host"] or "this Docker daemon"))
+    nodes = dispatch.pool(ledger)
+    for p in nodes:
+        where = p["host"] or {"orb": "OrbStack machines on the host", "docker": "this Docker daemon"}.get(p["kind"], "")
+        print("%-20s %d of %d slot(s) in use   %s" % (p["kind"] + ":" + p["node"], p["used"], p["slots"], where))
+    if not nodes:
+        print("no limit is set on how many engineers run at once (machines.orb.slots in config.json sets one)")
     queued = [r for r in ledger.run_ids() if ledger.run(r).get("state") == "queued"]
     for run_id in queued:
         print("queued: %s  (%s)" % (run_id, ledger.run(run_id).get("queue_reason") or "waiting"))
@@ -507,11 +512,11 @@ def cmd_pool(args) -> int:
 
 
 def cmd_node(args) -> int:
-    """The pool: which Docker hosts engineers may run on, and how many at once on each."""
+    """Docker backend: which Docker hosts engineers may run on, and how many at once on each."""
     import subprocess
     from pathlib import Path
 
-    from . import dispatch
+    from . import backends, dispatch
     from .transport import Docker, TransportError
     from .util import write_json
 
@@ -519,13 +524,18 @@ def cmd_node(args) -> int:
     ledger.init()
     if args.action == "ls":
         return cmd_pool(args)
+    if "docker" not in backends.kinds(ledger.config()):
+        die('nodes belong to the Docker backend, which is a plugin and is not enabled here. For OrbStack machines the '
+            'pool is one number: `org config set machines.orb.slots 6`.')
+    from .backends.docker import nodes_of
+
     saved = read_json(ledger.config_path, {}) or {}
     docker_cfg = saved.setdefault("machines", {}).setdefault("docker", {})
-    nodes = docker_cfg.setdefault("nodes", dict(dispatch.docker_nodes(ledger.config())))
+    nodes = docker_cfg.setdefault("nodes", dict(nodes_of(ledger.config())))
     if args.action == "rm":
         if args.name not in nodes:
             die("no node named %s (have: %s)" % (args.name, ", ".join(sorted(nodes))))
-        if dispatch.node_load(ledger).get(args.name):
+        if dispatch.node_load(ledger).get(("docker", args.name)):
             die("%s still has engineers running; stop them or let them finish first" % args.name)
         del nodes[args.name]
         write_json(ledger.config_path, saved)
@@ -556,6 +566,61 @@ def cmd_node(args) -> int:
     write_json(ledger.config_path, saved)
     print("node %s: %s, %d slot(s)" % (args.name, host or "this Docker daemon", args.slots))
     return 0
+
+
+def cmd_config(args) -> int:
+    """Read or change config.json by dotted key. Values are JSON; a bare word is taken as a string."""
+    from .util import write_json
+
+    ledger = Ledger(args.home)
+    ledger.init()
+    if args.action == "get":
+        value = ledger.config()
+        for part in (args.key.split(".") if args.key else []):
+            if not isinstance(value, dict) or part not in value:
+                die("no such key: %s" % args.key)
+            value = value[part]
+        if isinstance(value, dict):
+            value = {k: v for k, v in value.items() if not k.startswith("_")}
+        print(json.dumps(value, indent=2, sort_keys=True))
+        return 0
+    try:
+        value = json.loads(args.value)
+    except ValueError:
+        value = args.value
+    saved = read_json(ledger.config_path, {}) or {}
+    node = saved
+    parts = args.key.split(".")
+    for part in parts[:-1]:
+        if not isinstance(node.get(part), dict):
+            node[part] = {}
+        node = node[part]
+    node[parts[-1]] = value
+    write_json(ledger.config_path, saved)
+    print("%s = %s" % (args.key, json.dumps(value)))
+    return 0
+
+
+def cmd_agent(args) -> int:
+    """The host agent: what creates, enters and deletes OrbStack machines for a manager in a machine."""
+    from . import agent
+
+    if args.action == "run":      # on the Mac
+        return agent.serve(args.config)
+    if args.action == "pipe":     # in the manager's machine, started by the agent
+        return agent.pipe(args.port)
+    ledger = Ledger(args.home)
+    if args.action == "bridge":   # in the manager's machine, started by the agent
+        return agent.bridge(ledger, args.dash_port)
+    try:
+        client = agent.Client(agent.socket_path(ledger.root))
+        info = client.info()
+        print("host agent connected: manager %s; engineers %s<run>, cloned from %s" % (info["manager"], info["prefix"], info["template"]))
+        for name in client.machines():
+            print("  " + name)
+        return 0
+    except agent.AgentError as e:
+        die(e)
 
 
 def cmd_pump(args) -> int:
@@ -720,9 +785,29 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("command", nargs=argparse.REMAINDER, help="after --, the command; one argument is taken as a shell line")
     s.set_defaults(fn=cmd_exec)
 
-    sub.add_parser("pool", help="the Docker nodes, their slots, and what is queued").set_defaults(fn=cmd_pool)
+    sub.add_parser("pool", help="how many engineers may run at once, where, and what is queued").set_defaults(fn=cmd_pool)
 
-    s = sub.add_parser("node", help="add or remove Docker hosts in the pool")
+    s = sub.add_parser("config", help="read or change config.json")
+    ss = s.add_subparsers(dest="action", required=True)
+    a = ss.add_parser("get")
+    a.add_argument("key", nargs="?", help="a dotted key such as machines.orb; omit for everything")
+    a = ss.add_parser("set")
+    a.add_argument("key")
+    a.add_argument("value", help="JSON, or a bare word for a string")
+    s.set_defaults(fn=cmd_config)
+
+    s = sub.add_parser("agent", help="the host agent that manages OrbStack machines for a manager in a machine")
+    ss = s.add_subparsers(dest="action", required=True)
+    a = ss.add_parser("run", help="run it, on the Mac (`org up` does this)")
+    a.add_argument("--config", help="its config file (default ~/.config/org/agent.json)")
+    ss.add_parser("status", help="is it connected, and which machines does it hold")
+    a = ss.add_parser("bridge", help="the manager's end of the link; the agent starts it")
+    a.add_argument("--dash-port", type=int, help="also serve the dashboard on this port of the loopback")
+    a = ss.add_parser("pipe", help="carry one connection to a local port; the agent starts it")
+    a.add_argument("port", type=int)
+    s.set_defaults(fn=cmd_agent)
+
+    s = sub.add_parser("node", help="Docker backend: add or remove Docker hosts in the pool")
     ss = s.add_subparsers(dest="action", required=True)
     ss.add_parser("ls")
     a = ss.add_parser("add", help="add a host, or change one: org node add bigbox ssh://me@bigbox --slots 8")

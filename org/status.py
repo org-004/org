@@ -118,7 +118,7 @@ def collect(ledger: Ledger, do_sync: bool = False) -> dict:
         if state == "approved":
             continue  # the draft is identical to the approved text: nothing pending
         text = read_text(ledger.draft_path(spec_id)) or ""
-        errors, warnings = spec.check(text, spec.default_machine(ledger))
+        errors, warnings = spec.check_draft(ledger, spec_id)
         meta, _ = spec.parse(text)
         drafts.append({
             "id": spec_id,
@@ -134,11 +134,10 @@ def collect(ledger: Ledger, do_sync: bool = False) -> dict:
         meta = ledger.spec_meta(spec_id) or {}
         specs.append({"id": spec_id, "title": meta.get("title"), "version": meta.get("version"), "sha": meta.get("sha256"),
                       "approved_at": meta.get("approved_at"), "runs": ledger.runs_for(spec_id)})
-    uses_pool = spec.default_machine(ledger).startswith("docker") or any(v["machine"]["kind"] == "docker" for v in runs)
     return {
         "now": now(),
         "home": str(ledger.root),
-        "pool": dispatch.pool(ledger) if uses_pool else [],
+        "pool": dispatch.pool(ledger),
         "budget": {
             "weekly": week,
             "usd_per_pct": rate,
@@ -201,7 +200,9 @@ def render(state: dict, width: Optional[int] = None) -> str:
     lines = [budget_line(state["budget"])]
     if state.get("pool"):
         queued = len([v for v in state["runs"] if v["state"] == "queued"])
-        lines.append("Pool: " + " · ".join("%s %d/%d" % (p["node"], p["used"], p["slots"]) for p in state["pool"])
+        several = len({p["kind"] for p in state["pool"]}) > 1
+        lines.append("Pool: " + " · ".join("%s %d/%d" % ((p["kind"] + ":" if several else "") + p["node"], p["used"], p["slots"])
+                                           for p in state["pool"])
                      + ((" · %d queued" % queued) if queued else ""))
     lines.append("")
     runs = state["runs"]

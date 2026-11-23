@@ -15,7 +15,8 @@ from typing import List, Optional
 from . import budget
 from .ledger import Ledger
 from .runner import TERMINAL_STATES
-from .transport import TransportError, for_machine
+from .backends import BackendError, for_machine
+from .transport import TransportError
 from .util import now, read_json, write_text
 
 
@@ -50,7 +51,7 @@ def _sync_locked(ledger: Ledger, run_id: str, rec: dict, timeout: float, slices:
         try:
             out = for_machine(rec["machine"], cfg).run(script, timeout=timeout).stdout
             snap = json.loads(out.decode("utf-8", "replace"))
-        except (TransportError, ValueError, KeyError) as e:
+        except (TransportError, BackendError, ValueError, KeyError) as e:
             rec.update(reachable=False, last_error=str(e)[:400], last_attempt_at=now())
             ledger.save_run(run_id, rec)
             return rec

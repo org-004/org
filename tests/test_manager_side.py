@@ -96,7 +96,7 @@ class SpecChecks(unittest.TestCase):
             "'## Intent' is missing": GOOD.replace("## Intent", "## Motivation"),
             "max_cost_usd must be a number": GOOD.replace("max_cost_usd: 40", "max_cost_usd: forty"),
             "delivery must be one of": GOOD.replace("delivery: pr", "delivery: yolo"),
-            "machine must be": GOOD.replace("delivery: pr", "delivery: pr\nmachine: mainframe"),
+            "machine must be": GOOD.replace("delivery: pr", "delivery: pr\nmachine: the big one"),
             "title is required": GOOD.replace("title: CSV export\n", ""),
         }
         for expected, text in cases.items():

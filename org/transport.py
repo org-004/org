@@ -208,21 +208,3 @@ class Docker(Transport):
         """running, exited, ... or None when the container does not exist."""
         p = cls._docker(host, ["inspect", "-f", "{{.State.Status}}", container], 60)
         return p.stdout.decode().strip() if p.returncode == 0 else None
-
-
-def for_machine(machine: dict, cfg: dict) -> Transport:
-    """Rebuild the transport for a machine recorded in run.json."""
-    kind = machine.get("kind")
-    if kind == "docker":
-        return Docker(machine["name"], machine.get("host"), machine.get("node") or "local")
-    if kind == "orb":
-        return Orb(machine["name"])
-    if kind == "ssh":
-        entry = (cfg.get("machines", {}).get("ssh") or {}).get(machine["name"]) or {}
-        host = entry.get("host") or machine.get("host")
-        if not host:
-            raise TransportError("ssh machine %r is not in config.json and the run has no host recorded" % machine.get("name"))
-        return Ssh(machine["name"], host, entry.get("options") or machine.get("options"))
-    if kind == "local":
-        return Local(machine.get("home"))
-    raise TransportError("unknown machine kind %r" % kind)

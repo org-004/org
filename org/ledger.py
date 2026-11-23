@@ -53,9 +53,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "network_allow": ["github.com", "*.github.com", "*.githubusercontent.com"],
     },
     "machines": {
-        # Where a spec runs when its header does not say: "docker", "docker:<node>", "orb",
-        # "ssh:<name>" or "local". A manager that is itself a container can only start containers.
+        # Where a spec runs when its header does not say: "orb", "ssh:<name>", "local", or a kind
+        # a plugin provides. A manager that is itself a Docker container can only start containers.
         "default": "docker" if os.environ.get("ORG_IN_CONTAINER") else "orb",
+        # Backends beyond the built-in ones (org/backends/). The Docker backend is one of these.
+        "plugins": ["org.backends.docker"] if os.environ.get("ORG_IN_CONTAINER") else [],
         # The pool: Docker hosts and how many engineers each may run at once. A run that finds no
         # free slot waits in the queue. "host" is null for the daemon this side can reach
         # directly, or a DOCKER_HOST value such as ssh://user@bigbox.
@@ -66,7 +68,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "push_token": True,
             "nodes": {"local": {"host": None, "slots": 4}},
         },
-        "orb": {"base": "base", "prefix": "eng-", "push_token": True},
+        # A fresh OrbStack machine per run. "slots" (unset: no limit) is how many may run at once.
+        # When the manager is itself a machine, the host agent decides the template and prefix.
+        "orb": {"base": "base", "prefix": "eng-", "push_token": True, "slots": None},
         # name -> {"host": "user@host", "options": ["-p", "2222"], "push_token": false}
         "ssh": {},
         # Runs on this machine with no isolation. For trying org out and for its tests.
@@ -178,7 +182,9 @@ class Ledger:
         return fresh
 
     def config(self) -> dict:
-        return deep_merge(DEFAULT_CONFIG, read_json(self.config_path, {}) or {})
+        cfg = deep_merge(DEFAULT_CONFIG, read_json(self.config_path, {}) or {})
+        cfg["_home"] = str(self.root)  # for the parts that keep files beside the config
+        return cfg
 
     def projects(self) -> dict:
         return read_json(self.projects_path, {}) or {}

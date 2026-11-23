@@ -36,10 +36,12 @@ PROMPTS = Path(__file__).parent / "prompts"
 BIN = Path(__file__).resolve().parent.parent / "bin"
 
 READ_COMMANDS = ["status", "peek", "logs", "plan", "report", "review", "sync", "spec ls", "spec show", "spec check",
-                 "machine ls", "project ls", "ls", "cat", "diff", "pool", "doctor"]
+                 "machine ls", "project ls", "ls", "cat", "diff", "pool", "doctor", "config get", "agent status", "node ls"]
 DRAFT_COMMANDS = ["spec new", "spec revise", "project add", "init"]
 # Decisions that are the person's. `exec` is among them: it runs anything on an engineer's machine.
-HUMAN_COMMANDS = ["approve", "dispatch", "stop", "resume", "machine rm", "exec", "pump", "login"]
+# So are the commands that change where engineers run or how many, and the installation itself.
+HUMAN_COMMANDS = ["approve", "dispatch", "stop", "resume", "machine rm", "exec", "pump", "login",
+                  "config set", "node add", "node rm", "agent run", "agent bridge", "agent pipe", "up", "down"]
 
 # Commands that change state outside this machine. Bash deny rules match the form a model
 # normally writes; they are a guard against an overeager manager, not a wall against a hostile
