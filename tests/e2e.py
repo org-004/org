@@ -2,15 +2,11 @@
 """End-to-end smoke test with a real engineer. Spends real tokens (about a dollar on sonnet).
 
     python3 tests/e2e.py                      an engineer on this machine (use inside a box)
-    python3 tests/e2e.py --machine orb        an engineer in a fresh OrbStack machine
+    python3 tests/e2e.py --machine incus      an engineer in a fresh Incus container
     python3 tests/e2e.py --machine ssh:gpu    a host from ~/.org/config.json
 
-After `org up` the whole system is one command, run from the Mac:
-
-    org shell -c 'python3 ~/.local/share/org/tests/e2e.py --machine orb'
-
-There the manager is itself a machine, so the engineer's machine is created through the host agent,
-exactly as for a real run.
+Run it where org is installed, after `org up`: the engineer's container is then copied from the
+template and handed this installation's tokens, exactly as for a real run.
 
 It approves a small, self-contained spec (build a tiny Python package in a repository the engineer
 creates on its own machine, so nothing touches GitHub), dispatches it, follows the run to the end
@@ -18,9 +14,9 @@ and prints the plan-against-outcome scorecard. Exit status 0 means the engineer 
 with every acceptance criterion passing.
 
 The ledger is a temporary directory unless --home is given, so this never mixes with real work.
-It borrows the real ledger's machines, and its link to the host agent when there is one. A ledger
-named with --home is used as it is: its config is not changed. When the run passes, the machine
-it used is deleted (--keep leaves it).
+It borrows the real ledger's machines (the template, the prefix, the ssh hosts). A ledger named
+with --home is used as it is: its config is not changed. When the run passes, the machine it used
+is deleted (--keep leaves it).
 """
 import argparse
 import sys
@@ -31,7 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from org import agent, dispatch, spec, status, sync  # noqa: E402
+from org import dispatch, spec, status, sync  # noqa: E402
 from org.backends import BackendError  # noqa: E402
 from org.ledger import Ledger  # noqa: E402
 from org.transport import TransportError  # noqa: E402
@@ -151,11 +147,11 @@ def independent_check(ledger: Ledger, run_id: str, spec_id: str) -> bool:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--machine", default="local", help="local, orb or ssh:<name> (default local)")
+    ap.add_argument("--machine", default="local", help="local, incus or ssh:<name> (default local)")
     ap.add_argument("--model", default="sonnet")
     ap.add_argument("--effort", default="low")
     ap.add_argument("--max-cost", type=float, default=5.0)
-    ap.add_argument("--base", default=None, help="OrbStack template machine to clone (default from ~/.org/config.json, else base)")
+    ap.add_argument("--base", default=None, help="template container to copy (default from ~/.org/config.json, else org-base)")
     ap.add_argument("--home", default=None, help="ledger to use, as it is (default: a new temporary one that borrows ~/.org's machines)")
     ap.add_argument("--timeout", type=int, default=3600, help="seconds to wait for the run")
     ap.add_argument("--keep", action="store_true", help="leave the engineer's machine in place after a pass")
@@ -176,14 +172,11 @@ def main() -> int:
         machines = dict(real.get("machines") or {})
         machines["default"] = args.machine
         machines["local"] = {"enabled": args.machine == "local"}
-        orb = dict(machines.get("orb") or {})
+        incus = dict(machines.get("incus") or {})
         if args.base:
-            orb["base"] = args.base
-        if orb.get("via") == "agent":
-            # The host agent's bridge listens beside the real ledger; this one borrows it.
-            orb.setdefault("socket", str(agent.socket_path(real_home)))
-        if orb:
-            machines["orb"] = orb
+            incus["base"] = args.base
+        if incus:
+            machines["incus"] = incus
         if args.ssh_host and args.machine.startswith("ssh:"):
             machines["ssh"] = dict(machines.get("ssh") or {}, **{args.machine[4:]: {"host": args.ssh_host, "options": args.ssh_option}})
         write_json(ledger.config_path, {"machines": machines})

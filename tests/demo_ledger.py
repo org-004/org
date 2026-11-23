@@ -123,10 +123,10 @@ def build(root) -> Ledger:
     ledger.init()
     write_json(ledger.config_path, {"budget": {"usd_per_weekly_pct": 4.0}})
     write_json(ledger.budget_path, {"weekly": {"at": NOW - 40, "utilization": 0.62, "resets_at": RESET, "status": "allowed"}})
-    orb = lambda name: {"kind": "orb", "name": "eng-" + name}  # noqa: E731
+    box = lambda name: {"kind": "incus", "name": "org-eng-" + name}  # noqa: E731
     plan = "# Plan\n\n## Approach\n\nSettle the export interface first, then fan out.\n\n## Milestones\n\n| id | title | minutes | cost |\n|---|---|---|---|\n| M1 | Interfaces | 15 | $1.20 |\n| M2 | API endpoint | 25 | $2.40 |\n\n## Risks\n\n- The row serializer is shared with the PDF export: change it once, in M1.\n"
 
-    run(ledger, "007-csv-export-r1", "CSV export for the table view", "executing", 72 * MIN, orb("007-csv-export-r1"),
+    run(ledger, "007-csv-export-r1", "CSV export for the table view", "executing", 72 * MIN, box("007-csv-export-r1"),
         detail="milestone 3/5: Web button and download flow", cost=6.20, cap=40.0, estimate={"wall_minutes": 100, "cost_usd": 9.0},
         eta_in=28 * MIN, heading_for=9.8, basis="pace of 2 finished milestone(s)", plan=plan,
         activity="Bash: bazel test //web/export/... --test_output=errors", activity_ago=12,
@@ -135,19 +135,19 @@ def build(root) -> Ledger:
                     milestone("M2", "API endpoint with streaming", 25, 2.4, 43 * MIN, 31 * MIN, "done", 3.1),
                     milestone("M3", "Web button and download flow", 30, 3.0, 12 * MIN),
                     milestone("M4", "Filter-aware export", 20, 1.6), milestone("M5", "Integration tests and PRs", 10, 0.8)])
-    run(ledger, "008-auth-refactor-r1", "Move session handling behind an interface", "planning", 8 * MIN, orb("008-auth-refactor-r1"),
+    run(ledger, "008-auth-refactor-r1", "Move session handling behind an interface", "planning", 8 * MIN, box("008-auth-refactor-r1"),
         detail="researching and planning", cost=0.90, cap=120.0, activity="Read: services/auth/session.py", activity_ago=3)
     run(ledger, "009-search-index-r1", "Incremental search index rebuilds", "waiting", 3 * HOUR, {"kind": "ssh", "name": "bigbox"},
         phase="executing", detail="usage limit reached; resuming when it resets", cost=31.4, cap=80.0, estimate={"wall_minutes": 240, "cost_usd": 44.0},
         resumes_in=2 * HOUR + 14 * MIN, model="opus",
         milestones=[milestone("M1", "Change-log reader", 60, 10, 170 * MIN, 70 * MIN, "done", 12.9),
                     milestone("M2", "Segment merge", 90, 18, 100 * MIN), milestone("M3", "Backfill", 60, 11), milestone("M4", "Cutover", 30, 5)])
-    run(ledger, "010-flaky-tests-r1", "Deflake the checkout test suite", "executing", 40 * MIN, orb("010-flaky-tests-r1"),
+    run(ledger, "010-flaky-tests-r1", "Deflake the checkout test suite", "executing", 40 * MIN, box("010-flaky-tests-r1"),
         detail="milestone 1/2: Reproduce and classify", cost=3.1, estimate={"wall_minutes": 90, "cost_usd": 7.0}, eta_in=55 * MIN,
         activity="Bash: for i in $(seq 50); do pytest tests/checkout -x -q; done", activity_ago=9 * MIN,
         milestones=[milestone("M1", "Reproduce and classify", 40, 3.0, 30 * MIN), milestone("M2", "Fix and verify 200 clean runs", 50, 4.0)],
-        record={"reachable": False, "last_error": "orb:eng-010-flaky-tests-r1: no answer within 45s"})
-    run(ledger, "006-readme-refresh-r1", "Rewrite the README around the new CLI", "done", 5 * HOUR, orb("006-readme-refresh-r1"),
+        record={"reachable": False, "last_error": "incus:org-eng-010-flaky-tests-r1: no answer within 45s"})
+    run(ledger, "006-readme-refresh-r1", "Rewrite the README around the new CLI", "done", 5 * HOUR, box("006-readme-refresh-r1"),
         finished_ago=5 * HOUR - 22 * MIN, cost=1.10, estimate={"wall_minutes": 30, "cost_usd": 2.0}, model="sonnet", plan=plan,
         report="# Report\n\n## Outcome\n\ndone. The README now leads with install and the three commands people use.\n\n## Forecast against actual\n\nPlanned 30 minutes and $2.00; took 22 minutes and $1.10.\n",
         milestones=[milestone("M1", "Outline from the CLI help", 8, 0.5, 290 * MIN, 6 * MIN, "done", 0.3),
@@ -157,7 +157,7 @@ def build(root) -> Ledger:
                 "acceptance": [{"id": "AC%d" % i, "verdict": "pass", "evidence": "ran"} for i in (1, 2, 3)],
                 "artifacts": [{"repo": "acme/cli", "branch": "org/006-readme-refresh", "pr_url": "https://example.test/acme/cli/pull/41"},
                               {"repo": "acme/docs", "branch": "org/006-readme-refresh", "pr_url": "https://example.test/acme/docs/pull/7"}]})
-    run(ledger, "005-payments-webhooks-r1", "Retry and dead-letter queue for payment webhooks", "partial", 26 * HOUR, orb("005-payments-webhooks-r1"),
+    run(ledger, "005-payments-webhooks-r1", "Retry and dead-letter queue for payment webhooks", "partial", 26 * HOUR, box("005-payments-webhooks-r1"),
         finished_ago=22 * HOUR, cost=38.6, cap=40.0, estimate={"wall_minutes": 150, "cost_usd": 24.0}, plan=plan, report="# Report\n\n## Outcome\n\npartial.\n",
         milestones=[milestone("M1", "Retry policy and schema", 30, 5, 26 * HOUR, 41 * MIN, "done", 7.9),
                     milestone("M2", "Worker and backoff", 50, 9, 25 * HOUR, 95 * MIN, "done", 16.2),

@@ -44,6 +44,11 @@ class RunnerCase(unittest.TestCase):
         self.scen.mkdir()
         os.environ["FAKE_CLAUDE_SCENARIO"] = str(self.scen / "scenario.json")
         self.addCleanup(os.environ.pop, "FAKE_CLAUDE_SCENARIO", None)
+        # Tokens are handed to a machine in $ORG_SECRETS_DIR. Where this suite runs, the default
+        # (/run/org) may hold real ones, which no test may read: this run's directory has none.
+        was = os.environ.get("ORG_SECRETS_DIR")
+        os.environ["ORG_SECRETS_DIR"] = str(self.tmp / "run-org")
+        self.addCleanup(lambda: os.environ.pop("ORG_SECRETS_DIR", None) if was is None else os.environ.__setitem__("ORG_SECRETS_DIR", was))
 
     def job(self, turns, caps=None, engineer=None, acceptance=("AC1",), scenario=None, **extra):
         (self.scen / "scenario.json").write_text(json.dumps(dict({"turns": turns}, **(scenario or {}))))

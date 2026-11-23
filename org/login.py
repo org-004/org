@@ -1,23 +1,24 @@
-"""`org login`: give this side the three things an engineer is handed at dispatch.
+"""`org login`: say which of the things an engineer is handed are in place here.
 
-  1. a long-lived Claude token in ~/.claude/oauth-token   (from `claude setup-token`)
-  2. a GitHub login                                        (`gh auth login`)
-  3. a git identity                                        (taken from the GitHub account if unset)
+  1. a Claude token      from `claude setup-token`: model requests only
+  2. a GitHub token      a fine-grained one whose resource owner is the organization
+  3. a git identity      who commits are made as
 
-On a Mac that already has these, nothing happens. In a manager container that started blank this
-is the one interactive step after `org up`: both logins are browser flows that print a URL, so
-they work from inside a container with no browser of its own.
+The two tokens are not typed in here and nothing here opens a browser login: a login made on
+this machine would be the whole account, not the narrow pair. They are handed in from the host
+(`org-vm login` stores them in the host's keychain, `org-vm up` copies them into this machine's
+memory) and read from there by org/secrets.py.
 """
 from __future__ import annotations
 
-import getpass
-import json
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+
+from . import secrets
 
 TOKEN = Path.home() / ".claude" / "oauth-token"
 
@@ -51,18 +52,18 @@ def store_token(token: str) -> None:
 
 def status() -> dict:
     """What is in place, without changing or testing anything."""
+    github = secrets.github_token()
     return {
-        "claude_token": TOKEN.is_file() and TOKEN.stat().st_size > 0,
-        "github": bool(_out(["gh", "auth", "token"])),
+        "claude_token": bool(secrets.claude_token()),
+        "github": bool(github),
+        "github_fine_grained": secrets.is_fine_grained(github),
         "git_name": _out(["git", "config", "--global", "user.name"]),
         "git_email": _out(["git", "config", "--global", "user.email"]),
     }
 
 
 def run(force: bool = False, token_stdin: bool = False) -> int:
-    claude = shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude")
-    # ---- 1. the Claude token
-    if token_stdin:  # `org up` pipes in a token the host already has
+    if token_stdin:  # the Docker plugin's `org up` pipes in a token the host already has
         token = sys.stdin.readline().strip()
         if not token:
             print("no token on stdin")
@@ -70,39 +71,19 @@ def run(force: bool = False, token_stdin: bool = False) -> int:
         store_token(token)
         print("Claude token stored")
         return 0
-    have = TOKEN.read_text().strip() if TOKEN.is_file() else ""
-    if have and not force and token_works(have, claude):
-        print("Claude: the token in %s works" % TOKEN)
+    s = status()
+    print("Claude token: %s" % ("present" if s["claude_token"] else "missing"))
+    if s["github"] and not s["github_fine_grained"]:
+        print("GitHub token: present, but it is not a fine-grained one (github_pat_...). A classic token reaches every "
+              "repository its owner has; replace it.")
     else:
-        print("Claude: a long-lived token is needed. `claude setup-token` will print a URL to open in your\n"
-              "browser, then print the token (it starts with sk-ant-oat01-).\n")
-        subprocess.run([claude, "setup-token"])
-        token = getpass.getpass("\npaste the token it printed (input is hidden): ").strip().replace("\n", "").replace(" ", "")
-        if not token:
-            print("nothing stored")
-            return 1
-        if not token_works(token, claude):
-            print("the API rejected that token (%d characters); nothing stored" % len(token))
-            return 1
-        store_token(token)
-        print("Claude: token accepted and stored in %s" % TOKEN)
-    # ---- 2. GitHub
-    if _out(["gh", "auth", "token"]) and not force:
-        print("GitHub: logged in as %s" % (_out(["gh", "api", "user", "--jq", ".login"]) or "?"))
-    else:
-        print("\nGitHub: logging in (a one-time code and a URL to open in your browser)\n")
-        if subprocess.run(["gh", "auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web"]).returncode != 0:
-            print("GitHub login did not complete")
-            return 1
-    subprocess.run(["gh", "auth", "setup-git"], capture_output=True)
-    # ---- 3. who commits
-    name, email = _out(["git", "config", "--global", "user.name"]), _out(["git", "config", "--global", "user.email"])
-    if not (name and email):
-        user = json.loads(_out(["gh", "api", "user"]) or "{}")
-        name = name or user.get("name") or user.get("login") or ""
-        email = email or user.get("email") or (("%s+%s@users.noreply.github.com" % (user["id"], user["login"])) if user.get("id") else "")
-        if name and email:
-            subprocess.run(["git", "config", "--global", "user.name", name])
-            subprocess.run(["git", "config", "--global", "user.email", email])
-    print("git: commits will be made as %s <%s>" % (name or "?", email or "?"))
-    return 0
+        print("GitHub token: %s" % ("present, fine-grained" if s["github"] else "missing"))
+    print("git identity: %s" % (("%s <%s>" % (s["git_name"], s["git_email"])) if s["git_name"] and s["git_email"] else "not set"))
+    ok = s["claude_token"] and s["github"] and s["github_fine_grained"]
+    if not ok:
+        print("\nThe tokens are handed in from the host, not typed here:\n"
+              "  org-vm login    stores them in the host's keychain\n"
+              "  org-vm up       copies them into this machine's memory (%s)" % secrets.directory())
+    if not (s["git_name"] and s["git_email"]):
+        print("\nSet who commits are made as:\n  git config --global user.name \"...\"\n  git config --global user.email \"...\"")
+    return 0 if ok and s["git_name"] and s["git_email"] else 1

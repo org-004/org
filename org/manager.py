@@ -27,7 +27,7 @@ import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import status
+from . import secrets, status
 from .ledger import Ledger
 from .sync import sync_all
 from .util import fmt_stamp, now, read_json, read_text, render, write_json
@@ -36,13 +36,14 @@ PROMPTS = Path(__file__).parent / "prompts"
 BIN = Path(__file__).resolve().parent.parent / "bin"
 
 READ_COMMANDS = ["status", "peek", "logs", "plan", "report", "review", "sync", "spec ls", "spec show", "spec check",
-                 "machine ls", "project ls", "ls", "cat", "diff", "pool", "doctor", "config get", "agent status", "node ls"]
+                 "machine ls", "project ls", "ls", "cat", "diff", "pool", "doctor", "config get", "node ls", "repos"]
 # What a conversation may do by itself: drafts, the list of projects, a scratch copy of a repository.
 DRAFT_COMMANDS = ["spec new", "spec revise", "project add", "clone", "init"]
 # Decisions that are the person's. `exec` is among them: it runs anything on an engineer's machine.
 # So are the commands that change where engineers run or how many, and the installation itself.
+# `drain`, `undrain` and `upgrade` decide when work runs and which code runs it.
 HUMAN_COMMANDS = ["approve", "dispatch", "stop", "resume", "machine rm", "exec", "pump", "login",
-                  "config set", "node add", "node rm", "agent run", "agent bridge", "agent pipe", "up", "down"]
+                  "config set", "node add", "node rm", "up", "down", "drain", "undrain", "upgrade", "view"]
 
 # Commands that change state outside this machine. Bash deny rules match the form a model
 # normally writes; they are a guard against an overeager manager, not a wall against a hostile
@@ -66,26 +67,25 @@ OUTWARD_API = ["gh api * -X *", "gh api * --method *", "gh api -X *", "gh api --
 READ_SHELL = ["cd", "ls", "cat", "head", "tail", "wc", "stat", "file", "du", "tree", "rg", "grep", "find", "jq", "which", "pwd", "date"]
 GIT_READ = ["status", "log", "show", "diff", "blame", "ls-files", "ls-remote", "rev-parse", "describe", "shortlog", "grep",
             "branch --list", "branch -a", "branch -r", "branch -vv", "remote -v", "remote show", "remote get-url", "worktree list"]
-GH_READ = ["pr view", "pr list", "pr diff", "pr checks", "pr status", "issue view", "issue list", "repo view", "repo list",
-           "run view", "run list", "release view", "release list", "search", "api", "auth status"]
+# What stands between the chat and the machine that holds it. The chat has no use for either:
+# engineers' containers are reached with `org ls`, `org cat` and `org exec`.
+HOST_COMMANDS = ["incus", "sudo", "su", "docker"]
 
 
 def secret_paths() -> list:
     """Where logins live on this side, as permission-rule path patterns."""
-    home = Path.home()
-    return [str(home / ".claude" / "oauth-token"), str(home / ".claude" / ".credentials.json"),
-            str(home / ".config" / "gh") + "/**", str(home / ".ssh") + "/**"]
+    return secrets.rule_patterns()
 
 
 def _org(commands) -> list:
-    return ["Bash(org %s *)" % c for c in commands]
+    # With arguments and without: `org drain` and `org drain --wait` are the same decision.
+    return [rule % c for c in commands for rule in ("Bash(org %s)", "Bash(org %s *)")]
 
 
 def _read_rules() -> list:
     # No `git -C <dir> <verb>` forms: a wildcard before the verb would also admit options such as
     # `-c`, which can make git run a program. `cd <dir>` and then the plain form does the same job.
-    return (["Bash(%s *)" % c for c in READ_SHELL] + ["Bash(git %s *)" % c for c in GIT_READ]
-            + ["Bash(gh %s *)" % c for c in GH_READ])
+    return ["Bash(%s *)" % c for c in READ_SHELL] + ["Bash(git %s *)" % c for c in GIT_READ]
 
 
 def sandbox_usable() -> bool:
@@ -136,15 +136,19 @@ def settings(ledger: Ledger, mode: str, with_sandbox: Optional[bool] = None) -> 
         # Read(//**) as well as Read: the harness checks the paths given to ls, cat and the like
         # against read rules by path, and a rule without a path does not satisfy that check.
         "allow": ["Read", "Read(//**)", "Grep", "Glob"] + _org(READ_COMMANDS) + _read_rules(),
-        "ask": _org(HUMAN_COMMANDS) + ["Bash(orb *)", "Bash(ssh *)"],
+        "ask": _org(HUMAN_COMMANDS) + ["Bash(ssh *)"],
         # An absolute path in a rule is written with a second leading slash.
         "deny": ["Bash(%s *)" % c for c in OUTWARD] + ["Bash(%s)" % c for c in OUTWARD_FORMS + OUTWARD_API]
         + ["Edit(/%s/specs/**)" % root, "Edit(/%s/runs/**)" % root, "Edit(/%s/config.json)" % root]
         # The logins this side hands to engineers are not the manager chat's to read or repeat.
-        + ["Read(/%s)" % p for p in secret_paths()],
+        + ["Read(/%s)" % p for p in secret_paths()]
+        # No MCP server is configured here and none may be: a tool from one would be a way out
+        # of this machine that no rule above describes.
+        + ["mcp__*"]
+        + ["Bash(%s *)" % c for c in HOST_COMMANDS] + ["Bash(%s)" % c for c in HOST_COMMANDS],
         "blockWritesOutsideWorkingDirectories": True,
     }
-    out = {"permissions": perms}
+    out = {"permissions": perms, "disableClaudeAiConnectors": True}
     if mode == "talk":
         perms["allow"] += _org(DRAFT_COMMANDS) + ["Edit(/%s/**)" % desk, "WebSearch", "WebFetch"]
         if with_sandbox:
@@ -154,34 +158,38 @@ def settings(ledger: Ledger, mode: str, with_sandbox: Optional[bool] = None) -> 
                 "failIfUnavailable": True,
                 "autoAllowBashIfSandboxed": True,
                 "allowUnsandboxedCommands": False,
-                # Outside the sandbox, and so under the permission rules above instead: org itself
-                # (it writes the ledger and reaches the machines) and gh (on macOS its token is in
-                # the keychain, which a sandboxed process cannot read). manager.sandbox_exclude
-                # adds more, e.g. "git clone *" if private clones fail inside the sandbox.
-                "excludedCommands": ["org", "org *", "gh", "gh *"] + list(mgr.get("sandbox_exclude") or []),
+                # Outside the sandbox, and so under the permission rules above instead: org itself,
+                # which writes the ledger and reaches the engineers' containers. Nothing else:
+                # the chat has no GitHub login to keep out of the sandbox, because every
+                # repository it works with is public. manager.sandbox_exclude adds more.
+                "excludedCommands": ["org", "org *"] + list(mgr.get("sandbox_exclude") or []),
                 "network": {"allowedDomains": list(mgr.get("network_allow") or [])},
             }
             # The same files, kept from sandboxed shell commands by the operating system.
-            secrets = [str(q) for q in (Path.home() / ".claude" / "oauth-token", Path.home() / ".claude" / ".credentials.json",
-                                        Path.home() / ".config" / "gh", Path.home() / ".ssh") if q.exists()]
-            if secrets:
-                out["sandbox"]["filesystem"] = {"denyRead": secrets}
+            # So is Incus's socket: whoever can write to it can enter every engineer's container.
+            hidden = [q for q in secrets.all_paths() + ["/var/lib/incus/unix.socket", "/var/lib/incus/unix.socket.user"]
+                      if os.path.exists(q)]
+            if hidden:
+                out["sandbox"]["filesystem"] = {"denyRead": hidden}
     return out
 
 
 def launch_env(ledger: Ledger) -> dict:
     env = dict(os.environ)
-    # ~/.local/bin is where Claude Code installs itself, and a command started by `orb -m` or by
-    # the host agent has only the PATH it was given.
+    # ~/.local/bin is where Claude Code installs itself, and a service or a command passed in
+    # from the host has only the PATH it was given.
     env["PATH"] = os.pathsep.join([str(BIN), str(Path.home() / ".local" / "bin"), env.get("PATH", "")])
     env["ORG_HOME"] = str(ledger.root)
-    # On the Mac the manager uses the Mac's own login. Inside an OrbStack machine the only login
-    # that works is the long-lived token `box` copies in, and only shells started by zsh export
-    # it; a process started any other way falls back to an expired session. Same rule as zshrc.
-    token = Path.home() / ".claude" / "oauth-token"
-    in_box = os.path.isdir("/opt/orbstack-guest") or env.get("ORG_USE_TOKEN_FILE") == "1"
-    if in_box and not env.get("CLAUDE_CODE_OAUTH_TOKEN") and not env.get("ANTHROPIC_API_KEY") and token.is_file():
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = token.read_text().strip()
+    # The manager's session makes model requests with the token this installation was handed.
+    # It is never given the GitHub token: the chat reads public repositories and pushes nothing.
+    token = secrets.claude_token()
+    if token and not env.get("CLAUDE_CODE_OAUTH_TOKEN") and not env.get("ANTHROPIC_API_KEY"):
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"):
+        env.pop(name, None)
+    # No claude.ai connectors, whatever the account has attached. A token from `claude
+    # setup-token` cannot fetch them anyway; this holds if a wider login ever lands here.
+    env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
     return env
 
 
@@ -190,17 +198,17 @@ def machines_help(cfg: dict) -> str:
     from . import backends
 
     machines = cfg.get("machines") or {}
-    default = (machines.get("default") or "orb").split(":")[0]
+    default = (machines.get("default") or "incus").split(":")[0]
     try:
         kinds = backends.kinds(cfg)
     except backends.BackendError:
         kinds = [default]
     known = {
-        "orb": "`orb` (a fresh OrbStack machine for the run, cloned from the template)",
+        "incus": "`incus` (a fresh container for the run, copied from the template)",
         "docker": "`docker` (a fresh container; `docker:<node>` names a Docker host from `org pool`)",
     }
     parts = [known.get(default, "`%s`" % default) + ", the default"]
-    parts += [known[k] for k in ("orb", "docker") if k in kinds and k != default]
+    parts += [known[k] for k in ("incus", "docker") if k in kinds and k != default]
     ssh = sorted(machines.get("ssh") or {})
     if ssh:
         parts.append("`ssh:<name>` for a remote machine that is configured (%s); choose one only when the work needs what "
@@ -211,11 +219,9 @@ def machines_help(cfg: dict) -> str:
     return text + " Leave it out unless there is a reason: the default is what this installation is set up for."
 
 
-# Said only to a session whose shell is sandboxed. Seen live, 2026-11-22: asked for the person's
-# repositories, the manager ran `gh repo list ... | grep`, was told nobody was logged in, and
-# reported that it had no GitHub access. The login was there; the pipe had put gh in the sandbox.
+# Said only to a session whose shell is sandboxed.
 SANDBOX_NOTE = """
-- Your shell commands run in a sandbox that cannot read the person's GitHub login. `org` and `gh` are let out of it, but only when one of them is the whole command: no pipe, no redirect, no `;` or `&&`, no `cd` in front. Written any other way, `gh` runs inside the sandbox and says nobody is logged in, and an `org` command that writes fails. That message is the sandbox, not a missing login: run the command again on its own and read all of what it prints. `git clone` and `git fetch` typed directly are always inside the sandbox, so they reach public repositories only; `org clone` is for the rest."""
+- Your shell commands run in a sandbox with no GitHub login, and there is none to find: every repository you work with is public, so `git clone`, `git fetch` and `curl -s https://api.github.com/repos/<owner>/<name>/pulls` read all you need. `org repos` lists the organization's repositories and `org clone <owner/name>` puts a copy in your scratch space. You cannot push, comment or open anything on GitHub, and `gh` will only tell you nobody is logged in. An `org` command must be the whole command: no pipe, no redirect, no `;` or `&&`, no `cd` in front, or it runs inside the sandbox and one that writes fails."""
 
 
 def persona(ledger: Ledger, live_state: bool = True, extra: str = "", with_sandbox: bool = False) -> str:

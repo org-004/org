@@ -7,7 +7,7 @@
 What it gives: the host needs only a Docker engine, and remote capacity is another Docker host
 (`ssh://user@host`). What it costs: an engineer in a plain container cannot run Docker itself,
 and a manager that starts containers must hold the Docker socket, which is root on the Docker
-host. The OrbStack backend has neither cost, which is why it is the default.
+host. An Incus system container can run Docker, which is why that backend is the default.
 
 The pool: machines.docker.nodes maps a node name to {"host": <DOCKER_HOST or null>, "slots": n,
 "cpus": ..., "memory": ...}.
@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-from pathlib import Path
 from typing import Dict, Optional
 
 from ..transport import Docker, Transport
@@ -77,7 +76,7 @@ class DockerBackend(Backend):
                 return 127, str(e)
 
         docker = shutil.which("docker")
-        add(bool(docker), "docker", docker or "not found", "install a Docker engine (OrbStack, Docker Desktop, Colima, or Docker on Linux)")
+        add(bool(docker), "docker", docker or "not found", "install a Docker engine")
         if docker:
             image = self._settings(cfg).get("image", "org:latest")
             for name, entry in sorted(nodes_of(cfg).items()):
@@ -91,11 +90,6 @@ class DockerBackend(Backend):
                 add(have, "docker node `%s`" % name,
                     "engine %s, %d slot(s)%s" % (engine, int(entry.get("slots", 1)), "" if have else ", image %s missing" % image),
                     "`org up --backend docker` builds it on this machine; `org node add %s <host>` builds it on a remote one" % name)
-        token = Path.home() / ".claude" / "oauth-token"
-        add(token.is_file() and token.stat().st_size > 0, "Claude token for engineers", str(token) if token.is_file() else "missing", "org login")
-        logged_in = out(["gh", "auth", "token"])[0] == 0
-        add(logged_in, "GitHub login for engineers", "present" if logged_in else "missing",
-            "org login (without it engineers cannot clone private repositories or push)", soft=True)
 
 
 BACKEND = DockerBackend()

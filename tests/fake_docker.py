@@ -2,7 +2,8 @@
 """A stand-in for the `docker` client, covering the commands org uses.
 
 Each "container" is a directory under $FAKE_DOCKER_ROOT with its own home, so a command run "in"
-one sees a different $HOME from the test process and from other containers. Every invocation is
+one sees a different $HOME, and a different $ORG_SECRETS_DIR (inside that home), from the test
+process and from other containers. Every invocation is
 appended to calls.log, with the -H host when one was given, so tests can assert on what would
 have been sent to which daemon.
 
@@ -80,7 +81,10 @@ def main(argv):
         return 0
     if cmd == "exec":
         rest = argv[3:] if argv[1] == "-i" else argv[2:]
-        env = dict(os.environ, HOME=str(box / "home"))
+        # A container has a home of its own and a place of its own for the tokens it is handed
+        # (/run/org in a real one), and nothing of this side's logins.
+        env = dict(os.environ, HOME=str(box / "home"), ORG_SECRETS_DIR=str(box / "home" / ".run-org"))
+        env.pop("ORG_HOME", None)
         os.chdir(box / "home")
         os.execvpe(rest[0], rest, env)
     sys.stderr.write("fake docker: unsupported: %s\n" % " ".join(argv))

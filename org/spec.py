@@ -126,7 +126,7 @@ def acceptance_ids(body: str) -> List[str]:
     return seen
 
 
-def check(text: str, default_machine: str = "orb") -> Tuple[List[str], List[str]]:
+def check(text: str, default_machine: str = "incus", owner: str = "") -> Tuple[List[str], List[str]]:
     """Return (errors, warnings). Errors block approval.
 
     `default_machine` is where the spec would run if its header does not say. Whether that
@@ -152,18 +152,27 @@ def check(text: str, default_machine: str = "orb") -> Tuple[List[str], List[str]
             warnings.append("header: unknown key %r is ignored" % key)
     machine = str(meta.get("machine") or "")
     if machine and not re.match(r"^[a-z][a-z0-9]*(:[A-Za-z0-9_.-]+)?$", machine):
-        errors.append("header: machine must be a kind or kind:name, such as orb or ssh:bigbox")
+        errors.append("header: machine must be a kind or kind:name, such as incus or ssh:bigbox")
     for repo in meta.get("repos") or []:
         if PLACEHOLDER_REPO_RE.search(str(repo)):
             errors.append("header: repo %s is a placeholder; an engineer would have nothing to clone. "
                           "Put what is still unknown under Open questions until the person supplies it" % repo)
     # The engineer works on another machine. A path on this one is not a repository it can clone.
-    where = machine or default_machine or "orb"
+    where = machine or default_machine or "incus"
     if where != "local":
         for repo in meta.get("repos") or []:
             if str(repo).startswith(("/", "~", "./", "../", "file:")):
                 errors.append("header: repo %s is a path on this machine, which an engineer on %s cannot reach. "
                               "Name its remote (owner/name or a URL); if it has none, it must be pushed first" % (repo, where))
+
+    # Engineers push with a token that reaches one owner's repositories and no others. A
+    # repository anywhere else can be read if it is public, and nothing can be delivered to it.
+    if owner:
+        for repo in meta.get("repos") or []:
+            got = repo_owner(str(repo))
+            if got and got.lower() != owner.lower():
+                errors.append("header: repo %s is not in %s, the only place an engineer can push. Move or fork the "
+                              "repository there, or leave it out of `repos` and name it under Context as something to read" % (repo, owner))
 
     secs = sections(body)
     for name in REQUIRED_SECTIONS:
@@ -197,15 +206,21 @@ def check(text: str, default_machine: str = "orb") -> Tuple[List[str], List[str]
 # ---------------------------------------------------------------- lifecycle
 
 
+def repo_owner(repo: str) -> str:
+    """The owner in owner/name or in a GitHub URL; "" for anything else (a path, another host)."""
+    m = re.match(r"^(?:https?://github\.com/|git@github\.com:|ssh://git@github\.com/)?([A-Za-z0-9][A-Za-z0-9-]*)/[A-Za-z0-9._-]+?(?:\.git)?/?$", repo.strip())
+    return m.group(1) if m else ""
+
+
 def default_machine(ledger: Ledger) -> str:
-    return str((ledger.config().get("machines") or {}).get("default") or "orb")
+    return str((ledger.config().get("machines") or {}).get("default") or "incus")
 
 
 def check_text(ledger: Ledger, text: str) -> Tuple[List[str], List[str]]:
     """check(), and whether this ledger could give the spec the machine it asks for."""
     from . import backends  # here, not at the top: the engineer's side parses specs and starts no machines
 
-    errors, warnings = check(text, default_machine(ledger))
+    errors, warnings = check(text, default_machine(ledger), str((ledger.config().get("github") or {}).get("owner") or ""))
     if not any(e.startswith("header: machine") for e in errors):
         cfg = ledger.config()
         want = str(parse(text)[0].get("machine") or default_machine(ledger)).strip()

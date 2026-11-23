@@ -17,7 +17,7 @@ from org import dispatch, spec, status, sync  # noqa: E402
 from org.ledger import Ledger  # noqa: E402
 from org.transport import Docker  # noqa: E402
 from org.util import read_json, write_json  # noqa: E402
-from test_manager_side import GOOD, TURNS  # noqa: E402
+from test_manager_side import GOOD, TURNS  # noqa: E402  (which also keeps the real tokens out of every test)
 
 
 class DockerCase(unittest.TestCase):
@@ -26,18 +26,24 @@ class DockerCase(unittest.TestCase):
         self.addCleanup(self._cleanup)
         self.old_env = dict(os.environ)
         home = self.tmp / "manager-home"
-        (home / ".claude").mkdir(parents=True)
-        (home / ".claude" / "oauth-token").write_text("sk-ant-oat01-not-a-real-token\n")
+        home.mkdir()
         (home / ".gitconfig").write_text("[user]\n\tname = Ada Example\n\temail = ada@example.test\n")
+        # The two tokens this side was handed, in a directory of the test's own (never the real /run/org).
+        self.secrets = self.tmp / "run-org"
+        self.secrets.mkdir(mode=0o700)
+        (self.secrets / "claude-token").write_text("sk-ant-oat01-not-a-real-token\n")
+        (self.secrets / "github-token").write_text("github_pat_not_a_real_token\n")
         bindir = self.tmp / "bin"
         bindir.mkdir()
-        for name, target in (("docker", "fake_docker.py"), ("claude", "fake_claude.py"), ("gh", "fake_gh.py")):
+        # The simulated incus is here so that nothing can reach a real one; these tests never call it.
+        for name, target in (("docker", "fake_docker.py"), ("claude", "fake_claude.py"), ("incus", "fake_incus.py")):
             os.symlink(ROOT / "tests" / target, bindir / name)
         self.scen = self.tmp / "scen"
         self.scen.mkdir()
-        os.environ.update(HOME=str(home), PATH=str(bindir) + os.pathsep + self.old_env["PATH"],
-                          FAKE_DOCKER_ROOT=str(self.tmp / "docker"), FAKE_CLAUDE_SCENARIO=str(self.scen / "scenario.json"),
-                          FAKE_GH_TOKEN="gho_not_a_real_token")
+        os.environ.update(HOME=str(home), PATH=str(bindir) + os.pathsep + self.old_env["PATH"], ORG_SECRETS_DIR=str(self.secrets),
+                          FAKE_DOCKER_ROOT=str(self.tmp / "docker"), FAKE_INCUS_ROOT=str(self.tmp / "incus"),
+                          FAKE_CLAUDE_SCENARIO=str(self.scen / "scenario.json"))
+        os.environ.pop("ORG_HOME", None)
         self.scenario(TURNS)
         self.ledger = Ledger(self.tmp / "ledger")
         self.ledger.init()
@@ -46,13 +52,15 @@ class DockerCase(unittest.TestCase):
     def _cleanup(self):
         os.environ.clear()
         os.environ.update(self.old_env)
-        subprocess.run(["pkill", "-f", str(self.tmp)], capture_output=True)
+        # Killed outright: a runner asked politely writes its last files, into a directory that is being removed.
+        subprocess.run(["pkill", "-9", "-f", str(self.tmp)], capture_output=True)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def configure(self, slots=2, nodes=None):
         nodes = nodes or {"local": {"host": None, "slots": slots}}
+        # The built-in Incus backend has a pool of its own by default; here the only pool is Docker's.
         write_json(self.ledger.config_path, {"machines": {"plugins": ["org.backends.docker"], "default": "docker", "detach": "nohup",
-                                                          "docker": {"nodes": nodes}},
+                                                          "docker": {"nodes": nodes}, "incus": {"slots": None}},
                                              "engineer": {"retry_backoff_s": 0.05, "max_turn_retries": 1}})
 
     def scenario(self, turns):
@@ -96,15 +104,19 @@ class DockerCase(unittest.TestCase):
         network = (self.tmp / "docker" / "network-org-engineers").read_text()
         self.assertIn("enable_icc=false", network, "engineers cannot reach each other")
         home = self.box(run_id) / "home"
-        # the three logins, each delivered over stdin
-        self.assertEqual((home / ".claude" / "oauth-token").read_text().strip(), "sk-ant-oat01-not-a-real-token")
-        self.assertEqual((home / ".claude" / "oauth-token").stat().st_mode & 0o077, 0)
-        self.assertEqual((home / ".config" / "gh" / "token").read_text(), "gho_not_a_real_token")
-        self.assertTrue((home / ".config" / "gh" / "setup-git").exists())
+        # A new container is blank, so it is handed all three logins, each over stdin: the two
+        # tokens into its own tokens directory (its /run/org), and the git identity.
+        for name, value in (("claude-token", "sk-ant-oat01-not-a-real-token"), ("github-token", "github_pat_not_a_real_token")):
+            self.assertEqual((home / ".run-org" / name).read_text().strip(), value)
+            self.assertEqual((home / ".run-org" / name).stat().st_mode & 0o077, 0)
+        self.assertEqual((home / ".run-org").stat().st_mode & 0o077, 0)
+        self.assertEqual(sorted(p.name for p in self.secrets.iterdir()), ["claude-token", "github-token"], "this side's are as they were")
+        self.assertIn("gh auth git-credential", (home / ".gitconfig").read_text(), "git asks gh, which reads the token the runner gives it")
         self.assertIn("Ada Example", (home / ".gitconfig").read_text())
         self.assertIn("ada@example.test", (home / ".gitconfig").read_text())
+        self.assertIn("GitHub token copied in", log)
         for call in self.calls():
-            self.assertNotIn("gho_not_a_real_token", json.dumps(call), "no token on a command line")
+            self.assertNotIn("github_pat_", json.dumps(call), "no token on a command line")
             self.assertNotIn("sk-ant-oat01", json.dumps(call))
         self.assertTrue((home / "org-runs" / run_id / ".org" / "org" / "runner.py").exists())
 
@@ -117,12 +129,15 @@ class DockerCase(unittest.TestCase):
         self.assertTrue((self.ledger.mirror_dir(run_id) / "report.md").exists(), "the record outlives the container")
 
     def test_without_logins_dispatch_still_works_and_says_so(self):
-        os.environ.pop("FAKE_GH_TOKEN")
+        (self.secrets / "github-token").unlink()
+        (self.secrets / "claude-token").unlink()
         (Path(os.environ["HOME"]) / ".gitconfig").unlink()
         log = []
         run_id, _ = dispatch.dispatch(self.ledger, self.approved(), log=log.append)
-        self.assertTrue(any("no GitHub login" in line for line in log))
+        self.assertTrue(any("no Claude token" in line for line in log))
+        self.assertTrue(any("no GitHub token" in line for line in log))
         self.assertTrue(any("no git identity" in line for line in log))
+        self.assertFalse((self.box(run_id) / "home" / ".run-org").exists(), "nothing was handed over")
         self.wait_final(run_id)
 
     # ------------------------------------------------------------ the pool and the queue

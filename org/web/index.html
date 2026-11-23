@@ -111,6 +111,8 @@ h2 { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: upp
 .warn svg { width: 14px; height: 14px; flex: none; margin-top: 3px; }
 .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .actions .spacer { flex: 1; }
+.actions .port { width: 64px; border: 1px solid var(--border); border-radius: 6px; padding: 3px 7px; background: var(--page); color: var(--ink); }
+.actions .port:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 details.ms > summary { cursor: pointer; color: var(--ink-2); font-size: 12.5px; list-style-position: inside; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { text-align: left; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--hair); vertical-align: top; }
@@ -341,6 +343,7 @@ function banner(text) { const b = $("banner"); b.textContent = text || ""; b.cla
 // ---------------------------------------------------------------- rendering
 let state = null, fetchedAt = 0;
 const open = new Set();        // run ids whose milestone table is open
+const ports = {};              // run id -> what is typed in its port box, kept across re-renders
 const last = {};               // last rendered HTML per slot, so unchanged parts are left alone
 function put(id, html) { if (last[id] !== html) { last[id] = html; $(id).innerHTML = html; } }
 
@@ -413,6 +416,26 @@ function milestoneTable(v) {
     + '<th class="num">Planned</th><th class="num">Took</th><th class="num">Planned $</th><th class="num">Spent</th></tr></thead><tbody>' + rows + "</tbody></table></div></details>";
 }
 function stat(label, value, sub, extra) { return '<div class="stat"><div class="label">' + label + '</div><div class="value">' + value + '</div><div class="sub">' + esc(sub || "") + "</div>" + (extra || "") + "</div>"; }
+// A web server the engineer is running, opened in a tab of its own. Offered only where the server
+// says viewing is on (dash.view), and only for a run that has a container to look into.
+function viewer(v) {
+  if (!state || !state.view || v.terminal || v.machine.kind !== "incus" || v.machine.removed || v.state === "queued" || v.state === "provisioning") return "";
+  return '<input class="port mono" type="text" inputmode="numeric" maxlength="5" placeholder="port" value="' + esc(ports[v.run_id] || "") + '" data-port="' + esc(v.run_id)
+    + '" aria-label="Port of a web server in this run\'s container"><button class="ghost" data-view="' + esc(v.run_id)
+    + '" title="Open a web server the engineer is running on that port, in a new tab. The page is the engineer\'s, not org\'s: treat it as you would any site you do not know.">Open port</button>';
+}
+async function openPort(run) {
+  const typed = String(ports[run] || "").trim(), port = /^[0-9]{1,5}$/.test(typed) ? parseInt(typed, 10) : 0;
+  if (port < 1 || port > 65535) { banner("Type the port the engineer's server listens on, from 1 to 65535, then Open port."); return; }
+  try {
+    const r = await api("/api/view", {run: run, port: port});
+    // The link works once and for a minute, so it is followed at once, in a tab that is given no handle on this one.
+    const a = document.createElement("a");
+    a.target = "_blank"; a.rel = "noopener noreferrer"; a.href = r.url;
+    document.body.appendChild(a); a.click(); a.remove();
+    banner("");
+  } catch (e) { banner("Could not open port " + port + " of " + run + ": " + e.message); }
+}
 function runCard(v) {
   const est = v.estimate || {}, live = !v.terminal;
   const elapsed = live && v.health === "ok" && v.elapsed_s != null ? v.elapsed_s + (nowS() - fetchedAt) : v.elapsed_s;
@@ -453,7 +476,7 @@ function runCard(v) {
   const warns = (v.warnings || []).map(w => '<div class="warn">' + icon("alert", "serious") + "<span>" + esc(w) + "</span></div>").join("");
   const btn = (name, label) => '<button class="ghost" data-doc="' + name + '" data-run="' + esc(v.run_id) + '">' + label + "</button>";
   const actions = btn("spec", "Spec") + (v.has_plan ? btn("plan", "Plan") : "") + (v.has_report ? btn("report", "Report") + btn("review", "Plan vs outcome") : "") + btn("activity", "Activity")
-    + '<span class="spacer"></span>' + (live ? '<button class="ghost danger" data-stop="' + esc(v.run_id) + '">Stop</button>' : "");
+    + '<span class="spacer"></span>' + viewer(v) + (live ? '<button class="ghost danger" data-stop="' + esc(v.run_id) + '">Stop</button>' : "");
   return '<section class="card run"><div class="head">' + badge(v) + '<span class="title">' + esc(v.title || v.run_id) + '</span><span class="id mono">' + esc(v.run_id) + "</span>"
     + '<span class="machine">' + esc((v.machine.kind || "") + " · " + (v.machine.name || "") + (v.machine.removed ? " (deleted)" : "")) + (v.model ? " · " + esc(v.model) : "") + "</span></div>"
     + segments(v)
@@ -533,11 +556,14 @@ document.addEventListener("click", async ev => {
   const t = ev.target.closest("button"); if (!t) return;
   if (t.dataset.doc) openDoc(t.dataset.run, t.dataset.doc);
   else if (t.dataset.draft) openDraft(t.dataset.draft);
+  else if (t.dataset.view) openPort(t.dataset.view);
   else if (t.dataset.stop) {
     if (!confirm("Stop the engineer on " + t.dataset.stop + "? Its work so far stays on its machine and in whatever it has pushed.")) return;
     try { const r = await api("/api/stop", {run: t.dataset.stop}); banner(r.ok ? "" : "Could not stop: " + r.error); load(); } catch (e) { banner("Could not stop: " + e.message); }
   }
 });
+document.addEventListener("input", ev => { const el = ev.target; if (el.dataset && el.dataset.port) ports[el.dataset.port] = el.value; });
+document.addEventListener("keydown", ev => { const el = ev.target; if (ev.key === "Enter" && el.dataset && el.dataset.port) { ev.preventDefault(); openPort(el.dataset.port); } });
 document.addEventListener("toggle", ev => { const d = ev.target; if (d.matches && d.matches("details.ms")) { d.open ? open.add(d.dataset.run) : open.delete(d.dataset.run); } }, true);
 $("drawerClose").onclick = hideDrawer; $("scrim").onclick = hideDrawer;
 document.addEventListener("keydown", ev => { if (ev.key === "Escape") hideDrawer(); });

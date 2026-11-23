@@ -4,7 +4,7 @@ A backend is one kind of machine: how to pick one for a run, how many may run at
 create it, reach it and remove it. Dispatch, sync and status know only this interface.
 
 Built in:
-    orb      a fresh OrbStack machine per run, cloned from a template. The default.
+    incus    a fresh Incus container per run, copied from a template. The default.
     ssh      a host that already exists
     local    this machine, with no isolation; off unless enabled
 
@@ -23,7 +23,7 @@ from typing import Dict, List, Optional
 
 from ..transport import Transport
 
-BUILTIN = ["org.backends.orb", "org.backends.ssh", "org.backends.local"]
+BUILTIN = ["org.backends.incus", "org.backends.ssh", "org.backends.local"]
 
 
 class BackendError(Exception):
@@ -122,7 +122,7 @@ def get(cfg: dict, kind: str) -> Backend:
 
 
 def resolve(cfg: dict, want: str) -> Backend:
-    """The backend for a request such as "orb", "ssh:bigbox" or "docker:node"."""
+    """The backend for a request such as "incus", "ssh:bigbox" or "docker:node"."""
     return get(cfg, want.split(":", 1)[0])
 
 

@@ -53,9 +53,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "network_allow": ["github.com", "*.github.com", "*.githubusercontent.com"],
     },
     "machines": {
-        # Where a spec runs when its header does not say: "orb", "ssh:<name>", "local", or a kind
+        # Where a spec runs when its header does not say: "incus", "ssh:<name>", "local", or a kind
         # a plugin provides. A manager that is itself a Docker container can only start containers.
-        "default": "docker" if os.environ.get("ORG_IN_CONTAINER") else "orb",
+        "default": "docker" if os.environ.get("ORG_IN_CONTAINER") else "incus",
         # Backends beyond the built-in ones (org/backends/). The Docker backend is one of these.
         "plugins": ["org.backends.docker"] if os.environ.get("ORG_IN_CONTAINER") else [],
         # The pool: Docker hosts and how many engineers each may run at once. A run that finds no
@@ -68,14 +68,18 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "push_token": True,
             "nodes": {"local": {"host": None, "slots": 4}},
         },
-        # A fresh OrbStack machine per run. "slots" (unset: no limit) is how many may run at once.
-        # When the manager is itself a machine, the host agent decides the template and prefix.
-        "orb": {"base": "base", "prefix": "eng-", "push_token": True, "slots": None},
+        # A fresh Incus container per run, copied from the template "base". Only containers whose
+        # names start with "prefix" are ever touched. "slots" (null: no limit) is how many may run
+        # at once.
+        "incus": {"base": "org-base", "prefix": "org-eng-", "push_token": True, "slots": 4},
         # name -> {"host": "user@host", "options": ["-p", "2222"], "push_token": false}
         "ssh": {},
         # Runs on this machine with no isolation. For trying org out and for its tests.
         "local": {"enabled": False},
     },
+    # The one GitHub owner whose repositories engineers can push to: the resource owner of the
+    # token they are given. A spec that names a repository elsewhere is refused. None: no check.
+    "github": {"owner": None},
     "budget": {
         # API-equivalent dollars per 1% of the weekly limit. None: learned from finished runs.
         "usd_per_weekly_pct": None,
@@ -83,7 +87,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "pricing": {},
     # How long `org status` waits for a machine before showing it as last seen.
     "status": {"sync_timeout_s": 8},
-    "dash": {"port": 8787, "sync_interval_s": 10},
+    # "view": the dashboard also shows web servers engineers are running, each under a hostname of
+    # its own (org/view.py). Off unless turned on: such a page is untrusted content in your browser.
+    "dash": {"port": 8787, "sync_interval_s": 10, "view": False},
 }
 
 # What `org init` writes: only the knobs a person is likely to turn. Everything else comes from

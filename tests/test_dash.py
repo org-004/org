@@ -21,6 +21,10 @@ from org.util import read_json, write_json  # noqa: E402
 
 PAGE = ROOT / "org" / "web" / "index.html"
 
+# No test may meet the real tokens (/run/org where org is installed): until a test names a
+# directory of its own, they are nowhere.
+os.environ["ORG_SECRETS_DIR"] = os.path.join(tempfile.gettempdir(), "org-tests-no-secrets")
+
 
 class DashCase(unittest.TestCase):
     def setUp(self):
@@ -31,8 +35,16 @@ class DashCase(unittest.TestCase):
         scen = self.tmp / "scen"
         scen.mkdir()
         (scen / "scenario.json").write_text(json.dumps({"turns": {"ask": {"say": "The export run is on milestone 3 of 5.", "cost": 0.04}}}))
+        # No real claude and no real incus: where this suite runs there may be an Incus with a
+        # template in it, and an approval from the page must not make a container there. The
+        # simulated one has no template, so a dispatch gets as far as asking for it.
+        bindir = self.tmp / "bin"
+        bindir.mkdir()
+        os.symlink(ROOT / "tests" / "fake_incus.py", bindir / "incus")
         os.environ.update(FAKE_CLAUDE_SCENARIO=str(scen / "scenario.json"), HOME=str(self.tmp / "home"),
-                          PATH="/usr/bin:/bin:/usr/sbin")  # no orb, no real claude
+                          PATH=str(bindir) + os.pathsep + "/usr/bin:/bin:/usr/sbin", FAKE_INCUS_ROOT=str(self.tmp / "incus"),
+                          ORG_SECRETS_DIR=str(self.tmp / "run-org"))
+        os.environ.pop("FAKE_INCUS_BASE", None)
         (self.tmp / "home").mkdir()
         self.ledger = demo_ledger.build(self.tmp / "ledger")
         cfg = read_json(self.ledger.config_path)
@@ -140,11 +152,13 @@ class DashCase(unittest.TestCase):
         self.assertIsNone(self.ledger.spec_meta(draft["id"]))
         status, out = self.post("/api/approve", {"spec": "2", "sha": self.get("/api/draft?spec=2")[1]["sha"]})
         self.assertEqual(status, 400, "a draft that fails its checks is not approvable from the page either")
-        # The right hash approves. There is no orb on this PATH, so the dispatch then fails,
-        # and the page is told both halves.
+        # The right hash approves. There is no template container here, so the dispatch then
+        # fails, and the page is told both halves.
         status, out = self.post("/api/approve", {"spec": draft["id"], "sha": draft["sha"]})
         self.assertEqual((status, out["approved"], out["dispatched"]), (200, True, False))
-        self.assertIn("orb", out["error"])
+        self.assertIn("the template container org-base does not exist", out["error"])
+        made = [json.loads(line) for line in (self.tmp / "incus" / "calls.jsonl").read_text().splitlines()]
+        self.assertEqual([c[0] for c in made], ["list"], "it asked for the template and made nothing")
         self.assertEqual(self.ledger.spec_meta(draft["id"])["sha256"], draft["sha"])
         runs = self.get("/api/state")[1]["runs"]
         self.assertEqual([v["state"] for v in runs if v["spec_id"] == draft["id"]], ["dispatch_failed"])
@@ -221,6 +235,10 @@ class ManagerSettings(unittest.TestCase):
                 self.assertIn("Bash(gh pr create *)", p["deny"])
                 self.assertFalse([r for r in p["allow"] if "git -C" in r], "no allow rule with a wildcard before the git verb")
                 self.assertTrue([r for r in p["deny"] if r.startswith("Read(/") and "oauth-token" in r], "the login token is not readable")
+                self.assertIn("Read(/%s/**)" % os.environ["ORG_SECRETS_DIR"], p["deny"], "nor are the tokens this side was handed")
+                # What stands between the chat and the machine that holds it, and any tool from outside.
+                for rule in ("Bash(incus *)", "Bash(incus)", "Bash(sudo *)", "Bash(docker *)", "mcp__*"):
+                    self.assertIn(rule, p["deny"], rule)
         self.assertNotIn("sandbox", manager.settings(self.ledger, "ask"), "question mode runs nothing that needs one")
 
     def test_persona_names_the_desk_and_the_state(self):
@@ -236,25 +254,26 @@ class ManagerSettings(unittest.TestCase):
         self.assertNotIn("Bash(org clone *)", manager.settings(self.ledger, "ask")["permissions"]["allow"], "question mode writes nothing")
         plain, sandboxed = manager.persona(self.ledger), manager.persona(self.ledger, with_sandbox=True)
         for text in (plain, sandboxed):
-            self.assertIn("`org clone <owner/name>` puts a repository there, private or not, as `%s/scratch/<name>`" % self.ledger.desk, text)
+            self.assertIn("`org clone <owner/name>` puts a public repository there, as `%s/scratch/<name>`" % self.ledger.desk, text)
             self.assertIn("org project add <name> --repo <owner/name>", text)
             self.assertNotIn("{{", text)
-        # gh in a pipe runs inside the sandbox and reports no login. The manager has to be told,
-        # or it concludes there is none; where there is no sandbox there is nothing to tell.
-        self.assertIn("only when one of them is the whole command", sandboxed)
-        self.assertIn("That message is the sandbox, not a missing login", sandboxed)
-        self.assertNotIn("sandbox that cannot read", plain)
+        # A sandboxed shell has no GitHub login, and an `org` command that is not the whole
+        # command runs inside the sandbox too. The manager has to be told, or it reads the
+        # failures as something else; where there is no sandbox there is nothing to tell.
+        self.assertIn("Your shell commands run in a sandbox with no GitHub login", sandboxed)
+        self.assertIn("An `org` command must be the whole command", sandboxed)
+        self.assertNotIn("Your shell commands run in a sandbox", plain)
 
     def test_persona_offers_the_machines_this_installation_has(self):
         text = manager.persona(self.ledger)
-        self.assertIn("`machine` is `orb` (a fresh OrbStack machine for the run, cloned from the template), the default.", text)
+        self.assertIn("`machine` is `incus` (a fresh container for the run, copied from the template), the default.", text)
         self.assertNotIn("docker", manager.machines_help(self.ledger.config()))
         self.assertNotIn("ssh:", manager.machines_help(self.ledger.config()))
         write_json(self.ledger.config_path, {"machines": {"plugins": ["org.backends.docker"], "default": "docker",
                                                            "ssh": {"gpu": {"host": "me@gpu"}}}})
         said = manager.machines_help(self.ledger.config())
         self.assertTrue(said.startswith("`machine` is `docker` (a fresh container"), said)
-        self.assertIn("the default; or `orb`", said)
+        self.assertIn("the default; or `incus`", said)
         self.assertIn("`ssh:gpu`", said)
 
     def test_first_run_screens_are_answered_only_in_a_manager_org_made(self):

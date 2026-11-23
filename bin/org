@@ -1,15 +1,12 @@
 #!/bin/sh
-# org: one command, three ways of running.
+# org: runs on Linux, on the machine that holds the engineers' containers. Nothing in this
+# repository is meant to run on a Mac: the host starts that machine with a launcher of its own
+# (`org-vm`, kept outside this repository) and passes commands into it.
 #
-#   OrbStack    `org up` has made a manager machine. Every other command runs inside it, so the
-#               Mac needs OrbStack, python3 for the host agent, and nothing else.
-#   Docker      `org up --backend docker` has started a manager container. The same, with a
-#               Docker engine in place of OrbStack.
-#   In place    neither exists, or this copy is the one inside a manager: the package runs here
-#               with python3.
+#   org up | down      install or refresh this copy and what it needs here (incus/up.sh)
+#   org <anything>     the package, with python3
 #
-# ORG_LOCAL=1 forces the last. Symlink this file onto PATH (ln -s "$PWD/bin/org" ~/.local/bin/org);
-# the link is followed back.
+# Symlink this file onto PATH (ln -s "$PWD/bin/org" ~/.local/bin/org); the link is followed back.
 self="$0"
 while [ -L "$self" ]; do
   target=$(readlink "$self")
@@ -18,99 +15,16 @@ while [ -L "$self" ]; do
     *)  self="$(dirname "$self")/$target" ;;
   esac
 done
-root=$(cd "$(dirname "$self")/.." && pwd)
+root=$(cd "$(dirname "$self")/.." && pwd -P)
 
-run_local() {
-  PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m org "$@"
-}
-
-# Inside a manager: the image sets ORG_IN_CONTAINER, and `org up` leaves a LOCAL file beside the
-# copy it installs in a machine.
-[ -n "${ORG_IN_CONTAINER:-}" ] && run_local "$@"
-[ -e "$root/LOCAL" ] && run_local "$@"
-
-host_dir="${ORG_HOST_DIR:-$HOME/.config/org}"
-
-case "${1:-}" in
-  up|down)
-    # --backend docker|orb picks the installation. Without it, `down` acts on whichever exists.
-    verb="$1"; shift
-    backend=""
-    n=$#
-    while [ "$n" -gt 0 ]; do
-      a="$1"; shift; n=$((n - 1))
-      case "$a" in
-        --backend)   [ "$n" -gt 0 ] || { echo "org: --backend takes docker or orb" >&2; exit 2; }
-                     backend="$1"; shift; n=$((n - 1)) ;;
-        --backend=*) backend="${a#--backend=}" ;;
-        *) set -- "$@" "$a" ;;
-      esac
-    done
-    if [ -z "$backend" ]; then
-      backend=orb
-      if [ "$verb" = down ] && [ ! -f "$host_dir/agent.json" ] && command -v docker >/dev/null 2>&1 \
-         && [ -n "$(docker ps -aq --filter label=org.role=manager 2>/dev/null)" ]; then backend=docker; fi
-    fi
-    case "$backend" in
-      orb|orbstack) exec bash "$root/orbstack/up.sh" "$verb" "$@" ;;
-      docker)       exec bash "$root/docker/up.sh" "$verb" "$@" ;;
-      *) echo "org: --backend takes docker or orb, not $backend" >&2; exit 2 ;;
-    esac ;;
-esac
-
-[ -n "${ORG_LOCAL:-}" ] && run_local "$@"
-
-# ---- a manager in an OrbStack machine: `org up` left agent.json here
-
-if [ -f "$host_dir/agent.json" ]; then
-  field() { sed -n 's/.*"'"$1"'": *"\([^"]*\)".*/\1/p' "$host_dir/agent.json" | head -1; }
-  orb=$(field orb); orb="${orb:-orb}"
-  manager="${ORG_MANAGER:-$(field manager)}"; manager="${manager:-org-manager}"
-  inside='exec "$HOME/.local/bin/org" "$@"'
-  case "${1:-}" in
-    agent)
-      # `org agent run` is the Mac's half of the link; the rest of `org agent` is the manager's.
-      [ "${2:-}" = run ] && run_local "$@" ;;
-    dash)
-      # The dashboard is served from inside the manager and reaches this Mac's localhost; here it only needs opening.
-      url=$("$orb" -m "$manager" bash -c "$inside" org dash --url) || exit 1
-      echo "$url"
-      case " $* " in *" --url "*|*" --no-open "*) exit 0 ;; esac
-      if command -v open >/dev/null 2>&1; then open "$url"; elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$url"; fi
-      exit 0 ;;
-    shell)
-      shift
-      [ $# -eq 0 ] && exec "$orb" -m "$manager"
-      exec "$orb" -m "$manager" bash "$@" ;;
-  esac
-  exec "$orb" -m "$manager" bash -c "$inside" org "$@"
+if [ "$(uname -s)" = Darwin ] && [ -z "${ORG_ALLOW_DARWIN:-}" ]; then
+  echo "org: this runs inside the VM, not on the Mac. Use org-vm: org-vm up, org-vm talk, org-vm status ..." >&2
+  exit 1
 fi
 
-# ---- a manager in a Docker container
-
-manager="${ORG_MANAGER:-org-manager}"
-state=""
-if command -v docker >/dev/null 2>&1; then
-  state=$(docker inspect -f '{{.State.Status}}' "$manager" 2>/dev/null || true)
-fi
-case "$state" in
-  "") run_local "$@" ;;
-  running) ;;
-  *) echo "org: the manager container exists but is $state. \`org up --backend docker\` starts it again (ORG_LOCAL=1 runs without it)." >&2; exit 1 ;;
-esac
-
 case "${1:-}" in
-  dash)
-    # The dashboard is the manager container's main process; here it only needs opening.
-    url=$(docker exec "$manager" org dash --url) || exit 1
-    echo "$url"
-    case " $* " in *" --url "*|*" --no-open "*) exit 0 ;; esac
-    if command -v open >/dev/null 2>&1; then open "$url"; elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$url"; fi
-    exit 0 ;;
-  shell)
-    shift
-    exec docker exec -it "$manager" bash "$@" ;;
+  up)   shift; exec "$root/incus/up.sh" "$@" ;;
+  down) shift; exec "$root/incus/up.sh" --down "$@" ;;
 esac
 
-if [ -t 0 ] && [ -t 1 ]; then tty="-it"; else tty="-i"; fi
-exec docker exec $tty -e TERM="${TERM:-xterm-256color}" -e COLUMNS="$(tput cols 2>/dev/null || echo 140)" "$manager" org "$@"
+PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m org "$@"

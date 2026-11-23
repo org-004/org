@@ -8,10 +8,15 @@ money) and stop a run. So every /api/ request must carry a token that only the p
 `org dash` has (it is in the URL the command prints, after the #, where it is never sent to a
 server or written to a log), and requests whose Host is not this machine are refused, which is
 what stops another site's JavaScript from reaching the dashboard through the browser.
+
+With `dash.view` on, the same port also shows a web server an engineer is running, under a
+hostname of its own (v-<id>.localhost). Such a request is answered by view.py and never by the
+routes here: see Handler.parse_request.
 """
 from __future__ import annotations
 
 import hmac
+import http.client
 import json
 import os
 import secrets
@@ -23,7 +28,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
-from . import dispatch, manager, spec, status
+from . import dispatch, manager, spec, status, view
 from .ledger import Ledger
 from .stream import feed
 from .sync import sync_all, sync_run
@@ -79,6 +84,18 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # the terminal that started the dashboard stays quiet
         pass
 
+    def parse_request(self) -> bool:
+        # A request addressed to a view's hostname is the engineer's page talking, or someone
+        # reaching for it. view.serve answers it and nothing else does: False is what this
+        # returns for a request already answered, so no do_GET or do_POST below ever sees one,
+        # whatever its path and whatever token it carries.
+        if not super().parse_request():
+            return False
+        if view.addressed(self.headers):
+            view.serve(self)
+            return False
+        return True
+
     # ------------------------------------------------------------ plumbing
     def _send(self, code: int, body: bytes, ctype: str) -> None:
         self.send_response(code)
@@ -133,6 +150,7 @@ class Handler(BaseHTTPRequestHandler):
                 state = status.collect(ledger)
                 state["synced_at"] = self.server.synced_at
                 state["sync_error"] = self.server.sync_error
+                state["view"] = view.enabled(ledger.config())  # whether the page offers to open a run's port
                 return self._json(200, state)
             if url.path == "/api/doc":
                 run_id = ledger.resolve_run((query.get("run") or [""])[0])
@@ -187,6 +205,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(200, {"approved": True, "version": meta["version"], "dispatched": False, "error": str(e), "log": log})
                 threading.Thread(target=sync_run, args=(ledger, run_id), daemon=True).start()
                 return self._json(200, {"approved": True, "version": meta["version"], "dispatched": True, "run_id": run_id, "log": log})
+            if url.path == "/api/view":
+                try:
+                    return self._json(200, view.open_view(self.server, body.get("run"), body.get("port")))
+                except view.ViewError as e:
+                    return self._json(e.code, {"error": str(e)})
             if url.path == "/api/stop":
                 run_id = ledger.resolve_run(str(body.get("run") or ""))
                 try:
@@ -246,12 +269,36 @@ def url(ledger: Ledger, port=None) -> str:
     return "http://127.0.0.1:%d/#t=%s" % (public_port(ledger, port), load_token(ledger))
 
 
+def ask_view(ledger: Ledger, run_id: str, port: int, dash_port=None) -> str:
+    """Ask the dashboard that is running for a URL to a port in a run's container: what `org view` prints."""
+    at = int(dash_port or (ledger.config().get("dash") or {}).get("port") or 8787)
+    conn = http.client.HTTPConnection("127.0.0.1", at, timeout=30)
+    try:
+        conn.request("POST", "/api/view", body=json.dumps({"run": run_id, "port": port}),
+                     headers={"X-Org-Token": load_token(ledger), "Content-Type": "application/json"})
+        r = conn.getresponse()
+        raw = r.read()
+    except (OSError, http.client.HTTPException) as e:
+        raise view.ViewError(502, "the dashboard is not answering on 127.0.0.1:%d (%s): `org dash` starts it" % (at, e))
+    finally:
+        conn.close()
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        data = None
+    if r.status != 200 or not isinstance(data, dict) or not data.get("url"):
+        raise view.ViewError(r.status, (data.get("error") if isinstance(data, dict) else None) or "the dashboard answered HTTP %d" % r.status)
+    return data["url"]
+
+
 def make_server(ledger: Ledger, port: int, host: str = "127.0.0.1") -> ThreadingHTTPServer:
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
     httpd.ledger = ledger
     httpd.token = load_token(ledger)
-    httpd.ports = {httpd.server_address[1], public_port(ledger, httpd.server_address[1])}
+    httpd.public_port = public_port(ledger, httpd.server_address[1])
+    httpd.ports = {httpd.server_address[1], httpd.public_port}
+    httpd.views = view.Views()  # in memory: a restart closes every open view
     httpd.ask_lock = threading.Lock()
     httpd.synced_at = None
     httpd.sync_error = None

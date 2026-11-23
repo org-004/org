@@ -16,11 +16,12 @@
     org stop|resume <run>          stop the engineer, or restart a runner that died
     org ls|cat|diff <run> [path]   look at the files on a run's machine, read-only
     org exec <run> -- <command>    run a command on a run's machine
+    org view <run> <port>          a link to a web server the engineer is running (dash.view)
     org pool                       how many engineers may run at once, and what is queued
     org project add <name> --repo  name a project's repositories   org project ls
     org clone <owner/name>         a copy of a repository in the manager's scratch space
     org config get|set <key>       read or change config.json
-    org machine rm <run>           delete the container or OrbStack machine a run used
+    org machine rm <run>           delete the container a run used
     org login                      the logins engineers are given: Claude, GitHub, git identity
     org doctor                     check that this machine is ready to manage engineers
 
@@ -345,32 +346,53 @@ def cmd_peek(args) -> int:
 
 def cmd_stop(args) -> int:
     from . import dispatch
+    from .backends import BackendError
     from .transport import TransportError
 
     ledger = Ledger(args.home)
     run_id = need_run(ledger, args.run)
     try:
         print(dispatch.stop(ledger, run_id))
-    except TransportError as e:
+    except (TransportError, BackendError) as e:
         die(e)
     return 0
 
 
 def cmd_resume(args) -> int:
     from . import dispatch
+    from .backends import BackendError
     from .transport import TransportError
 
     ledger = Ledger(args.home)
+    if args.interrupted:
+        # After the machine that holds the engineers restarts: every run whose container is
+        # there and whose runner is not.
+        from . import sync
+
+        sync.sync_all(ledger)
+        todo, failed = dispatch.interrupted(ledger), 0
+        if not todo:
+            print("no run was interrupted")
+        for run_id in todo:
+            try:
+                print("restarted the runner for %s (%s)" % (run_id, dispatch.resume(ledger, run_id)))
+            except (TransportError, BackendError) as e:
+                print("org: %s: %s" % (run_id, e), file=sys.stderr)
+                failed += 1
+        return 1 if failed else 0
+    if not args.run:
+        die("name a run, or pass --interrupted for every run a restart cut short")
     run_id = need_run(ledger, args.run)
     try:
         print("restarted the runner for %s (%s)" % (run_id, dispatch.resume(ledger, run_id)))
-    except TransportError as e:
+    except (TransportError, BackendError) as e:
         die(e)
     return 0
 
 
 def cmd_machine(args) -> int:
     from . import dispatch, sync
+    from .backends import BackendError
     from .transport import TransportError
 
     ledger = Ledger(args.home)
@@ -391,7 +413,7 @@ def cmd_machine(args) -> int:
             + "\npass --force to delete the machine anyway")
     try:
         print(dispatch.remove_machine(ledger, run_id))
-    except TransportError as e:
+    except (TransportError, BackendError) as e:
         die(e)
     return 0
 
@@ -447,10 +469,9 @@ def repo_url(repo: str):
 def cmd_clone(args) -> int:
     """A copy of a repository in the manager's scratch space, to read, build and test.
 
-    The manager chat's shell is sandboxed away from the GitHub login, so a clone typed there
-    reaches public repositories only. `org` runs outside that sandbox: this is how a private one
-    arrives. It takes a repository and nothing else, so it cannot be turned into anything but a
-    clone, and the copy is left with nowhere to push.
+    It takes a repository and nothing else, so it cannot be turned into anything but a clone,
+    and the copy is left with nowhere to push. No login is used: this side's GitHub token is
+    for engineers, and the repositories the manager reads are public.
     """
     import shutil
     import subprocess
@@ -463,10 +484,10 @@ def cmd_clone(args) -> int:
     url, name = found
     dest = ledger.scratch / name
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
-    git = ["git"]
-    if shutil.which("gh"):
-        # GitHub's login, wherever gh keeps it, even where git was never told to ask gh.
-        git += ["-c", "credential.https://github.com.helper=!gh auth git-credential"]
+    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        env.pop(name, None)
+    # No credential helper at all: a clone that would need a login fails instead of finding one.
+    git = ["git", "-c", "credential.helper="]
 
     def run(*argv, **kw):
         return subprocess.run(git + list(argv), env=env, **kw)
@@ -477,7 +498,7 @@ def cmd_clone(args) -> int:
             die("%s is already there and is not a clone of %s%s. Remove it, or clone under another name by its URL."
                 % (dest, url, (" (its origin is %s)" % have.stdout.strip()) if have.returncode == 0 else ""))
         if run("-C", str(dest), "fetch", "--prune", "--tags", "origin").returncode != 0:
-            die("could not fetch %s. `gh auth status`, on its own, says whether this side is logged in to GitHub." % url)
+            die("could not fetch %s. Is it still public?" % url)
         behind = run("-C", str(dest), "rev-list", "--count", "HEAD..@{upstream}", capture_output=True, text=True)
         n = behind.stdout.strip() if behind.returncode == 0 else ""
         print("%s  fetched%s" % (dest, (
@@ -487,8 +508,7 @@ def cmd_clone(args) -> int:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if run("clone", "--", url, str(dest)).returncode != 0:
         shutil.rmtree(dest, ignore_errors=True)
-        die("could not clone %s. `gh repo view %s`, on its own, says whether it exists and this side may read it."
-            % (url, args.repo))
+        die("could not clone %s. The manager reads public repositories only: does it exist, and is it public?" % url)
     # A scratch copy is for reading and trying things. Nothing made in it is delivered from here.
     run("-C", str(dest), "remote", "set-url", "--push", "origin", "no-push://scratch-copy")
     head = run("-C", str(dest), "log", "-1", "--format=%h %ad %s", "--date=short", capture_output=True, text=True).stdout.strip()
@@ -575,10 +595,10 @@ def cmd_pool(args) -> int:
     ledger = Ledger(args.home)
     nodes = dispatch.pool(ledger)
     for p in nodes:
-        where = p["host"] or {"orb": "OrbStack machines on the host", "docker": "this Docker daemon"}.get(p["kind"], "")
+        where = p["host"] or {"incus": "containers on this machine", "docker": "this Docker daemon"}.get(p["kind"], "")
         print("%-20s %d of %d slot(s) in use   %s" % (p["kind"] + ":" + p["node"], p["used"], p["slots"], where))
     if not nodes:
-        print("no limit is set on how many engineers run at once (machines.orb.slots in config.json sets one)")
+        print("no limit is set on how many engineers run at once (machines.incus.slots in config.json sets one)")
     queued = [r for r in ledger.run_ids() if ledger.run(r).get("state") == "queued"]
     for run_id in queued:
         print("queued: %s  (%s)" % (run_id, ledger.run(run_id).get("queue_reason") or "waiting"))
@@ -599,8 +619,8 @@ def cmd_node(args) -> int:
     if args.action == "ls":
         return cmd_pool(args)
     if "docker" not in backends.kinds(ledger.config()):
-        die('nodes belong to the Docker backend, which is a plugin and is not enabled here. For OrbStack machines the '
-            'pool is one number: `org config set machines.orb.slots 6`.')
+        die('nodes belong to the Docker backend, which is a plugin and is not enabled here. For Incus containers the '
+            'pool is one number: `org config set machines.incus.slots 6`.')
     from .backends.docker import nodes_of
 
     saved = read_json(ledger.config_path, {}) or {}
@@ -675,26 +695,65 @@ def cmd_config(args) -> int:
     return 0
 
 
-def cmd_agent(args) -> int:
-    """The host agent: what creates, enters and deletes OrbStack machines for a manager in a machine."""
-    from . import agent
+def cmd_drain(args) -> int:
+    from . import admin
 
-    if args.action == "run":      # on the Mac
-        return agent.serve(args.config)
-    if args.action == "pipe":     # in the manager's machine, started by the agent
-        return agent.pipe(args.port)
     ledger = Ledger(args.home)
-    if args.action == "bridge":   # in the manager's machine, started by the agent
-        return agent.bridge(ledger, args.dash_port)
-    try:
-        client = agent.Client(agent.socket_path(ledger.root))
-        info = client.info()
-        print("host agent connected: manager %s; engineers %s<run>, cloned from %s" % (info["manager"], info["prefix"], info["template"]))
-        for name in client.machines():
-            print("  " + name)
+    ledger.init()
+    if args.status:
+        from . import dispatch
+
+        held = dispatch.draining(ledger)
+        print(("draining since %s%s" % (fmt_stamp(held.get("since") or now()), (": " + held["reason"]) if held.get("reason") else ""))
+              if held else "not draining")
+        left = dispatch.active(ledger)
+        print("holding a machine: %s" % (", ".join(left) or "nothing"))
         return 0
-    except agent.AgentError as e:
+    return admin.drain(ledger, wait=args.wait, reason=args.reason or "", timeout=args.timeout)
+
+
+def cmd_undrain(args) -> int:
+    from . import admin
+
+    return admin.undrain(Ledger(args.home))
+
+
+def cmd_upgrade(args) -> int:
+    from . import admin
+
+    ledger = Ledger(args.home)
+    ledger.init()
+    try:
+        if args.rollback:
+            return admin.rollback(ledger)
+        if not args.ref:
+            print("in use: %s" % (admin.current_release() or "unknown"))
+            print("org upgrade <commit or branch> installs a commit that is on the default branch; --rollback goes back one")
+            return 0
+        return admin.upgrade(ledger, args.ref, yes=args.yes, skip_tests=args.skip_tests)
+    except admin.AdminError as e:
         die(e)
+
+
+def cmd_repos(args) -> int:
+    from . import admin
+
+    ledger = Ledger(args.home)
+    owner = args.owner or (ledger.config().get("github") or {}).get("owner")
+    if not owner:
+        die("no GitHub owner is set: org up --owner <organization>, or name one: org repos <owner>")
+    try:
+        found = admin.repos(str(owner))
+    except admin.AdminError as e:
+        die(e)
+    if args.json:
+        print(json.dumps(found, indent=2))
+        return 0
+    for r in found:
+        print("%-40s %-10s %s%s" % (r["name"], (r.get("pushed_at") or "")[:10], "[archived] " if r.get("archived") else "", clip(r.get("description") or "", 80)))
+    if not found:
+        print("%s has no public repositories" % owner)
+    return 0
 
 
 def cmd_pump(args) -> int:
@@ -711,7 +770,7 @@ def cmd_login(args) -> int:
     if args.status:
         s = login.status()
         print("Claude token: %s" % ("present" if s["claude_token"] else "missing"))
-        print("GitHub:       %s" % ("logged in" if s["github"] else "not logged in"))
+        print("GitHub token: %s" % (("present" + ("" if s.get("github_fine_grained") else ", NOT fine-grained")) if s["github"] else "missing"))
         print("git identity: %s" % (("%s <%s>" % (s["git_name"], s["git_email"])) if s["git_name"] and s["git_email"] else "not set"))
         return 0 if (s["claude_token"] and s["github"]) else 1
     return login.run(force=args.force, token_stdin=args.token_stdin)
@@ -726,6 +785,26 @@ def cmd_dash(args) -> int:
         print(dash.url(ledger, args.port))
         return 0
     return dash.serve(ledger, port=args.port, open_browser=not args.no_open, host=args.host)
+
+
+def cmd_view(args) -> int:
+    """A link at which a browser reaches a web server in a run's container, through the dashboard.
+
+    The dashboard that is running makes the link, because it is what will answer it. The page
+    behind it is the engineer's, so this is the person's to ask for: the manager chat must ask.
+    """
+    from . import dash, view
+
+    ledger = Ledger(args.home)
+    if not view.enabled(ledger.config()):
+        die("viewing is off. An engineer's page is untrusted content shown in your browser; `org config set dash.view true` turns it on")
+    run_id = need_run(ledger, args.run)
+    try:
+        print(dash.ask_view(ledger, run_id, args.port, args.dash_port))
+    except view.ViewError as e:
+        die(e)
+    print("open it within a minute; it works once", file=sys.stderr)
+    return 0
 
 
 def cmd_doctor(args) -> int:
@@ -770,7 +849,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("approve", help="freeze a draft and dispatch an engineer")
     s.add_argument("spec")
     s.add_argument("--sha", required=True, help="first 8+ characters of the draft's sha256, from `org spec check`")
-    s.add_argument("--machine", help="orb, ssh:<name> or local (overrides the spec header)")
+    s.add_argument("--machine", help="incus, ssh:<name> or local (overrides the spec header)")
     s.add_argument("--no-dispatch", action="store_true")
     s.set_defaults(fn=cmd_approve)
 
@@ -815,7 +894,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("run")
     s.set_defaults(fn=cmd_stop)
     s = sub.add_parser("resume", help="restart the runner of a run whose process died")
-    s.add_argument("run")
+    s.add_argument("run", nargs="?")
+    s.add_argument("--interrupted", action="store_true", help="every run cut short by a restart of this machine")
     s.set_defaults(fn=cmd_resume)
 
     s = sub.add_parser("machine", help="the machines runs used")
@@ -835,7 +915,7 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--path", help="a local checkout the manager may read")
     s.set_defaults(fn=cmd_project)
 
-    s = sub.add_parser("clone", help="copy a repository, private or not, into the manager's scratch space; again to fetch")
+    s = sub.add_parser("clone", help="copy a public repository into the manager's scratch space; again to fetch")
     s.add_argument("repo", help="owner/name on GitHub, or an https or ssh URL")
     s.set_defaults(fn=cmd_clone)
 
@@ -863,27 +943,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("command", nargs=argparse.REMAINDER, help="after --, the command; one argument is taken as a shell line")
     s.set_defaults(fn=cmd_exec)
 
+    s = sub.add_parser("view", help="a link to a web server an engineer is running, through the dashboard")
+    s.add_argument("run")
+    s.add_argument("port", type=int, help="the port it listens on, on the loopback of the run's container")
+    s.add_argument("--dash-port", type=int, help="where the dashboard is listening (default: dash.port)")
+    s.set_defaults(fn=cmd_view)
+
     sub.add_parser("pool", help="how many engineers may run at once, where, and what is queued").set_defaults(fn=cmd_pool)
 
     s = sub.add_parser("config", help="read or change config.json")
     ss = s.add_subparsers(dest="action", required=True)
     a = ss.add_parser("get")
-    a.add_argument("key", nargs="?", help="a dotted key such as machines.orb; omit for everything")
+    a.add_argument("key", nargs="?", help="a dotted key such as machines.incus; omit for everything")
     a = ss.add_parser("set")
     a.add_argument("key")
     a.add_argument("value", help="JSON, or a bare word for a string")
     s.set_defaults(fn=cmd_config)
-
-    s = sub.add_parser("agent", help="the host agent that manages OrbStack machines for a manager in a machine")
-    ss = s.add_subparsers(dest="action", required=True)
-    a = ss.add_parser("run", help="run it, on the Mac (`org up` does this)")
-    a.add_argument("--config", help="its config file (default ~/.config/org/agent.json)")
-    ss.add_parser("status", help="is it connected, and which machines does it hold")
-    a = ss.add_parser("bridge", help="the manager's end of the link; the agent starts it")
-    a.add_argument("--dash-port", type=int, help="also serve the dashboard on this port of the loopback")
-    a = ss.add_parser("pipe", help="carry one connection to a local port; the agent starts it")
-    a.add_argument("port", type=int)
-    s.set_defaults(fn=cmd_agent)
 
     s = sub.add_parser("node", help="Docker backend: add or remove Docker hosts in the pool")
     ss = s.add_subparsers(dest="action", required=True)
@@ -899,7 +974,27 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_node)
     sub.add_parser("pump", help="start queued runs that can now be placed").set_defaults(fn=cmd_pump)
 
-    s = sub.add_parser("login", help="the Claude token, GitHub login and git identity engineers are given")
+    s = sub.add_parser("drain", help="let running engineers finish and start nothing new")
+    s.add_argument("--wait", action="store_true", help="return when no run holds a machine")
+    s.add_argument("--timeout", type=float, help="with --wait: give up waiting after this many seconds (the drain stays)")
+    s.add_argument("--reason", help="shown beside queued runs")
+    s.add_argument("--status", action="store_true", help="say whether a drain is in force and what is still running")
+    s.set_defaults(fn=cmd_drain)
+    sub.add_parser("undrain", help="lift a drain and start what queued").set_defaults(fn=cmd_undrain)
+
+    s = sub.add_parser("upgrade", help="install a commit of org from its default branch, after showing what changed")
+    s.add_argument("ref", nargs="?", help="a commit or a branch")
+    s.add_argument("--yes", action="store_true", help="do not ask; for someone who has read the diff")
+    s.add_argument("--skip-tests", action="store_true", help="do not run the commit's tests first")
+    s.add_argument("--rollback", action="store_true", help="go back to the release that was in use before")
+    s.set_defaults(fn=cmd_upgrade)
+
+    s = sub.add_parser("repos", help="the organization's public repositories")
+    s.add_argument("owner", nargs="?")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_repos)
+
+    s = sub.add_parser("login", help="whether the Claude token, the GitHub token and the git identity engineers are given are in place")
     s.add_argument("--status", action="store_true", help="say what is in place and exit")
     s.add_argument("--force", action="store_true", help="log in again even if a login is present")
     s.add_argument("--token-stdin", action="store_true", help="store a Claude token read from stdin")

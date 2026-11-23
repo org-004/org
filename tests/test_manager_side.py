@@ -1,4 +1,4 @@
-"""The manager's side: specs, approval, dispatch to a (simulated) OrbStack machine, sync, status."""
+"""The manager's side: specs, approval, dispatch to a (simulated) Incus container, sync, status."""
 import json
 import os
 import shutil
@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -16,6 +17,11 @@ from org import budget, dispatch, spec, status, sync  # noqa: E402
 from org.ledger import Ledger  # noqa: E402
 from org.transport import Ssh, TransportError  # noqa: E402
 from org.util import read_json, write_json  # noqa: E402
+
+# Dispatch reads this side's tokens from $ORG_SECRETS_DIR and writes them into a machine's. No
+# test may meet the real ones (/run/org where org is installed): until a test names a directory
+# of its own, the tokens are nowhere.
+os.environ["ORG_SECRETS_DIR"] = os.path.join(tempfile.gettempdir(), "org-tests-no-secrets")
 
 GOOD = """---
 title: CSV export
@@ -105,8 +111,8 @@ class SpecChecks(unittest.TestCase):
 
     def test_a_repo_must_be_reachable_from_the_engineers_machine(self):
         local_path = GOOD.replace("repos: acme/web, acme/api", "repos: /Users/me/src/acme-web")
-        errors, _ = spec.check(local_path)
-        self.assertTrue(any("path on this machine" in e and "orb" in e for e in errors), errors)
+        errors, _ = spec.check(local_path, default_machine="incus")
+        self.assertTrue(any("path on this machine" in e and "incus" in e for e in errors), errors)
         self.assertTrue(any("path on this machine" in e for e in spec.check(local_path.replace("delivery: pr", "delivery: pr\nmachine: ssh:gpu"))[0]))
         # on the same machine a path is a perfectly good repository
         self.assertEqual(spec.check(local_path.replace("delivery: pr", "delivery: pr\nmachine: local"))[0], [])
@@ -137,28 +143,36 @@ class ManagerSide(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="org-mgr-"))
         self.addCleanup(self._cleanup)
         self.old_env = dict(os.environ)
-        # A home of our own: nothing here reads or copies the real login token.
-        home = self.tmp / "mac-home"
-        (home / ".claude").mkdir(parents=True)
-        (home / ".claude" / "oauth-token").write_text("sk-ant-oat01-not-a-real-token\n")
+        # A home and a tokens directory of our own: nothing here reads, copies or overwrites a real token.
+        home = self.tmp / "manager-home"
+        home.mkdir()
+        self.secrets = self.tmp / "run-org"
+        self.secrets.mkdir(mode=0o700)
+        (self.secrets / "claude-token").write_text("sk-ant-oat01-not-a-real-token\n")
+        (self.secrets / "github-token").write_text("github_pat_not_a_real_token\n")
         bindir = self.tmp / "bin"
         bindir.mkdir()
-        os.symlink(ROOT / "tests" / "fake_orb.py", bindir / "orb")
+        os.symlink(ROOT / "tests" / "fake_incus.py", bindir / "incus")
         os.symlink(ROOT / "tests" / "fake_claude.py", bindir / "claude")
         self.scen = self.tmp / "scen"
         self.scen.mkdir()
-        os.environ.update(HOME=str(home), PATH=str(bindir) + os.pathsep + self.old_env["PATH"],
-                          FAKE_ORB_ROOT=str(self.tmp / "orb"), FAKE_CLAUDE_SCENARIO=str(self.scen / "scenario.json"))
+        os.environ.update(HOME=str(home), PATH=str(bindir) + os.pathsep + self.old_env["PATH"], ORG_SECRETS_DIR=str(self.secrets),
+                          FAKE_INCUS_ROOT=str(self.tmp / "incus"), FAKE_CLAUDE_SCENARIO=str(self.scen / "scenario.json"))
+        os.environ.pop("ORG_HOME", None)
+        os.environ.pop("FAKE_INCUS_BASE", None)
         self.scenario(TURNS)
         self.ledger = Ledger(self.tmp / "ledger")
         self.ledger.init()
-        write_json(self.ledger.config_path, {"machines": {"default": "orb", "detach": "nohup"},
+        # The template `base` is one the simulated incus has without being told; no limit on how many run at once.
+        write_json(self.ledger.config_path, {"machines": {"default": "incus", "detach": "nohup",
+                                                          "incus": {"prefix": "eng-", "base": "base", "slots": None}},
                                              "engineer": {"retry_backoff_s": 0.05, "max_turn_retries": 1}})
 
     def _cleanup(self):
         os.environ.clear()
         os.environ.update(self.old_env)
-        subprocess.run(["pkill", "-f", str(self.tmp)], capture_output=True)
+        # Killed outright: a runner asked politely writes its last files, into a directory that is being removed.
+        subprocess.run(["pkill", "-9", "-f", str(self.tmp)], capture_output=True)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def scenario(self, turns):
@@ -180,7 +194,10 @@ class ManagerSide(unittest.TestCase):
         self.fail("run %s did not finish: %s" % (run_id, self.ledger.run(run_id)))
 
     def machine_home(self, run_id):
-        return self.tmp / "orb" / ("eng-" + run_id) / "home"
+        return self.tmp / "incus" / ("eng-" + run_id) / "home"
+
+    def incus_calls(self):
+        return [json.loads(line) for line in (self.tmp / "incus" / "calls.jsonl").read_text().splitlines()]
 
     # ------------------------------------------------------------ approval
     def test_approval_is_bound_to_the_text(self):
@@ -234,19 +251,22 @@ class ManagerSide(unittest.TestCase):
         self.assertIsNone(self.ledger.spec_meta(spec_id))
 
     # ------------------------------------------------------------ dispatch, sync, status
-    def test_dispatch_to_an_orb_machine_and_follow_it_to_the_end(self):
+    def test_dispatch_to_a_container_and_follow_it_to_the_end(self):
         spec_id = self.approved()
         log = []
         run_id, rec = dispatch.dispatch(self.ledger, spec_id, log=log.append)
         self.assertEqual(run_id, "001-csv-export-r1")
-        self.assertEqual(rec["machine"], dict(rec["machine"], kind="orb", name="eng-001-csv-export-r1", base="base"))
+        self.assertEqual(rec["machine"], dict(rec["machine"], kind="incus", name="eng-001-csv-export-r1", base="base"))
         self.assertEqual(rec["state"], "dispatched")
-        calls = (self.tmp / "orb" / "calls.log").read_text().splitlines()
-        self.assertEqual(calls[:2], ["clone base eng-001-csv-export-r1", "start eng-001-csv-export-r1"])
+        made = [c for c in self.incus_calls() if c[0] in ("copy", "start", "delete")]
+        self.assertEqual(made, [["copy", "-q", "base", "eng-001-csv-export-r1"], ["start", "-q", "eng-001-csv-export-r1"]])
         home = self.machine_home(run_id)
-        token = home / ".claude" / "oauth-token"
-        self.assertEqual(token.read_text().strip(), "sk-ant-oat01-not-a-real-token")
-        self.assertEqual(token.stat().st_mode & 0o077, 0, "the token is private to the machine's user")
+        # The tokens are in the container's own tokens directory (its /run/org), not in ours.
+        for name, value in (("claude-token", "sk-ant-oat01-not-a-real-token"), ("github-token", "github_pat_not_a_real_token")):
+            token = home / ".run-org" / name
+            self.assertEqual(token.read_text().strip(), value)
+            self.assertEqual(token.stat().st_mode & 0o077, 0, "the token is private to the machine's user")
+        self.assertEqual(sorted(p.name for p in self.secrets.iterdir()), ["claude-token", "github-token"], "ours is as it was")
         remote = home / "org-runs" / run_id
         self.assertTrue((remote / ".org" / "org" / "runner.py").exists())
         self.assertEqual((remote / "spec.md").read_text(), GOOD)
@@ -280,9 +300,9 @@ class ManagerSide(unittest.TestCase):
         self.assertIn("AC1 pass, AC2 pass", card)
 
         # a finished, fully copied run is not asked again
-        before = len((self.tmp / "orb" / "calls.log").read_text().splitlines())
+        before = len(self.incus_calls())
         sync.sync_all(self.ledger)
-        self.assertEqual(len((self.tmp / "orb" / "calls.log").read_text().splitlines()), before)
+        self.assertEqual(len(self.incus_calls()), before)
 
         # the next run of any spec is told how this estimate turned out
         run2, _ = dispatch.dispatch(self.ledger, spec_id, log=log.append)
@@ -360,15 +380,25 @@ class ManagerSide(unittest.TestCase):
 
     def test_dispatch_failures_are_recorded(self):
         spec_id = self.approved()
-        os.environ["FAKE_ORB_BASE"] = "some-other-template"
+        os.environ["FAKE_INCUS_BASE"] = "some-other-template"  # so the template this ledger names does not exist
         with self.assertRaises(dispatch.DispatchError):
             dispatch.dispatch(self.ledger, spec_id, log=lambda m: None)
         rec = self.ledger.run("001-csv-export-r1")
         self.assertEqual(rec["state"], "dispatch_failed")
-        self.assertIn("orb clone", rec["error"])
+        self.assertIn("the template container base does not exist", rec["error"])
         view = status.collect(self.ledger)["runs"][0]
         self.assertEqual(view["state"], "dispatch_failed")
-        self.assertIn("orb clone", view["detail"])
+        self.assertIn("the template container base does not exist", view["detail"])
+        self.assertFalse([c for c in self.incus_calls() if c[0] == "copy"], "nothing was copied")
+        # The template is there, and so is a container with the name the next run would take.
+        os.environ.pop("FAKE_INCUS_BASE")
+        (self.tmp / "incus" / "eng-001-csv-export-r2" / "home").mkdir(parents=True)
+        with self.assertRaises(dispatch.DispatchError):
+            dispatch.dispatch(self.ledger, spec_id, log=lambda m: None)
+        rec = self.ledger.run("001-csv-export-r2")
+        self.assertEqual(rec["state"], "dispatch_failed")
+        self.assertIn("incus copy base eng-001-csv-export-r2 failed", rec["error"])
+        self.assertIn("already exists", rec["error"])
 
     def test_an_existing_run_directory_on_a_shared_host_is_not_overwritten(self):
         shared = self.tmp / "shared-host-home"
@@ -393,13 +423,43 @@ class ManagerSide(unittest.TestCase):
         self.assertEqual((shared / "org-runs" / run_id / "report.md").read_text(), report_before)
         self.assertEqual(other.run(run_id)["state"], "dispatch_failed")
 
+    def test_a_snapshot_cannot_write_outside_the_mirror_or_requeue_its_run(self):
+        # The snapshot is whatever the engineer's machine prints, and a session there runs with
+        # every permission bypassed. It must not be able to name the files the manager writes.
+        run_id = "hostile-r1"
+        self.ledger.run_dir(run_id).mkdir(parents=True)
+        self.ledger.save_run(run_id, {"run_id": run_id, "state": "dispatched", "remote_dir": "/r",
+                                      "machine": {"kind": "incus", "name": "eng-hostile-r1"}, "events_offset": 0})
+        outside = self.tmp / "outside.txt"
+        before = self.ledger.config_path.read_text()
+        snap = {"files": {"../../config.json": '{"machines": {"plugins": ["evil"]}}', str(outside): "x",
+                          "../run.json": "{}", "sub/dir.md": "x", "report.md": "the report",
+                          "status.json": json.dumps({"state": "queued", "heartbeat_at": "soon", "rate_limit": "none"})},
+                "events": {"data": "", "offset": "0", "size": -5}, "now": "later", "host": {"a": 1}, "log_tail": ["x"]}
+
+        class Hostile:
+            def run(self, script, **kw):
+                return subprocess.CompletedProcess([], 0, stdout=json.dumps(snap).encode(), stderr=b"")
+
+        with mock.patch.object(sync, "for_machine", lambda machine, cfg: Hostile()):
+            rec = sync.sync_run(self.ledger, run_id)
+            self.assertEqual(self.ledger.config_path.read_text(), before)
+            self.assertFalse(outside.exists())
+            mirror = self.ledger.mirror_dir(run_id)
+            self.assertEqual(sorted(p.name for p in mirror.iterdir()), ["report.md", "status.json"])
+            self.assertEqual(rec["state"], "dispatched", "a runner cannot report one of the manager's states")
+            for bad in ("a string", ["a list"], {"files": "x", "events": "y"}):
+                snap = bad
+                sync.sync_run(self.ledger, run_id)  # neither raises nor writes
+            self.assertEqual(self.ledger.config_path.read_text(), before)
+
     def test_unreachable_machine_is_reported_not_fatal(self):
         spec_id = self.approved()
         self.scenario(dict(TURNS, **{"milestone:M1": dict(TURNS["milestone:M1"], sleep=60)}))
         run_id, _ = dispatch.dispatch(self.ledger, spec_id, log=lambda m: None)
         time.sleep(0.5)
         sync.sync_run(self.ledger, run_id)
-        shutil.move(str(self.tmp / "orb" / ("eng-" + run_id)), str(self.tmp / "orb-gone"))
+        shutil.move(str(self.tmp / "incus" / ("eng-" + run_id)), str(self.tmp / "incus-gone"))
         rec = sync.sync_run(self.ledger, run_id)
         self.assertFalse(rec["reachable"])
         view = status.run_view(self.ledger, run_id, None)
@@ -419,7 +479,7 @@ class ManagerSide(unittest.TestCase):
         argv = Ssh("gpu", m["host"], m["options"]).argv('echo "$HOME"')
         self.assertEqual(argv[:1] + argv[-2:], ["ssh", "me@gpu.example.test", "bash -c 'echo \"$HOME\"'"])
         self.assertIn("2222", argv)
-        self.assertEqual(dispatch.choose_machine(cfg, {"machine": "ssh:gpu"}, "orb", "001-x-r1")["kind"], "orb", "the flag outranks the spec")
+        self.assertEqual(dispatch.choose_machine(cfg, {"machine": "ssh:gpu"}, "incus", "001-x-r1")["kind"], "incus", "the flag outranks the spec")
 
     def test_weekly_rate_is_learned_from_finished_runs(self):
         self.assertEqual(budget.usd_per_pct(self.ledger)["source"], "unknown")
@@ -492,7 +552,8 @@ class ScratchClone(unittest.TestCase):
         gitconfig = self.tmp / "gitconfig"
         gitconfig.write_text('[user]\n\tname = T\n\temail = t@example.com\n[init]\n\tdefaultBranch = main\n'
                              '[url "%s/"]\n\tinsteadOf = https://github.com/\n' % self.remotes)
-        self.env = dict(os.environ, GIT_CONFIG_GLOBAL=str(gitconfig), GIT_CONFIG_NOSYSTEM="1", HOME=str(self.tmp))
+        self.env = dict(os.environ, GIT_CONFIG_GLOBAL=str(gitconfig), GIT_CONFIG_NOSYSTEM="1", HOME=str(self.tmp),
+                        ORG_SECRETS_DIR=str(self.tmp / "run-org"))
         self.remote = self.remotes / "acme" / "web.git"
         self.remote.mkdir(parents=True)
         self.git(self.remote, "init", "-q")

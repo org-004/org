@@ -33,10 +33,14 @@ from typing import List, Optional
 
 from . import pricing, schemas
 from .stream import Meter, weekly_window
+from . import secrets
 from .util import clip, fmt_dur, fmt_usd, now, read_json, read_text, render, sha256_file, write_json, write_text
 
 PROMPTS = Path(__file__).parent / "prompts"
 TERMINAL_STATES = ("done", "partial", "failed", "stopped")
+#: Every state a runner reports. The manager's own states (queued, provisioning, dispatched,
+#: dispatch_failed) are not among them: an engineer's machine cannot put a run back in the queue.
+RUNNER_STATES = ("planning", "executing", "reporting", "waiting") + TERMINAL_STATES
 STATE_FOR_STATUS = {"done": "done", "partial": "partial", "fail": "failed"}
 SNAPSHOT_FILES = (
     "status.json",
@@ -343,9 +347,11 @@ class Runner:
         env.setdefault("IS_SANDBOX", "1")
         # Headless runs drop background subagents after ten idle minutes unless told not to.
         env["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] = "0"
-        token = Path.home() / ".claude" / "oauth-token"
-        if not env.get("CLAUDE_CODE_OAUTH_TOKEN") and not env.get("ANTHROPIC_API_KEY") and token.is_file():
-            env["CLAUDE_CODE_OAUTH_TOKEN"] = token.read_text().strip()
+        # The two tokens dispatch copied into this machine's memory: the Claude one for the
+        # session's own requests, the GitHub one as GH_TOKEN, which gh reads and git asks gh for.
+        secrets.process_env(env)
+        # No claude.ai connectors, whatever the account has attached to it.
+        env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
         env["ORG_RUN_DIR"] = str(self.dir)
         return env
 

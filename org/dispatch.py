@@ -2,7 +2,7 @@
 
 Steps, all initiated from the manager's side:
 
-  1. pick the machine (the spec header, else config): a fresh OrbStack machine, an ssh host, or
+  1. pick the machine (the spec header, else config): a fresh Incus container, an ssh host, or
      whatever another backend provides (org/backends/)
   2. place it: where the backend has a pool, a run needs a node with a free slot, and waits in
      the queue until one frees
@@ -20,6 +20,7 @@ import base64
 import fcntl
 import io
 import json
+import os
 import subprocess
 import tarfile
 import time
@@ -27,14 +28,16 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from . import backends, budget
+from . import backends, budget, secrets
 from .backends import BackendError, for_machine
 from .ledger import Ledger
 from .runner import TERMINAL_STATES
 from .transport import Transport, TransportError
-from .util import now, read_text
+from .util import now, read_json, read_text, write_json
 
-PACKAGE = Path(__file__).parent
+# Resolved, so that a process started from one release keeps bundling that release after the
+# `current` link has moved to another.
+PACKAGE = Path(__file__).resolve().parent
 REMOTE_ROOT = "$HOME/org-runs"
 
 
@@ -51,8 +54,8 @@ def workspace_dir(run_id: str) -> str:
 
 
 def choose_machine(cfg: dict, header: dict, override: Optional[str], run_id: str) -> dict:
-    """Resolve what a spec asks for ("orb", "ssh:<name>", "docker:<node>", ...) into a machine record."""
-    want = (override or header.get("machine") or (cfg.get("machines") or {}).get("default") or "orb").strip()
+    """Resolve what a spec asks for ("incus", "ssh:<name>", "docker:<node>", ...) into a machine record."""
+    want = (override or header.get("machine") or (cfg.get("machines") or {}).get("default") or "incus").strip()
     try:
         return backends.resolve(cfg, want).choose(cfg, want, run_id)
     except BackendError as e:
@@ -206,8 +209,6 @@ def preflight(tr: Transport) -> dict:
               'D=no; if command -v docker >/dev/null 2>&1; then for i in 1 2 3 4 5 6; do '
               'if docker info >/dev/null 2>&1; then D=yes; break; fi; '
               'systemctl is-enabled docker >/dev/null 2>&1 || break; sleep 1; done; fi; printf "docker=%s\\n" "$D"; '
-              # An OrbStack machine that is not isolated has the Mac's file system mounted here.
-              'printf "mac_files=%s\\n" "$([ -n "$(ls -A /mnt/mac 2>/dev/null)" ] && echo yes || echo no)"; '
               'printf "cores=%s\\n" "$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"; '
               'printf "host=%s\\n" "$(uname -n)"')
     out = tr.run(script, timeout=60).stdout.decode("utf-8", "replace")
@@ -226,24 +227,34 @@ def _local(argv: List[str]) -> str:
         return ""
 
 
+# Where a token goes on an engineer's machine: memory when the machine lets us (/run is a tmpfs,
+# and an engineer in a container is root there), else a directory only its user can read.
+_PUT = ('umask 077; d="${ORG_SECRETS_DIR:-/run/org}"; if ! { mkdir -p "$d" 2>/dev/null && [ -w "$d" ]; }; then d="$HOME/.org-secrets"; mkdir -p "$d"; fi; '
+        'chmod 700 "$d"; cat > "$d/%s"')
+
+
 def push_logins(tr: Transport, machine: dict, blank: bool, log) -> None:
     """Give the machine what it needs to act as the person: the Claude token, and for a machine
-    that starts blank the GitHub token and git identity. Everything goes in over stdin."""
-    token = Path.home() / ".claude" / "oauth-token"
+    that starts blank the GitHub token and git identity. Everything goes in over stdin, and the
+    tokens are the two this installation was handed (org/secrets.py), never a login found here."""
     if machine.get("push_token"):
-        if token.is_file() and token.stat().st_size:
-            tr.run('umask 077; mkdir -p "$HOME/.claude"; cat > "$HOME/.claude/oauth-token"', input=token.read_bytes(), timeout=60)
-            log("login token copied in")
+        token = secrets.claude_token()
+        if token:
+            tr.run(_PUT % secrets.CLAUDE, input=(token + "\n").encode(), timeout=60)
+            log("Claude token copied in")
         else:
-            log("warning: no ~/.claude/oauth-token here; the engineer will use whatever login the machine has")
+            log("warning: this side has no Claude token; the engineer will use whatever login the machine has")
     if not blank:
-        return  # a clone inherits its template's GitHub login; an ssh host is set up by its owner
-    gh = _local(["gh", "auth", "token"])
-    if gh:
-        tr.run("gh auth login --with-token >/dev/null 2>&1 && gh auth setup-git", input=(gh + "\n").encode(), timeout=60)
-        log("GitHub login copied in")
+        return  # an ssh host is set up by its owner
+    github = secrets.github_token()
+    if github:
+        tr.run(_PUT % secrets.GITHUB, input=(github + "\n").encode(), timeout=60)
+        # git asks gh, and gh reads GH_TOKEN, which the runner sets from the file above.
+        tr.run("git config --global credential.https://github.com.helper '' && "
+               "git config --global --add credential.https://github.com.helper '!gh auth git-credential'", timeout=30, check=False)
+        log("GitHub token copied in")
     else:
-        log("warning: no GitHub login on this side (`gh auth login`); the engineer cannot clone private repositories or push")
+        log("warning: this side has no GitHub token; the engineer can read public repositories and cannot push")
     name, email = _local(["git", "config", "--global", "user.name"]), _local(["git", "config", "--global", "user.email"])
     if name and email:
         tr.run('IFS= read -r n; IFS= read -r e; git config --global user.name "$n" && git config --global user.email "$e"',
@@ -288,6 +299,14 @@ def start(ledger: Ledger, run_id: str, log=print) -> dict:
         record = ledger.run(run_id)
         if record.get("state") != "queued":
             return record
+        # Read under the lock that `org drain` sets it under: once drain returns, nothing starts.
+        held = draining(ledger)
+        if held:
+            record["queue_reason"] = "draining since %s%s" % (
+                time.strftime("%a %H:%M", time.localtime(held.get("since") or now())), (": " + held["reason"]) if held.get("reason") else "")
+            ledger.save_run(run_id, record)
+            log("queued: %s" % record["queue_reason"])
+            return record
         machine = record["machine"]
         try:
             backend = backends.get(cfg, machine["kind"])
@@ -305,12 +324,14 @@ def start(ledger: Ledger, run_id: str, log=print) -> dict:
             return record
         if node:
             backend.assign(cfg, machine, node)
-        record.update(state="provisioning", queue_reason=None)
+        record.update(state="provisioning", queue_reason=None, provisioner=_me())
         ledger.save_run(run_id, record)  # the slot is taken from here on
     meta = ledger.spec_meta(record["spec_id"])
+    made = False
     try:
         log("machine: %s %s%s" % (machine["kind"], machine["name"], (" on " + machine["node"]) if machine.get("node") else ""))
         tr = backend.provision(machine, run_id, cfg)
+        made = True
         record["facts"] = preflight(tr)
         backend.vet(machine, record["facts"], cfg)
         push_logins(tr, machine, backend.blank, log)
@@ -333,8 +354,106 @@ def start(ledger: Ledger, run_id: str, log=print) -> dict:
     except (TransportError, DispatchError, BackendError, OSError) as e:
         record.update(state="dispatch_failed", error=str(e))
         ledger.save_run(run_id, record)
+        # A machine made for a run that never started holds nothing worth keeping, and one that
+        # was refused must not be left running. Only one this attempt made: a machine that was
+        # already there under this name is someone's work.
+        if made and backend.blank:
+            try:
+                backend.remove(machine, cfg)
+            except (TransportError, BackendError, OSError):
+                pass
         raise DispatchError("%s: %s" % (run_id, e))
     return record
+
+
+def _boot_id() -> str:
+    return read_text("/proc/sys/kernel/random/boot_id", "").strip() if os.path.exists("/proc/sys/kernel/random/boot_id") else ""
+
+
+def _me() -> dict:
+    return {"pid": os.getpid(), "boot": _boot_id(), "at": now()}
+
+
+def _gone(who: dict) -> bool:
+    """Has the process that recorded itself as `who` ended? A restart of the machine ends them all."""
+    if not who or not who.get("pid"):
+        return True
+    if (who.get("boot") or "") != _boot_id():
+        return True
+    try:
+        os.kill(int(who["pid"]), 0)
+    except ProcessLookupError:
+        return True
+    except (PermissionError, ValueError, OSError):
+        return False
+    return False
+
+
+def reap(ledger: Ledger, log=lambda message: None) -> List[str]:
+    """A run left in `provisioning` by a process that died would hold its slot for ever, and a
+    drain would wait for it for ever. Record it as failed, and remove what was made of its machine."""
+    reaped = []
+    for run_id in ledger.run_ids():
+        rec = ledger.run(run_id)
+        if rec.get("state") != "provisioning" or not _gone(rec.get("provisioner") or {}):
+            continue
+        with _placing(ledger):
+            rec = ledger.run(run_id)
+            if rec.get("state") != "provisioning" or not _gone(rec.get("provisioner") or {}):
+                continue
+            rec.update(state="dispatch_failed", error="the process that was setting up this run's machine ended before it "
+                                                      "finished; dispatch the spec again")
+            ledger.save_run(run_id, rec)
+        try:
+            cfg = ledger.config()
+            backends.get(cfg, rec["machine"]["kind"]).remove(rec["machine"], cfg)
+        except (BackendError, TransportError, KeyError):
+            pass
+        log("%s: its dispatch was interrupted; recorded as failed" % run_id)
+        reaped.append(run_id)
+    return reaped
+
+
+# ---------------------------------------------------------------- draining
+
+
+def _drain_path(ledger: Ledger) -> Path:
+    return ledger.root / "drain.json"
+
+
+def draining(ledger: Ledger) -> Optional[dict]:
+    """The drain in force, or None. While one is, approved work queues and nothing new starts."""
+    data = read_json(_drain_path(ledger))
+    return data if isinstance(data, dict) else None
+
+
+def drain(ledger: Ledger, reason: str = "") -> dict:
+    with _placing(ledger):
+        held = draining(ledger) or {"since": now(), "reason": reason}
+        write_json(_drain_path(ledger), held)
+    return held
+
+
+def undrain(ledger: Ledger) -> bool:
+    with _placing(ledger):
+        try:
+            _drain_path(ledger).unlink()
+        except FileNotFoundError:
+            return False
+    return True
+
+
+def active(ledger: Ledger) -> List[str]:
+    """Runs that hold a machine and have not finished: what a drain waits for."""
+    out = []
+    for run_id in ledger.run_ids():
+        rec = ledger.run(run_id)
+        if rec.get("final") or rec.get("machine_removed_at"):
+            continue
+        if rec.get("state") in ("queued", "dispatch_failed") or rec.get("state") in TERMINAL_STATES:
+            continue
+        out.append(run_id)
+    return out
 
 
 def pump(ledger: Ledger, log=lambda message: None) -> List[str]:
@@ -344,6 +463,7 @@ def pump(ledger: Ledger, log=lambda message: None) -> List[str]:
     slot is taken up without a scheduler process of its own.
     """
     started = []
+    reap(ledger, log)
     queued = [r for r in ledger.run_ids() if ledger.run(r).get("state") == "queued"]
     queued.sort(key=lambda r: ledger.run(r).get("created_at") or 0)
     for run_id in queued:
@@ -380,12 +500,16 @@ def stop(ledger: Ledger, run_id: str) -> str:
     return tr.run(script, timeout=60).stdout.decode().strip()
 
 
-def resume(ledger: Ledger, run_id: str) -> str:
+def resume(ledger: Ledger, run_id: str, log=lambda message: None) -> str:
     """Restart the runner for a run whose process died. It continues from its saved state."""
     rec = ledger.run(run_id)
     machine, cfg = rec["machine"], ledger.config()
-    backends.get(cfg, machine["kind"]).before_resume(machine, cfg)
+    backend = backends.get(cfg, machine["kind"])
+    backend.before_resume(machine, cfg)
     tr = for_machine(machine, cfg)
+    # The tokens were put in the machine's memory, and a machine that has been stopped since
+    # has none: without them the runner would start an engineer that cannot make a request.
+    push_logins(tr, machine, backend.blank, log)
     tr.run('rm -f "%s/STOP"' % rec["remote_dir"], timeout=30)
     how = tr.run(start_script(run_id, (cfg.get("machines") or {}).get("detach", "auto")), timeout=60).stdout.decode().strip()
     rec.update(final=False, resumed_at=now())
@@ -403,3 +527,15 @@ def remove_machine(ledger: Ledger, run_id: str) -> str:
     rec["machine_removed_at"] = now()
     ledger.save_run(run_id, rec)
     return said
+
+
+def interrupted(ledger: Ledger) -> List[str]:
+    """Runs whose machine is there and whose runner is not: what a restart of this machine leaves."""
+    out = []
+    for run_id in active(ledger):
+        rec = ledger.run(run_id)
+        if rec.get("state") == "provisioning":
+            continue
+        if rec.get("reachable") is False or rec.get("alive") is False:
+            out.append(run_id)
+    return out

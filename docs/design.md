@@ -11,8 +11,8 @@ losing track of what each costs. That takes two roles with opposite temperaments
 - A **manager** that talks to the person, is skeptical of the request, and turns it into a spec
   exact enough to hand to someone who cannot ask questions. Afterwards it is the person's window
   onto the work.
-- **Engineers** that never talk to the person. Each takes one approved spec, plans it, does it on
-  a machine of its own, and reports.
+- **Engineers** that never talk to the person. Each takes one approved spec, plans it, does it in
+  a container of its own, and reports.
 
 Both are Claude Code sessions. Everything else in this repository is the deterministic machinery
 between them.
@@ -22,7 +22,7 @@ between them.
 These are the decisions the rest follows from.
 
 1. **The manager's side initiates everything.** It pushes the spec out and pulls status back.
-   An engineer's machine never needs a route to the manager, so machines can be isolated, and
+   An engineer's container never needs a route to the manager, so containers can be isolated, and
    reading a run cannot disturb it.
 2. **A deterministic runner surrounds a non-deterministic engineer.** The engineer decides how to
    do the work. Whether a phase is over, what it cost, whether a cap was hit and what happens next
@@ -37,7 +37,13 @@ These are the decisions the rest follows from.
 6. **Every run ends with a status and a reason.** If the engineer cannot produce them the runner
    does. `done` is lowered to `partial` unless every acceptance criterion is reported passing.
 7. **Guarantees rest on mechanisms that were made to fail.** Each claim about what the manager
-   cannot do is backed by a test that tries to do it against the real harness.
+   cannot do is meant to be backed by a test that tries to do it against the real harness. In
+   the present layout that test has not been run yet, and this document says so where it matters.
+8. **Nothing an engineer can change runs on the Mac.** Engineers can push to this repository. So
+   the Mac runs a separate repository that their token cannot reach, and org is fetched and run
+   inside a VM that has nothing of the Mac's in it.
+9. **A credential is as wide as its job.** Two tokens enter the VM, each scoped to what an
+   engineer needs, and they live in memory. The manager chat is given no GitHub token at all.
 
 ## Components
 
@@ -49,12 +55,12 @@ These are the decisions the rest follows from.
    │   org talk     Claude Code + persona, confined to a desk │
    │   org dash     status page, chat box, sync loop          │
    │   ledger       drafts · approved specs · runs · budget   │
-   │   dispatch     place ▸ provision ▸ bundle ▸ start        │
+   │   dispatch     place ▸ provision ▸ vet ▸ bundle ▸ start  │
    │   sync         one read-only snapshot per run            │
    └────────────┬─────────────────────────────▲───────────────┘
         bundle  │ over a transport            │ snapshot (JSON)
    ┌────────────▼─────────────────────────────┴───────────────┐
-   │ an engineer's machine (one per run)                      │
+   │ an engineer's container (one per run)                    │
    │   runner       plan ▸ milestone… ▸ report                │
    │     └─ claude -p   one resumed session, bypass mode      │
    │   run dir      spec · job · status · plan · report · log │
@@ -65,148 +71,227 @@ These are the decisions the rest follows from.
 | Module | Side | Job |
 |---|---|---|
 | `ledger.py` | manager | paths, ids, config |
-| `spec.py` | manager | draft template, checks, approval |
-| `dispatch.py` | manager | choose and place a machine, logins, bundle, start, stop, resume, the queue |
-| `backends/` | manager | one kind of machine each: how to pick, create, reach and remove it (`orb`, `ssh`, `local`; `docker` as a plugin) |
-| `transport.py` | manager | run a script on a machine: OrbStack, ssh, local, Docker |
-| `agent.py` | both ends | the host agent on the Mac, and the bridge and client in the manager's machine |
+| `spec.py` | manager | draft template, checks (among them the one organization), approval |
+| `secrets.py` | both | the two tokens: where they are, what hides them, the environment of a process that acts as the person. The only reader |
+| `dispatch.py` | manager | choose and place a machine, tokens, bundle, start, stop, resume, the queue, draining, reaping |
+| `backends/` | manager | one kind of machine each: how to pick, create, vet, reach and remove it (`incus`, `ssh`, `local`; `docker` as a plugin) |
+| `transport.py` | manager | run a script on a machine: Incus, ssh, local, Docker |
+| `admin.py` | manager | a drain that waits, upgrade and rollback, the organization's list of repositories |
 | `sync.py` | manager | pull snapshots into `runs/<run>/mirror/` |
 | `status.py` | manager | one document for the terminal, the page and the manager |
 | `budget.py` | manager | weekly-limit readings, the learned dollars-per-percent rate, estimate history |
 | `manager.py` | manager | launch the manager chat and the read-only question mode |
-| `login.py`, `doctor.py` | manager | the logins engineers are handed; what is missing |
+| `login.py`, `doctor.py` | manager | which tokens are in place; what is missing, and what is wider than it should be |
 | `dash.py`, `web/` | manager | the status page and its API |
 | `runner.py` | engineer | the three phases, recovery, caps, status |
 | `stream.py` | engineer | read the CLI's event stream: spend, activity, limit state |
 | `schemas.py`, `prompts/` | engineer | what each turn must return, and the engineer's instructions |
-| `bin/org`, `orbstack/` | host | the wrapper, `org up` and `org down`, the template's setup |
-| `docker/` | host | the Docker plugin's image and its `org up` |
+| `bin/org`, `incus/` | the VM | the wrapper, `org up` and `org down`, the template's setup |
+| `docker/` | | the Docker plugin's image and host script; unmaintained |
 
 The engineer's side is the same package: dispatch copies it into the run directory, so a run
 keeps the code it started with even if the manager's copy is upgraded mid-run.
 
 ## Where everything runs
 
-The manager and every engineer are OrbStack machines on the person's Mac. On the Mac itself
-there is OrbStack, a shell wrapper, and one background process.
+One Linux VM on the person's Mac holds everything: the manager, the ledger, and every engineer as
+a container inside it. The VM is made by a separate repository, `org-host`, in the person's
+personal GitHub account: a Lima VM definition and the `org-vm` launcher. That repository's README
+is the account of the Mac's side and of what the VM can reach; this section says what org relies
+on and does not repeat it.
 
 ```
- the Mac: OrbStack + bin/org (forwards every command into the manager) + the host agent
- ┌────────────────────────────────────────────────────────────────────────┐
- │ org-base        the template, stopped: python3, git, gh, tmux, Docker, │
- │                 Claude Code, the logins. Only ever cloned.             │
- │                                                                        │
- │ org-manager     a clone of it, with org installed                      │
- │   holds         the ledger · the logins · agent.sock                   │
- │   serves        the dashboard, on its loopback (→ the Mac's localhost) │
- │        │ create · run a script in · delete      (through the agent)    │
- │        ▼                                                               │
- │ org-eng-<run>   a clone of the template, one per run                   │
- │   given         the Claude token over stdin; the rest it inherited     │
- │   has           sudo, systemd, a Docker daemon of its own              │
- └────────────────────────────────────────────────────────────────────────┘
+ the Mac: Lima + org-host (lima.yaml, org-vm). The Keychain holds the two tokens.
+        │ commands in, the tokens over stdin                 127.0.0.1:8787 ▲
+ ┌──────▼───────────────────────────────────────────────────────────────────┴──┐
+ │ the VM (Debian 13)   no Mac files · no route to the Mac's loopback          │
+ │                                                                             │
+ │  root, admin    the firewall, /etc/claude-code, Incus itself; org-vm only   │
+ │                                                                             │
+ │  org            no sudo; Incus project user-2000 and its bridge, no other   │
+ │    holds        the ledger (~/.org) · /run/org: the two tokens, in memory   │
+ │    runs         org · the manager chat (bubblewrap) · org-dash.service      │
+ │         │ incus copy · incus exec · incus delete       (names org-eng-…)    │
+ │         ▼                                                                   │
+ │  org-base       the template, stopped: python3, git, gh, tmux, Docker,      │
+ │                 Claude Code, and no login. Only ever copied.                │
+ │  org-eng-<run>  a copy of it, one per run, unprivileged                     │
+ │    given        both tokens over stdin, into its own /run/org               │
+ │    has          root, an init, a Docker daemon of its own, the internet     │
+ └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Why machines.** An engineer needs a whole system: to install packages, run services, and build
-and run containers, because that is what real projects' tests need. A container gives the first
-two and not the third without a nested engine. An OrbStack machine is a Linux system with
-systemd and its own Docker daemon, and an isolated one has none of the Mac's files, cannot run
-commands on the Mac, and cannot reach it over the network. Cloning one is copy-on-write and takes
-a few hundredths of a second.
+**Why a VM, and why another repository makes it.** Engineers run with every permission bypassed
+and can push to this repository. Code from here must therefore never run on the Mac, where the
+person's files and logins are. `bin/org` refuses to start on Darwin (unless `ORG_ALLOW_DARWIN`
+is set), and the Mac-side host agent, its bridge, the OrbStack backend and `orbstack/` that
+earlier versions had are gone. What the Mac runs is `org-host`, which the engineers' token cannot
+reach and which is small enough to read. The VM it makes has no Mac files mounted, cannot reach
+the Mac's loopback, and forwards one port: the dashboard, to `127.0.0.1:8787`.
+
+**Two users.** `admin` is Lima's, has sudo, and is used only by `org-vm`. `org` runs everything
+in this repository and has no sudo. It is in the restricted `incus` group, which confines it to
+an Incus project of its own (`user-2000`) and that project's bridge. `org up` needs no root and
+refuses to run as root.
+
+**Why the manager is not a machine of its own any more.** In the previous layout the manager was
+a separate machine, to keep Python and Claude Code off the Mac and to put one more wall between
+the chat and the person's files. The VM now does both. Inside it, org runs directly as the `org`
+user, beside the containers it creates, with the ledger in `~/.org` and the dashboard as a systemd
+user service (`org-dash.service`). The manager chat is confined by Claude Code's bubblewrap
+sandbox and by permission rules, described below.
+
+**Why containers, and why Incus.** An engineer needs a whole system: to install packages, run
+services, and build and run containers, because that is what real projects' tests need. A Docker
+container gives the first two and not the third without a nested engine. An Incus system
+container is a Linux system with its own init, and with `security.nesting` it runs a Docker
+daemon of its own. On the VM's btrfs pool a copy of the template is copy-on-write and took about
+0.06 seconds when measured.
 
 **The template.** `org-base` holds everything an engineer starts with, so starting a run is a
-clone and nothing is installed per run. `org up` creates it (`orb create --isolated`) or clones a
-machine the person already has (`--from`), then runs `orbstack/bootstrap.sh` inside it, which
-installs only what is missing. It is left stopped: a clone of a stopped machine is a clean copy,
-and a template that never runs cannot drift.
+copy and nothing is installed per run. `org up` builds it: `incus init images:debian/13` with
+nesting on, the network card's two security settings, then `incus/bootstrap.sh` run inside it as
+root, then stop. The build is refused if a tool is missing or if a login is found in the result.
+The template holds no login at all: a token baked into it would be in every engineer's container
+and on the VM's disk. It is left stopped, because a copy of a stopped container is a clean copy
+and a template that never runs cannot drift; `org up` stops one it finds running.
+`org up --rebuild-template` builds a new one under a dated name and points `machines.incus.base`
+at it, leaving the old one for the runs that were promised it.
 
-**Why the manager is a machine too.** It keeps Python and Claude Code off the Mac, and it puts
-the manager chat one more wall away from the person's files: the chat is confined by its sandbox
-and rules, and behind those is a machine that has nothing of the Mac's in it.
+**The backend acts only on its own containers.** Every action of the Incus backend passes one
+check first (`_own()` in `org/backends/incus.py`): the name must start with the configured prefix
+(`org-eng-`) and be a plain container name. A template whose name starts with the prefix is
+refused, since a run could then be asked to delete it, and a run record cannot point org at
+another container. Two other parts of org name containers outside the prefix, on purpose:
+`org up` creates the template, and `org upgrade` creates and deletes a test container
+(`org-test-<commit>`). All of it happens inside the `org` user's own Incus project.
 
-**The host agent, and why it is shaped this way.** An isolated machine cannot run `orb`, and
-cannot reach the Mac at all, so nothing can listen on the Mac for the manager. The Mac can always
-reach a machine. So the agent runs on the Mac and dials in: it keeps one command open inside the
-manager's machine, the bridge, and requests travel up that command's stdout and answers down its
-stdin, a JSON line each.
+**What makes a container a box.** Before an engineer starts, the backend's `vet` reads Incus's
+own description of the new container, not anything inside it, and refuses the run if the
+container is privileged, has any device beyond its root disk and its network card, shares a
+directory from the VM, or has a network card without `security.port_isolation` (it could reach
+the other containers) or without `security.ipv4_filtering` (it could take another address).
+`machines.incus.allow_open` overrides the refusal. The check runs at dispatch and nothing
+re-checks a container later. An engineer cannot change those settings from inside its container;
+the `org` user could.
 
-```
- the Mac                                         the manager's machine
- ┌──────────────────────────┐  orb -m org-manager … org agent bridge
- │ org agent run            │─────────────────────────▶┌───────────────────────────────┐
- │                          │◀── requests, a line each │ bridge                        │
- │   orb clone org-base …   │─── answers ─────────────▶│   ~/.org/agent.sock (0600)    │
- │   orb -m org-eng-… …     │                          │   the dashboard, on 127.0.0.1 │
- │   orb delete org-eng-…   │                          └───────────────────────────────┘
- └──────────────────────────┘                             ▲ org dispatch, sync, status
-```
+**The network.** An engineer reaches the internet, to clone, install and call the model. It
+cannot reach the Mac, the LAN or other engineers, and of the VM it can only ask for an address
+and a name. Two things hold that. The per-card settings above are Incus's, set on the template
+and inherited by every copy. A firewall in the VM, installed by `org-host` and owned by root
+there, drops what containers send to private, link-local and other non-public ranges and all of
+their IPv6. An engineer is root in its container and can change neither. The firewall's rules
+name the containers' bridges: they do not filter what the `org` user's own processes send.
 
-- It does five things: `info`, `list`, `create` (clone the template, start the clone), `exec`
-  (run a bash script in a machine, with stdin) and `delete`.
-- It acts only on machines whose names start with its prefix (`org-eng-`), and refuses a
-  configuration in which the manager or the template would match that prefix. It cannot touch
-  the template, the manager, or any other machine the person has, and no request can name a
-  command to run on the Mac. That one check is the whole of its safety, so it is the first thing
-  `handle()` does and it has a test that throws a dozen bad names at it.
-- In the manager's machine the socket is the user's alone (mode 0600), and the bridge refuses a
-  caller that is another user or has no process in this machine.
-- The agent pings every 15 seconds and the bridge exits after 75 seconds of silence. This is
-  needed: when the `orb` client on the Mac is killed outright, nothing reaches the command inside
-  the machine, neither a signal nor end of file. (Terminated politely, the command gets SIGTERM;
-  when its stdin is closed, it gets end of file.) When the link ends for any reason the agent
-  opens it again, backing off to 30 seconds.
-- The orb backend uses the agent when `machines.orb.via` is `agent`, which `org up` sets, and the
-  `orb` command itself when the manager runs on the Mac (`cli`, the default).
+**Credentials.** Exactly two tokens enter the VM. `org-vm` keeps them in the Mac's Keychain and
+pipes them in at every start, into `/run/org`, a memory-only directory that the `org` user alone
+can read.
 
-**Nothing on the Mac starts by itself.** `org up` starts the agent with `nohup` and records its
-pid. There is no launchd unit: after a restart `org up` brings it back, and takes two seconds
-when the machines exist. Engineers do not depend on the agent while they work, only the manager's
-view of them does.
+| Token | What it is | What it can do |
+|---|---|---|
+| Claude | what `claude setup-token` prints | model requests only; documented as unable to fetch the account's claude.ai connectors |
+| GitHub | a fine-grained token whose resource owner is one organization; Contents and Pull requests, read and write | read and push code and open pull requests there; it cannot create repositories, change settings or edit workflow files |
 
-**The dashboard's port.** The bridge serves the page on the manager machine's loopback. OrbStack
-forwards a machine's listening ports to the Mac's localhost, for isolated machines too, so the
-page is at `127.0.0.1:8787` on the Mac. Other machines cannot reach a loopback port. On
-connecting, the agent checks that the page answers on the Mac; where it does not, the agent
-listens on the port itself and carries each connection through another `orb -m` command, as
-base64 lines.
+`org/secrets.py` is the only reader. Dispatch copies both into each engineer's container over
+stdin, into that container's own `/run/org`, and the runner exports them to the session as
+`CLAUDE_CODE_OAUTH_TOKEN` and `GH_TOKEN`; git asks `gh` for its password and `gh` reads
+`GH_TOKEN`. Nothing reads `gh auth token` or performs a browser login any more, and `org login`
+only reports what is in place: a login made in the VM would be the whole account, not the narrow
+pair. `org doctor` fails on a GitHub token that is not fine-grained and on a
+`~/.claude/.credentials.json`, which is what `claude /login` leaves. The git identity (a name and
+an address) is copied from the VM's git config, where `org-vm` put it.
 
-**The pool.** `machines.orb.slots` is how many engineers' machines may run at once. A run that
-finds no free slot is recorded as queued, and `pump()` starts it when a slot frees. `pump()` runs
-whenever something reads the ledger (status, the dashboard's loop), so the queue moves without a
-scheduler process of its own. Placement is decided under a lock, so two readers cannot hand out
-one slot twice. Slots are counted from the ledger, not from `orb list`, so a finished run whose
-machine still exists does not hold a slot.
+**Claude Code is locked down in both places, to different strength.** In the VM,
+`/etc/claude-code/managed-mcp.json` holds an empty server map and the managed settings set
+`disableClaudeAiConnectors`; root owns both, so neither the `org` user nor the chat can change
+them. Every session org starts, manager and engineer alike, is given
+`ENABLE_CLAUDEAI_MCP_SERVERS=false`, and the manager's settings deny every `mcp__*` tool. The
+template carries the same two files. There the honesty is different: an engineer is root in its
+own container and could undo them. What protects the account from an engineer is not those
+settings but the token's scope, which is model requests.
 
-**Logins.** An engineer acts as the person: it needs the long-lived Claude token, a GitHub login
-and a git identity. `org up` writes all three into the template over stdin, so every clone has
-them, and dispatch writes the manager's current Claude token into each new machine, so a renewed
-token does not need a new template. Nothing is passed as an environment variable or on a command
-line.
+**Before an engineer starts**, in this order: the container is copied and started; dispatch asks
+it what it has (python3, git and Claude Code, or the run is refused; whether a Docker daemon
+answers and how many cores, which the engineer is told); `vet` reads Incus's description of it;
+only then are the tokens and the git identity copied in, the bundle unpacked and the runner
+started. A dispatch that fails at any step removes the container it made, so a refused container
+is never left running and never receives a token.
 
-**Before an engineer starts**, dispatch asks the new machine what it has: python3, git and
-Claude Code, or the run is refused; whether a Docker daemon answers, which the engineer is told;
-and whether it can see the Mac's files, in which case the run is refused, because a machine that
-is not isolated is no box for a session with every permission bypassed.
+**The pool.** `machines.incus.slots` is how many engineers' containers may run at once. A run
+that finds no free slot is recorded as queued, and `pump()` starts it when a slot frees. `pump()`
+runs whenever something reads the ledger (status, the dashboard's loop), so the queue moves
+without a scheduler process of its own. Placement is decided under a lock, so two readers cannot
+hand out one slot twice. Slots are counted from the ledger, not from `incus list`, so a finished
+run whose container still exists does not hold a slot. A run left in `provisioning` by a process
+that died would hold its slot for ever, so `pump()` first reaps such runs: each records the
+process that was setting it up (pid and boot id), and when that process is gone the run is
+recorded as failed and what was made of its container is removed.
+
+**Draining.** `org drain` writes a flag in the ledger (`drain.json`), under the same lock that
+placement is decided under, and `dispatch.start()` reads it under that lock: once `org drain`
+returns, nothing starts. Approved work is still recorded and stays queued, with the reason beside
+it. Running engineers are not touched. `--wait` returns when no run holds a container, and
+`org undrain` removes the flag and starts what queued.
+
+**Restarts.** The tokens are in memory, so stopping the VM loses them in the VM and in every
+container. Nothing on the Mac starts the VM by itself: `org-vm up` does, and hands the tokens in
+again. `org resume --interrupted` then finds every run whose container is there and whose runner
+is not, starts the container if it is stopped, copies the tokens in again, and restarts the
+runner, which continues from its last recorded step. A resume of a single run does the same.
+
+**Releases and upgrades.** `org up` installs the copy it is run from as a release,
+`~/.local/share/org/releases/<commit>`, and moves the `current` link to it, remembering the one
+before as `previous`. An upgrade is the moment code written by engineers starts running beside
+the tokens and the ledger, so `org upgrade <ref>` makes it the person's decision on an exact
+commit:
+
+- The commit must be an ancestor of the origin's default branch. GitHub serves a commit pushed
+  to any fork through the parent repository's address, so having a sha proves nothing; being
+  merged does.
+- The person is shown the commits and the files that changed since the release in use, with the
+  files that hold the walls and the tokens listed apart, and types yes. Without a terminal the
+  command refuses unless `--yes` is passed.
+- The commit's own tests run in a throwaway container copied from the template. It holds no
+  token and is not the `org` user, so code nobody has run yet does not run beside the ledger.
+- Dispatch is drained, the commit is installed (which switches `current`), the dashboard is
+  restarted so it runs the new release, and the drain is lifted. Engineers already at work are
+  not waited for: they keep the code they were bundled with.
+
+`org upgrade --rollback` swaps `current` and `previous` and restarts the dashboard. It moves
+links only: it does not drain, and it does not undo anything the newer release wrote to the
+ledger. The first install, `org-vm install <ref>`, is `org-host`'s and takes the ref it is given.
+
+**The dashboard's port.** `org-dash.service` serves the page on the VM's loopback, port 8787,
+and Lima forwards that one port to the Mac's `127.0.0.1`. Nothing else a process in the VM
+listens on is forwarded, so a server an engineer starts does not appear on the Mac. Containers
+cannot reach the VM's loopback, and the firewall leaves them no port of the VM but the ones
+that hand out addresses and names.
 
 **Backends.** Where engineers run is one interface (`org/backends/`): choose a machine for a run,
-say how many may run at once, create it, reach it, remove it.
+say how many may run at once, create it, vet it, reach it, remove it.
 
 | Kind | Provisioned by | Reached by |
 |---|---|---|
-| `orb` | a clone of the template, through the agent or the `orb` command | `orb -m <name> bash -c …` |
+| `incus` | a copy of the template, one per run | `incus exec <name> -T -- bash -c …` |
 | `ssh:<name>` | exists already | `ssh <host> bash -c …` |
 | `local` | nothing; off by default | `bash -c …` |
 | `docker[:node]` (plugin) | `docker run` on a pool node | `docker exec` |
 
 A transport does one thing: run a bash script on a machine with optional bytes on stdin. Files
-travel as base64 on stdin, so nothing depends on scp or a binary-clean channel.
+and tokens travel on stdin, files as base64, so nothing depends on scp or a binary-clean channel
+and no token is ever on a command line.
 
-**The Docker plugin.** The first container version made the manager and every engineer Docker
-containers from one image, with the manager holding the Docker socket. It is still here
-(`org up --backend docker`, `org/backends/docker.py`, `docker/`), loaded only when config names
-it, for hosts without OrbStack. It was set aside as the default for one reason: an engineer in a
-container cannot run Docker. It also makes the manager root on the Docker host, where the host
-agent gives it three operations on machines with one prefix.
+The ssh and local backends are still present and secondary. An ssh host is set up by its owner:
+of the two tokens dispatch gives it the Claude one, if asked, and not the other. The VM holds no
+key to reach such a host unless the person puts one there, and none of the walls above apply to
+it.
+
+**The Docker plugin is unmaintained in this layout.** The first container version made the
+manager and every engineer Docker containers from one image, with the manager holding the Docker
+socket. The backend and its unit tests are still here (`org/backends/docker.py`), but the
+host-side script `docker/up.sh` has not been updated for the token changes: it still calls
+`gh auth token` and gives the manager a whole GitHub login, and `org up` no longer leads to it.
+It is recorded here as history, not as something that works.
 
 ## The spec
 
@@ -216,9 +301,9 @@ criteria, Constraints, Alternatives considered, Open questions).
 
 `org spec check` enforces what a program can: ids on requirements and acceptance criteria, at
 least one MUST, no open questions, no template text left, no placeholder or unreachable
-repositories, well-formed caps. The rest is the manager's job, and its persona is written around
-one fact: an engineer cannot ask anyone anything, so every ambiguity left in a spec becomes a
-guess.
+repositories, no repository outside the organization named by `github.owner`, well-formed caps.
+The rest is the manager's job, and its persona is written around one fact: an engineer cannot ask
+anyone anything, so every ambiguity left in a spec becomes a guess.
 
 **Why one file.** The person approves exactly what the engineer reads. A separate metadata file
 would be a second thing to review and a place for the two to disagree.
@@ -229,8 +314,13 @@ changed after the person read it cannot be approved by accident.
 
 **Why approval is a permission prompt.** The manager session runs under a rule that makes
 `org approve` always ask. The model can propose the command; only the person can let it run.
-Checked against the real harness, in the default and auto permission modes: with nobody to
-answer, the command is refused.
+In the layouts before this one that was checked against the real harness, in the default and
+auto permission modes: with nobody to answer, the command is refused.
+
+**Why the organization is checked here.** The engineers' token pushes to one organization and
+nowhere else. A spec that names a repository elsewhere would send an engineer to work it cannot
+deliver, so it is refused before approval, with the two ways out: move the repository in, or
+name it under Context as something to read.
 
 ## The engineer's run
 
@@ -263,6 +353,7 @@ original is kept read-only beside them.
 | cost cap reached | stop executing; the report gets a reserved allowance so it can still be written |
 | time cap reached | end the turn in flight, then report |
 | the runner itself dies | `org resume` restarts it; it continues from the last recorded step, and a lock stops two runners sharing a run |
+| the VM restarts | `org resume --interrupted` starts the container, copies the tokens in again and restarts the runner |
 | the engineer changes `spec.md` | the approved text is restored and the change is recorded as a warning |
 
 **Cost accounting.** The CLI's `total_cost_usd` is cumulative over a session, across resumed
@@ -276,13 +367,36 @@ The runner rewrites `status.json` every few seconds. Sync is one read-only comma
 `org engineer snapshot`, which returns status, plan, report and the next slice of the event log
 as one JSON document. The manager's side writes that into `runs/<run>/mirror/`.
 
+**A snapshot is input from outside.** It comes from a container where a session runs with every
+permission bypassed, so sync takes from it only what a runner writes: the files named in
+`runner.SNAPSHOT_FILES`, by their exact names, and a state only if it is one a runner has. A run
+that is queued, being provisioned or failed at dispatch is not synced at all.
+
+**What a review of sync found.** Sync used to write any file name a snapshot returned into the
+mirror. A name such as `../../config.json` escaped the mirror and landed in the ledger, and
+`config.json` names modules that are imported. An engineer could so have put text of its
+choosing into a file the `org` program acts on, beside the tokens. Sync also copied the run's `state` unchecked, so a snapshot
+that said `queued` would have handed the run to the dispatcher again, and one that said
+`provisioning` would have held a slot for ever. Both are fixed as described above, and a unit
+test sends such a snapshot. The text an engineer writes in its status and report is still shown
+on the page and read by the manager chat; it is data there, not instruction.
+
 `status.collect()` builds one document from the ledger and the mirrors. The terminal table, the
 page and the manager's question mode all render that document, so they cannot disagree.
 
 The page is one self-contained HTML file. It can approve a spec and stop a run, so every API
 request needs a token (in the URL after `#`, where it is not sent to servers or logged) and
-requests whose Host or Origin is not this machine are refused. In the manager's machine it
-listens on the loopback only, which is what reaches the Mac's localhost and nothing else.
+requests whose Host or Origin is not this machine are refused. It listens on the VM's loopback
+only, which is what Lima forwards to the Mac's localhost and nothing else reaches.
+
+**A web app in an engineer's container** can be viewed through the dashboard; this is being
+added now, behind `dash.view`, which is off by default, and no person has exercised it yet.
+`org view <run> <port>` and a control on the page open the server at an origin of its own,
+`http://v-<id>.localhost:8787/`, relayed through `incus exec` into the container's loopback,
+with a single-use ticket exchanged for a host-only cookie and a restrictive
+Content-Security-Policy added. A page an engineer serves is an untrusted web page running in the
+person's browser, and on macOS 15 it opens in Chrome and Firefox only, because Safari does not
+resolve `*.localhost` there.
 
 **Visual encoding.** Milestone progress is drawn in one blue ramp (not started, running, done)
 so it reads without hue; the palette validator caught that green "done" beside red "blocked" is
@@ -303,35 +417,56 @@ Two exact numbers and one learned one.
 ## Confining the manager
 
 The manager must be able to read everything and run anything, and change nothing that matters.
+It runs as the `org` user, the same user that holds the tokens and drives Incus, so what stands
+between the chat and that power is all here.
 
 | Layer | Stops | Enforced by |
 |---|---|---|
-| shell sandbox | shell writes outside the desk; shell reads of the login files | the operating system (bubblewrap, or Seatbelt on macOS) |
+| shell sandbox | shell writes outside the desk; shell reads of the token directory, the other places a login could be, and Incus's sockets; network beyond an allow list | the operating system (bubblewrap) |
 | `blockWritesOutsideWorkingDirectories` | the file tools writing outside the desk | the harness |
-| deny rules | pushes and other commands that change GitHub; reading the login files | the harness |
-| ask rules | approve, dispatch, stop, exec | the harness, by asking the person, in every permission mode |
+| deny rules | edits to approved specs, run records and `config.json`; reading the token and login paths; `incus`, `sudo`, `su`, `docker`; every `mcp__*` tool; pushes and other commands that change GitHub | the harness |
+| ask rules | approve, dispatch, stop, resume, exec, `machine rm`, drain, undrain, upgrade, up, down, `config set`; ssh | the harness, by asking the person, in every permission mode |
+| no GitHub token | anything on GitHub that needs a login | the session's environment is stripped of one, and the file is hidden by the two layers above |
+| managed settings | MCP servers and claude.ai connectors | root-owned files in `/etc/claude-code`, and `ENABLE_CLAUDEAI_MCP_SERVERS=false` at launch |
 
-`org` and `gh` run outside the sandbox (`org` must write the ledger and reach machines; `gh`
-needs its token) and are governed by rules instead.
+`org` runs outside the sandbox, because it must write the ledger and reach the containers, and is
+governed by rules instead. Nothing else is excluded.
 
-**The exemption holds only for a command that is `org` or `gh` and nothing else.** In a pipe, or
-after `cd … &&`, the harness sandboxes the whole line, and `gh` then finds no login. Seen in the
-first real conversation: asked for the person's repositories, the manager ran
-`gh repo list | grep`, read "not logged in", and reported that it had no GitHub access. The
-login was there. A sandboxed session is now told this in its prompt, and told to run the
-command again on its own.
+**The exemption holds only for a command that is `org` and nothing else.** In a pipe, or after
+`cd … &&`, the harness sandboxes the whole line, and an `org` command that writes then fails. A
+sandboxed session is told this in its prompt.
 
-**Private repositories reach the manager through `org clone <owner/name>`**, because git inside
-the sandbox has no login either. The command takes a repository name or URL and nothing else,
-so it cannot be turned into another git invocation, clones into `desk/scratch/<name>`, fetches
-when the copy exists, and points the copy's push URL nowhere. The manager may run it without
-asking. Putting the token inside the sandbox would have been simpler and was rejected: every
-sandboxed command could then read it, and the token can push.
+**The manager has no GitHub login, by decision.** In the previous layout the chat's `gh` ran
+outside the sandbox with the person's login, and git inside the sandbox had none, so private
+repositories arrived through `org clone`. The first real conversation showed the cost: asked for
+the person's repositories, the manager ran `gh repo list | grep`, which the harness sandboxed as
+a whole line, read "not logged in", and reported that it had no GitHub access. A read-only token
+for the manager was the fix on the list. The fix taken is wider: every repository is public, so
+the manager reads them with no login, `gh` is no longer excluded from the sandbox, and the
+session's environment is stripped of any GitHub token. `org repos` lists the organization's
+repositories through GitHub's public API. `org clone <owner/name>` takes a repository name or
+URL and nothing else, so it cannot be turned into another git invocation, runs git with no
+credential helper, clones into `desk/scratch/<name>`, fetches when the copy exists, and points
+the copy's push URL nowhere. A change on GitHub made by the chat is therefore not something a
+deny rule has to catch: there is nothing to make it with.
 
-**What the chat must not reach inside the manager's machine** is the host agent's socket: whoever
-can write to it can run anything on any engineer's machine. Sandboxed shell commands get no Unix
-sockets, so the chat cannot open it, and `org exec`, which can, always asks the person. The same
-holds for the machine's own Docker daemon. Both are in the live check.
+**What the chat can still reach over the network** is the sandbox's allow list
+(`manager.network_allow`: `github.com`, `*.github.com`, `*.githubusercontent.com`) from its
+shell, and the web through its search and fetch tools.
+
+**The Claude token is in the chat's own session.** The session makes its model requests with
+it, so it is in that process's environment. Hiding `/run/org` keeps the chat from the GitHub
+token and from the Claude token as a file. Whether a shell command the chat runs can see the
+environment variable depends on Claude Code and was not checked; the token it would find makes
+model requests and nothing else.
+
+**What the chat must not reach inside the VM** is Incus: whoever can write to its socket can
+enter every engineer's container, where both tokens are. The sandbox hides the sockets, the deny
+rules refuse `incus` (and `sudo`, `su` and `docker`), and `org exec`, which can enter a
+container, always asks the person. The deny rules match the form a model normally writes and are
+a guard against an overeager manager; the sandbox is the wall. The live check knocks on a
+stand-in Unix socket to prove the chat cannot speak to one, and that check has not been run in
+this layout yet.
 
 **The sandbox is the mechanism, so it is required when it exists.** `org talk` probes whether
 the sandbox can start. If it can, the session is told to refuse to run without it. If it cannot,
@@ -341,15 +476,12 @@ permission prompts, the classifier allowed a `git branch` in a repository outsid
 guarantee that depends on a classifier's judgment is not a guarantee, so without a sandbox the
 prompt goes to the person.
 
-**Inside an OrbStack machine the sandbox needs nothing special**: bubblewrap can make its
-namespaces there. **Inside a container it needs two Docker options** on the manager:
-`seccomp=unconfined`, or bubblewrap cannot create its namespaces, and `systempaths=unconfined`,
-or it cannot mount its own `/proc`. Claude Code offers a weaker nested mode that avoids the
-second, at the price of showing sandboxed commands the container's other processes; the full
-sandbox was chosen. Both options weaken the manager container's own wall, which is not a
-boundary anyway for something that holds the Docker socket.
+**In the VM the sandbox needs nothing special**: bubblewrap can make its namespaces for the
+`org` user there. It can inside an engineer's container too, which matters for an engineer that
+works on org itself.
 
-**What the live check taught**, beyond the above (`tests/live_manager_rules.py`, thirteen outcomes):
+**What the live check taught**, in the layouts before this one (`tests/live_manager_rules.py`,
+fourteen attempted actions judged by outcome). The rules that came of it are unchanged:
 
 - Read-only shell commands are auto-allowed only inside the working directory, and a bare `Read`
   rule does not satisfy the path check on `ls` and `cat`: the rules carry `Read(//**)` and an
@@ -359,85 +491,127 @@ boundary anyway for something that holds the Docker socket.
 - A push written as `git -C <dir> push` does not match a deny rule for `git push`: both forms
   are denied.
 
+## GitHub
+
+All repositories live in one organization and all of them are public. `github.owner` names the
+organization, and `org spec check` refuses a repository outside it.
+
+**Why one organization.** A fine-grained token names one resource owner. Putting every
+repository engineers work on under that owner is what lets the token be the whole of an
+engineer's reach on GitHub, and keeps `org-host`, in a personal account, outside it.
+
+**Why public.** The manager then needs no token at all, and `org-host` notes that the branch
+ruleset and secret scanning it applies need a public repository. The price is that everything
+engineers write is published and that strangers can write back.
+
+**The pull-request rule is an audit trail, not an approval gate.** The person and the engineers
+are the same GitHub account. `org-host`'s `org-github` makes each default branch
+pull-request-only with nobody exempt, which records what was merged; it does not stop an
+engineer merging its own pull request. For this repository the gate is `org upgrade`, where the
+person reads the diff before the code runs beside the tokens.
+
+**Public repositories are an input channel.** Text a stranger writes in an issue, a pull request
+or a comment can reach the manager or an engineer. Both prompts say that such text is something
+to read and never an instruction, and `org-github` turns issues, wikis and discussions off. The
+first is a rule a model follows; only the second is a setting.
+
 ## Trust
 
 | Who | Holds | Can |
 |---|---|---|
-| the person | everything | everything |
-| manager chat | read access to the manager's machine; the desk | draft; propose approve, dispatch, stop, exec |
-| `org` program in the manager | the ledger; the agent's socket; the logins | whatever the person or the page asks of it |
-| host agent, on the Mac | the `orb` command | clone the template into `org-eng-…`; run a script in, and delete, machines so named |
-| engineer | its machine; the logins placed there | anything those logins allow, from its own machine |
+| the person | the Mac, the Keychain, the GitHub account | everything |
+| `org-host` on the Mac | Lima; the two tokens, from the Keychain | start, stop and delete the VM; pipe the tokens in; run commands in it |
+| `admin` and root in the VM | sudo; the firewall; `/etc/claude-code`; Incus | everything in the VM; used only by `org-vm` and its provisioning |
+| the `org` program in the VM | the ledger; both tokens; the `org` user's Incus project | create, enter and delete containers there; whatever the person or the page asks of it |
+| manager chat | read access to what the `org` user can read, less the tokens; the desk | draft; propose approve, dispatch, stop, exec and the rest of the person's decisions |
+| engineer | root in its container; copies of both tokens | anything in its container; on GitHub and the model, what the tokens allow |
 | dashboard page | the access token | approve, stop, ask |
+| a stranger on GitHub | a public repository to read | write text that an agent may read |
 
-- An engineer runs with permissions bypassed, so its machine is the boundary. An isolated machine
-  has none of the Mac's files and cannot run commands on the Mac or reach it over the network.
-  Outside the machine, an engineer can do exactly what its GitHub login and Claude token allow: a
-  token scoped to the repositories in play narrows that. The default delivery is a pull request,
-  not a merge.
-- The template is the root of what engineers hold. Everything in `org-base` is in every
-  engineer's machine, so a template cloned from a machine the person works in (`--from`) carries
-  that machine's files and logins to every engineer.
-- The manager's machine holds no power over the Mac. What it can ask of the agent is bounded by
-  the prefix; the worst a compromised `org` program can do there is create, enter and delete
-  engineers' machines, which is its job.
-- Machines share a network. An engineer can reach the internet and any port another machine opens
-  on its network address. The manager opens none: the dashboard is on its loopback and the agent's
-  link is a Unix socket. OrbStack's `--isolate-network` option did not stop one machine reaching
-  another when tried (OrbStack 2.2.5), so it is not relied on.
-- OrbStack forwards every machine's listening ports to the Mac's localhost. A server an engineer
-  starts is reachable there. If one listened on the dashboard's port while the manager was
-  stopped, a bookmark of the dashboard would open the engineer's page, and that page could read
-  the token from the URL. With both listening, the manager's page was the one shown, in either
-  order of starting (two trials; OrbStack does not document a rule). Nothing in org checks whose
-  page it is opening.
+- An engineer runs with permissions bypassed, so its container is the boundary: unprivileged,
+  no device but its disk and an isolated network card, and behind it a VM with nothing of the
+  Mac's in it. Outside the container an engineer can do exactly what the two tokens allow, and it
+  can reach the internet, so it could also send the tokens anywhere. Their scope is the limit:
+  one organization's code and pull requests, and model requests. The default delivery is a pull
+  request, and an engineer could merge it.
+- All engineers and the manager share the VM's kernel. A kernel exploit from a container reaches
+  the VM, which holds both tokens, the ledger and every engineer, and still nothing of the Mac's.
+- The `org` user is the control plane. It holds both tokens and can enter every engineer's
+  container. As `org-host` sets the VM up, it cannot leave its Incus project, become root, or
+  change the firewall or Claude Code's managed settings.
+- The template is the root of what engineers start with. It holds tools and settings and no
+  login, and it is only ever copied.
+- An engineer cannot reach the manager: not the dashboard, not the ledger, not another
+  engineer. What travels back is the snapshot, and sync takes only named files and known states
+  from it.
+- The Mac is reached by one port, and what answers on it is the dashboard. When the web-app view
+  is on, that same port also serves pages an engineer wrote, at their own origins.
 
 ## What has been checked
 
+On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 and Claude Code
+2.1.330.
+
 | Claim | How |
 |---|---|
-| runner: phases, recovery, caps, stop, resume, replanning, the run lock | unit tests against a scripted stand-in for the CLI |
-| the agent: the prefix check, exec with input and exit status, concurrent requests, reconnecting, a second bridge, slots and the queue, refusing a machine that sees the Mac | unit tests with the real agent and bridge against a stand-in `orb` |
-| `org up` and `org down`: template, manager, logins, the agent's lifecycle, a second `up`, `--from`, and a spec from draft to finished run through the wrapper | `tests/test_up.py`, the real scripts against the stand-in `orb` |
-| `org up` on a Mac | real OrbStack 2.2.5: from nothing in under a minute, again in two seconds, after `org down`, and a second installation beside the first with `--from` and other names |
-| a real engineer plans, builds, pushes and reports in a machine created through the agent | `tests/e2e.py` inside the manager, on a ledger of its own and on the manager's; the script repeats the acceptance checks itself; the machine is deleted through the agent afterwards |
-| the same with the manager on the Mac and no agent | `ORG_LOCAL=1 python3 tests/e2e.py --machine orb --base org-base` |
-| the manager's confinement | `tests/live_manager_rules.py` inside the manager's machine with the sandbox live, in the default and auto modes: thirteen outcomes, among them that the agent's socket and the Docker daemon are out of the chat's reach |
-| the manager chat starts in its machine with no first-run screens, and answers from `org status` | by hand, in a terminal |
-| the manager reaches a private repository from its sandboxed chat | a headless session under `org talk`'s settings and prompt, sonnet at low effort, asked for a project by an inexact name: its first `gh … \| grep` was told nobody was logged in, it ran `gh` again on its own, found the repository, and `org clone` put it in scratch |
-| Docker in an engineer's machine | a pull and a run inside an isolated machine and inside a clone of it; the daemon answers on the first try after the clone starts |
-| what an isolated machine cannot do | no `/mnt/mac`, no `/mnt/machines`, `mac` refused, no connection to a listener on the Mac |
-| the pipe the agent depends on | line by line through `orb -m` with a 20 second silence and a 200 kB line; what the far end sees when the client is terminated, killed, or closes its stdin |
-| the dashboard's port | answers on the Mac's localhost through OrbStack's forwarding; the agent's own relay returns the identical page; another machine cannot reach it |
-| logins reach an engineer over stdin and never on a command line | unit test over every recorded client call |
-| the manager's refinement | `tests/live_manager_refine.py`: a request with a false premise; it read the code and said so (run in the container version) |
-| the page | a real browser, light, dark and phone width; no console errors (in the container version) |
-| Python 3.9 and 3.13 | the whole suite under 3.9 on macOS and 3.13 on Linux |
-| the Docker plugin | as the container version was: `org up` against a real daemon on Linux, real engineers in containers locally and over ssh. Not run again since it became a plugin, beyond its unit tests |
+| the runner, the manager's side, the Incus backend (the prefix check, `vet`, slots, draining, reaping, resuming a stopped container, tokens over stdin and never on a command line), the dashboard's API, the Docker backend | the unit suite, inside the VM under Python 3.13: a scripted stand-in for the claude CLI, and simulated incus and docker |
+| `org up` in the VM from nothing | it installed the release, installed Claude Code, built the template and started the dashboard service; `org doctor` then reported only the missing tokens and git identity |
+| what a container can reach | from a real container the internet answered; the Lima gateway (192.168.5.2), the VM's own addresses, the Mac's LAN address, the LAN router and a second container did not |
+| Docker in an engineer's container | it installed, pulled, built and ran inside a container |
+| the sandbox's footing | bubblewrap worked for the `org` user in the VM and inside a container |
+| the cost of a copy | a copy of a container took about 0.06 s |
+| the path from dispatch to status, on real Incus | `tests/e2e.py --machine incus` with no tokens in the VM: the container was copied from the template, vetted, given its bundle, the runner started, and status flowed back. The engineer's model calls answered "Not logged in", as expected without a token |
 
-Not checked: the agent's link held open for hours (it has run for minutes); a restart of the Mac;
-`org up --from` a machine that is not isolated, where the script isolates the clone; a template on
-a distribution other than Debian (creating an isolated Arch machine failed in OrbStack on the day
-this was tested, on an Arch package conflict, which is why Debian is the default); ssh machines
-alongside OrbStack ones.
+Not yet exercised:
+
+- Any real model call in the VM: the manager chat, `org ask`, an engineer finishing a run. The
+  tokens have not been handed in yet.
+- `tests/live_manager_rules.py` and `tests/live_manager_refine.py` in this layout.
+- `org upgrade` and its rollback against a real repository.
+- `org drain`, `org undrain` and `org resume --interrupted` on a real installation.
+- A restart of the VM.
+- The web-app view.
+- Nested Incus inside an engineer's container, for an engineer that works on org itself. Only
+  the bubblewrap part of that was checked.
+- ssh machines beside the containers.
+
+`org-host`'s README lists what was checked of the VM's own walls. The layouts before this one
+(Docker containers, then OrbStack machines) had their own live checks, among them a real
+engineer finishing the smoke spec, the manager's confinement with the sandbox live, the
+two-turn refinement, and the page in a real browser. None of those has been repeated here, and
+none is claimed for this layout.
 
 ## Alternatives considered
 
-- **Docker containers for everything.** Built first and kept as a plugin. Docker's daemon is a
-  ready-made agent with an access model, and the host needs only an engine. It lost as the
-  default because an engineer in a container cannot run Docker, and because holding the socket
-  makes the manager root on the Docker host.
-- **The agent listening on the Mac.** Simpler than dialling in, but an isolated machine cannot
-  reach the Mac, and a machine that could would no longer be isolated. Something listening on the
-  Mac would also be reachable by every other machine.
-- **A launchd unit for the agent.** It would survive a restart by itself. It is also a thing
-  installed on the Mac that outlives `org down` unless removed with care, and `org up` already
-  takes two seconds.
-- **Installing per run instead of cloning a template.** No template to keep, but minutes per run
+- **Docker containers for everything.** Built first. Docker's daemon is a ready-made agent with
+  an access model, and the host needs only an engine. It lost because an engineer in a container
+  cannot run Docker, and because holding the socket makes the manager root on the Docker host.
+  The plugin that remains is unmaintained.
+- **OrbStack machines.** The default before this one: the manager and every engineer as isolated
+  OrbStack machines, created for the manager by a host agent on the Mac. It was left for three
+  reasons. The Mac had to run code from this repository, the host agent and `org up`, which
+  engineers can change. The machines shared a kernel and a network with the person's other
+  OrbStack machines. And OrbStack forwards every machine's listening ports to the Mac's
+  localhost, so a server an engineer started appeared there.
+- **A Lima VM with Incus inside.** Chosen. Both are open source. One file, `lima.yaml`, lists
+  every door between the VM and the Mac, and the Mac runs nothing else. Engineers are system
+  containers that nest, so an engineer can in principle stand up a copy of org, containers and
+  all, to test a change to it; of that, only bubblewrap inside a container has been checked.
+- **A machine of its own for the manager.** Kept through the OrbStack layout. Inside a VM that
+  already has nothing of the Mac's it is a second copy of the same wall, and the manager has to
+  sit where it can drive Incus anyway.
+- **Logins baked into the template.** Simpler at dispatch, since every copy would have them.
+  It puts the tokens on disk and in every container whether or not a run needs them, and a
+  renewed token needs a new template. The template is blank and each run is handed its tokens.
+- **Logging in inside the VM** (`claude /login`, `gh auth login`). Those logins are the whole
+  account: connectors, every repository. Two narrow tokens handed in from outside are not.
+- **A read-only GitHub token for the manager.** It would have let the manager read private
+  repositories. Public repositories and no token leave nothing to steal from the chat.
+- **Installing per run instead of copying a template.** No template to keep, but minutes per run
   and a dependency on package mirrors at dispatch time.
 - **A shared mount instead of running a command per sync.** Mounting every run directory into the
-  manager would make sync a file read. Isolated machines share no files, which is the point of
-  them, and a command works for every kind of machine, so there is one mechanism.
+  manager's side would make sync a file read. `vet` refuses a container that shares a directory
+  with the VM, which is the point of it, and a command works for every kind of machine.
 - **Claude Code's own background sessions** (`claude --bg`, `claude agents --json`). They run on
   the local machine only and report state but not cost. The headless stream is the documented
   interface and carries cost, limits and structured output.
@@ -445,21 +619,31 @@ alongside OrbStack ones.
 - **Git as the bus between manager and engineers.** Durable, but a heartbeat every few seconds
   makes a poor commit history, and it needs a repository before there is a project.
 - **Engineers pushing status to the manager.** Simpler to write, but it needs a route from every
-  machine back to the manager, which is the isolation being given up.
+  container back to the manager, which is the isolation being given up.
 - **One long engineer turn.** No cost checkpoints, no enforceable caps, no progress to show.
 - **Letting the manager approve when the person says "approve" in chat.** The model would be
   judging whether it had permission. A harness prompt does not depend on that judgment.
 
 ## Known gaps
 
+- Nothing in this layout has made a real model call yet; see what has been checked.
+- An engineer can merge its own pull request. The ruleset records; it does not gate.
+- An engineer holds both tokens and reaches the internet. Their scope bounds what a leaked one
+  can do; nothing prevents the leak.
+- All engineers and the manager share one kernel, and the `org` user holds both tokens and can
+  enter every container.
+- An engineer is root in its container and can undo the Claude Code settings there.
+- Public repositories are an input channel. Issues are off; a stranger's text in a pull request
+  is kept from being an instruction only by the prompts.
+- The firewall fences the containers, not the `org` user's own processes. The manager's shell is
+  held by the sandbox's allow list instead, and its search and fetch tools reach the web.
+- `vet` runs at dispatch and is not repeated while a run is going.
+- Nothing restarts anything after the Mac restarts. `org-vm up` and then
+  `org resume --interrupted` do.
+- A finished run's container stays until `org machine rm`, and old releases and old templates
+  stay until someone deletes them; nothing reclaims the disk by itself.
+- A rollback moves links. It does not undo what the newer release wrote.
 - A run's share of the weekly limit is unknown until the rate has been learned or configured.
-- The sandbox keeps the manager's shell off the filesystem, but changes made over the network
-  are stopped only by deny rules for the commands that make them. A read-only GitHub token for
-  the manager, separate from the engineers', would close that; today both use one login.
-- Nothing restarts the host agent after the Mac restarts; `org up` does.
-- Machines can reach each other over the network, and their ports reach the Mac's localhost.
-- A finished run's machine stays until `org machine rm`; nothing reclaims the disk by itself.
 - One engineer per spec. A spec too large for one engineer is the manager's to split.
 - No notification when a run finishes; the page and `org status` have to be looked at.
-- The template is built once and is not rebuilt when `orbstack/bootstrap.sh` changes; a new tool
-  reaches existing installations by `orb -m org-base`, or by `org down --purge` and `org up`.
+- The Docker plugin's host script still asks for a whole GitHub login and should not be used.
