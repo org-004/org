@@ -37,7 +37,8 @@ BIN = Path(__file__).resolve().parent.parent / "bin"
 
 READ_COMMANDS = ["status", "peek", "logs", "plan", "report", "review", "sync", "spec ls", "spec show", "spec check",
                  "machine ls", "project ls", "ls", "cat", "diff", "pool", "doctor", "config get", "agent status", "node ls"]
-DRAFT_COMMANDS = ["spec new", "spec revise", "project add", "init"]
+# What a conversation may do by itself: drafts, the list of projects, a scratch copy of a repository.
+DRAFT_COMMANDS = ["spec new", "spec revise", "project add", "clone", "init"]
 # Decisions that are the person's. `exec` is among them: it runs anything on an engineer's machine.
 # So are the commands that change where engineers run or how many, and the installation itself.
 HUMAN_COMMANDS = ["approve", "dispatch", "stop", "resume", "machine rm", "exec", "pump", "login",
@@ -210,7 +211,14 @@ def machines_help(cfg: dict) -> str:
     return text + " Leave it out unless there is a reason: the default is what this installation is set up for."
 
 
-def persona(ledger: Ledger, live_state: bool = True, extra: str = "") -> str:
+# Said only to a session whose shell is sandboxed. Seen live, 2026-11-22: asked for the person's
+# repositories, the manager ran `gh repo list ... | grep`, was told nobody was logged in, and
+# reported that it had no GitHub access. The login was there; the pipe had put gh in the sandbox.
+SANDBOX_NOTE = """
+- Your shell commands run in a sandbox that cannot read the person's GitHub login. `org` and `gh` are let out of it, but only when one of them is the whole command: no pipe, no redirect, no `;` or `&&`, no `cd` in front. Written any other way, `gh` runs inside the sandbox and says nobody is logged in, and an `org` command that writes fails. That message is the sandbox, not a missing login: run the command again on its own and read all of what it prints. `git clone` and `git fetch` typed directly are always inside the sandbox, so they reach public repositories only; `org clone` is for the rest."""
+
+
+def persona(ledger: Ledger, live_state: bool = True, extra: str = "", with_sandbox: bool = False) -> str:
     if live_state:
         state = status.render(status.collect(ledger, do_sync=False), width=160)
         projects = ledger.projects()
@@ -222,7 +230,7 @@ def persona(ledger: Ledger, live_state: bool = True, extra: str = "") -> str:
     else:
         state = "(sent with each question)"
     return render(read_text(PROMPTS / "manager.md"), desk=ledger.desk, root=ledger.root, state=state,
-                  machines=machines_help(ledger.config())) + extra
+                  machines=machines_help(ledger.config()), sandbox_note=SANDBOX_NOTE if with_sandbox else "") + extra
 
 
 def _claude(ledger: Ledger) -> Optional[str]:
@@ -271,7 +279,7 @@ def talk(ledger: Ledger, prompt: Optional[str] = None, project: Optional[str] = 
     mode = session_mode(ledger, with_sandbox)
     if dry_run:
         print("would run, in %s:\n  %s --append-system-prompt <persona, %d characters> --settings <below> --name 'org manager'%s\n"
-              % (ledger.desk, claude, len(persona(ledger)), (" --permission-mode " + mode) if mode else ""))
+              % (ledger.desk, claude, len(persona(ledger, with_sandbox=with_sandbox)), (" --permission-mode " + mode) if mode else ""))
         print("shell sandbox: %s\n" % ("on" if with_sandbox else "not available here, so the session asks before shell commands that are not reads"))
         print(json.dumps(settings(ledger, "talk", with_sandbox), indent=2))
         return 0
@@ -284,7 +292,8 @@ def talk(ledger: Ledger, prompt: Optional[str] = None, project: Optional[str] = 
     if not with_sandbox and mgr.get("sandbox", True):
         print("org: no shell sandbox on this machine; the manager will ask before any shell command that is not a read.\n"
               "     `org doctor` says what is missing.", file=sys.stderr)
-    cmd = [claude, "--append-system-prompt", persona(ledger), "--settings", json.dumps(settings(ledger, "talk", with_sandbox)),
+    cmd = [claude, "--append-system-prompt", persona(ledger, with_sandbox=with_sandbox),
+           "--settings", json.dumps(settings(ledger, "talk", with_sandbox)),
            "--name", "org manager"]
     for flag, key in (("--model", "model"), ("--effort", "effort")):
         if mgr.get(key):

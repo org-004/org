@@ -229,6 +229,22 @@ class ManagerSettings(unittest.TestCase):
         self.assertIn("No runs yet.", text)
         self.assertNotIn("{{", text)
 
+    def test_the_manager_can_fetch_a_repository_and_knows_what_the_sandbox_hides(self):
+        talk = manager.settings(self.ledger, "talk", with_sandbox=True)["permissions"]
+        self.assertIn("Bash(org clone *)", talk["allow"])
+        self.assertIn("Bash(org project add *)", talk["allow"])
+        self.assertNotIn("Bash(org clone *)", manager.settings(self.ledger, "ask")["permissions"]["allow"], "question mode writes nothing")
+        plain, sandboxed = manager.persona(self.ledger), manager.persona(self.ledger, with_sandbox=True)
+        for text in (plain, sandboxed):
+            self.assertIn("`org clone <owner/name>` puts a repository there, private or not, as `%s/scratch/<name>`" % self.ledger.desk, text)
+            self.assertIn("org project add <name> --repo <owner/name>", text)
+            self.assertNotIn("{{", text)
+        # gh in a pipe runs inside the sandbox and reports no login. The manager has to be told,
+        # or it concludes there is none; where there is no sandbox there is nothing to tell.
+        self.assertIn("only when one of them is the whole command", sandboxed)
+        self.assertIn("That message is the sandbox, not a missing login", sandboxed)
+        self.assertNotIn("sandbox that cannot read", plain)
+
     def test_persona_offers_the_machines_this_installation_has(self):
         text = manager.persona(self.ledger)
         self.assertIn("`machine` is `orb` (a fresh OrbStack machine for the run, cloned from the template), the default.", text)

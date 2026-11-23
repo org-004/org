@@ -40,7 +40,8 @@ cap it at $5 and one hour, delivery `branch`. Write the spec and show me what I 
 
 def turn(claude, ledger, env, session, text, first, model, effort):
     cmd = [claude, "-p", "--output-format", "stream-json", "--verbose", "--model", model, "--effort", effort,
-           "--append-system-prompt", manager.persona(ledger), "--settings", json.dumps(manager.settings(ledger, "talk")),
+           "--append-system-prompt", manager.persona(ledger, with_sandbox=manager.sandboxed(ledger)),
+           "--settings", json.dumps(manager.settings(ledger, "talk")),
            "--permission-prompts", "none"]
     cmd += ["--session-id", session] if first else ["--resume", session]
     p = subprocess.run(cmd, input=text.encode(), capture_output=True, cwd=str(ledger.desk), env=env, timeout=1500)

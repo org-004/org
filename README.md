@@ -117,6 +117,15 @@ What holds that:
 - **Rules.** Read commands are allowed. `org approve`, `dispatch`, `stop` and `exec` always ask
   you, in every permission mode. Pushes and other commands that change GitHub are refused.
 
+The sandbox also keeps your GitHub login from the manager's shell, so a `git clone` typed there
+reaches public repositories only. `org clone <owner/name>` is how a private one arrives: it runs
+outside the sandbox, takes a repository and nothing else, and leaves the copy in
+`desk/scratch/<name>` with nowhere to push. `gh` reads GitHub as you when it is the whole
+command; in a pipe it runs inside the sandbox and reports no login, which the manager is told.
+
+You do not register a project first. Name it in the conversation: the manager looks for the
+repository among yours, confirms the match, and records it with `org project add`.
+
 Where there is no working sandbox, `org talk` says so and starts the session in the ask-first
 permission mode, so that a write to a checkout is always your decision and never a classifier's.
 
@@ -126,8 +135,9 @@ actions against the real harness and judges by outcome.
 `org ask` and the dashboard's chat box are the same persona, headless and read-only: nothing
 that would need permission can run. It runs on a cheaper model (`manager.ask_model`).
 
-The manager's Claude Code is a fresh install, so `org talk` runs on that install's default model
-until you choose one: `org config set manager.model opus`.
+The Claude Code in the manager's machine is a fresh install whose default is a smaller model, so
+`org up` sets the manager chat to `fable` at high effort. `org config set manager.model <model>`
+and `manager.effort` change that, and a later `org up` keeps what you chose.
 
 The manager keeps a brief per project (`desk/projects/<name>.md`): how to build and test, hot
 paths, how far estimates run over. Engineers receive it with every spec.
@@ -257,7 +267,8 @@ org plan|report|review <run>
 org ls|cat|diff <run>           an engineer's files        org exec <run> -- <cmd>
 org stop <run>                  org resume <run>           org machine ls | rm <run>
 org pool                        org pump                   org config get|set <key> [value]
-org project add <name> --repo owner/name
+org project add <name> --repo owner/name                   org project ls
+org clone <owner/name>          a repository, private or not, into the manager's scratch space
 org doctor                      org agent status           org init
 ```
 
@@ -387,8 +398,10 @@ On a Mac with OrbStack 2.2.5:
   and other names; a real engineer finishing the smoke spec in a machine created
   through the host agent, on a temporary ledger and on the manager's own, and with the manager on
   the Mac and no agent; the manager chat starting in its machine with no first-run screens and
-  answering from `org status`; the manager's confinement inside its machine with the shell
-  sandbox live, in the default and auto permission modes; Docker building and running inside an
+  answering from `org status`; the manager finding a private repository among yours and
+  cloning it with `org clone`, from its sandboxed chat; the manager's confinement inside its
+  machine with the shell sandbox live, in the default and auto permission modes; Docker building
+  and running inside an
   isolated machine; the dashboard reaching the Mac's localhost, and the agent's own relay for
   where it does not; the unit suite under Python 3.9 on macOS and 3.13 on Linux.
 - **Simulated only:** ssh machines beside OrbStack ones; `org up --from` a machine that is not

@@ -480,5 +480,81 @@ class ManagerSide(unittest.TestCase):
         self.assertIn(str(self.ledger.draft_path(spec_id)), org("spec", "check", str(self.ledger.draft_path(spec_id))).stdout)
 
 
+class ScratchClone(unittest.TestCase):
+    """`org clone`: a repository in the manager's scratch space, by name and nothing else."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="org-clone-", dir="/tmp")).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.ledger = Ledger(self.tmp / "ledger")
+        # GitHub, for this test, is a directory: git rewrites the URL, org never sees the difference.
+        self.remotes = self.tmp / "github"
+        gitconfig = self.tmp / "gitconfig"
+        gitconfig.write_text('[user]\n\tname = T\n\temail = t@example.com\n[init]\n\tdefaultBranch = main\n'
+                             '[url "%s/"]\n\tinsteadOf = https://github.com/\n' % self.remotes)
+        self.env = dict(os.environ, GIT_CONFIG_GLOBAL=str(gitconfig), GIT_CONFIG_NOSYSTEM="1", HOME=str(self.tmp))
+        self.remote = self.remotes / "acme" / "web.git"
+        self.remote.mkdir(parents=True)
+        self.git(self.remote, "init", "-q")
+        self.commit("first")
+
+    def git(self, where, *args):
+        p = subprocess.run(["git", "-C", str(where)] + list(args), capture_output=True, text=True, env=self.env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout.strip()
+
+    def commit(self, text):
+        (self.remote / "README").write_text(text + "\n")
+        self.git(self.remote, "add", "README")
+        self.git(self.remote, "commit", "-q", "-m", text)
+
+    def org(self, *args):
+        return subprocess.run([sys.executable, "-m", "org", "--home", str(self.ledger.root)] + list(args),
+                              capture_output=True, text=True, cwd=str(ROOT), env=self.env, timeout=60)
+
+    def test_a_repository_arrives_in_scratch_and_is_fetched_the_next_time(self):
+        copy = self.ledger.scratch / "web"
+        p = self.org("clone", "acme/web")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(p.stdout.startswith(str(copy) + "  main  "), p.stdout)
+        self.assertIn("first", p.stdout)
+        self.assertEqual((copy / "README").read_text(), "first\n")
+        self.assertEqual(self.git(copy, "config", "--get", "remote.origin.url"), "https://github.com/acme/web.git")
+        self.assertEqual(self.git(copy, "config", "--get", "remote.origin.pushurl"), "no-push://scratch-copy",
+                         "a scratch copy has nowhere to push")
+
+        self.commit("second")
+        p = self.org("clone", "acme/web")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("fetched; the checked-out branch is 1 commit behind", p.stdout)
+        self.assertEqual((copy / "README").read_text(), "first\n", "the working tree is the manager's to move")
+        self.git(copy, "merge", "-q", "--ff-only")
+        # The same repository, named by its URL, is the same copy.
+        p = self.org("clone", "https://github.com/acme/web")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("fetched; up to date", p.stdout)
+
+    def test_only_a_repository_can_be_named(self):
+        for bad in ("../web", "/tmp/web", str(self.remote), "acme/web --upload-pack=x", "acme/web;id", "ext::sh -c id",
+                    "file:///tmp/web", "acme/.git", "acme"):
+            p = self.org("clone", bad)
+            self.assertEqual(p.returncode, 1, bad)
+            self.assertIn("is not a repository", p.stderr, bad)
+        self.assertNotEqual(self.org("clone", "--upload-pack=x", "acme/web").returncode, 0, "an option is not a repository either")
+        self.assertEqual(list(self.ledger.scratch.iterdir()) if self.ledger.scratch.exists() else [], [])
+
+    def test_what_is_already_there_is_not_replaced_and_a_failed_clone_leaves_nothing(self):
+        (self.ledger.scratch / "web").mkdir(parents=True)
+        (self.ledger.scratch / "web" / "notes").write_text("mine\n")
+        p = self.org("clone", "acme/web")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("is already there and is not a clone of https://github.com/acme/web.git", p.stderr)
+        self.assertEqual((self.ledger.scratch / "web" / "notes").read_text(), "mine\n")
+        p = self.org("clone", "acme/missing")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("could not clone https://github.com/acme/missing.git", p.stderr)
+        self.assertFalse((self.ledger.scratch / "missing").exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

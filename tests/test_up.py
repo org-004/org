@@ -125,6 +125,8 @@ class Up(UpCase):
         self.assertEqual(cfg["machines"]["default"], "orb")
         self.assertEqual(cfg["machines"]["orb"], {"via": "agent", "base": "org-base", "prefix": "org-eng-", "slots": 2})
         self.assertEqual((cfg["dash"]["port"], cfg["manager"]["own_claude"]), (self.port, True))
+        self.assertEqual((cfg["manager"]["model"], cfg["manager"]["effort"]), ("fable", "high"),
+                         "the manager chat is not left on a fresh install's default model")
 
         # The agent: one process on the Mac, connected.
         self.assertEqual(json.loads((self.host_dir / "agent.json").read_text()),
@@ -162,11 +164,13 @@ class Up(UpCase):
 
         # A second `org up` keeps the machines and the ledger, and replaces the agent.
         before = len([c for c in self.calls() if c[0] in ("create", "clone")])
+        self.org("config", "set", "manager.model", "opus")
         out = self.org("up").stdout
         self.assertIn("ready.", out)
         self.assertEqual(len([c for c in self.calls() if c[0] in ("create", "clone")]), before, "nothing is created twice")
         self.assertIn(spec_id, self.org("spec", "ls").stdout)
         self.assertEqual(self.org("config", "get", "machines.orb.slots").stdout.strip(), "2", "a later up keeps the pool's size")
+        self.assertEqual(self.org("config", "get", "manager.model").stdout.strip(), '"opus"', "and the model that was chosen")
         second = self.agent_pid()
         self.assertNotEqual(first, second)
         self.assertFalse(self.alive(first), "the earlier agent was stopped")

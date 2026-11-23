@@ -216,6 +216,10 @@ in_machine "$manager" '
   "$org" config set manager.own_claude true >/dev/null
   if [ -n "$3" ]; then "$org" config set machines.orb.slots "$3" >/dev/null
   elif [ "$("$org" config get machines.orb.slots)" = null ]; then "$org" config set machines.orb.slots 4 >/dev/null; fi
+  # The Claude Code in this machine is a fresh install, and its default model is not the one to
+  # write specs with. A choice already made is kept.
+  if [ "$("$org" config get manager.model)" = null ]; then "$org" config set manager.model fable >/dev/null; fi
+  if [ "$("$org" config get manager.effort)" = null ]; then "$org" config set manager.effort high >/dev/null; fi
 ' org "$template" "$prefix" "$slots" "$port" || die "could not set up the ledger in $manager"
 
 # ---- the host agent

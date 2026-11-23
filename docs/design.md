@@ -314,6 +314,20 @@ The manager must be able to read everything and run anything, and change nothing
 `org` and `gh` run outside the sandbox (`org` must write the ledger and reach machines; `gh`
 needs its token) and are governed by rules instead.
 
+**The exemption holds only for a command that is `org` or `gh` and nothing else.** In a pipe, or
+after `cd … &&`, the harness sandboxes the whole line, and `gh` then finds no login. Seen in the
+first real conversation: asked for the person's repositories, the manager ran
+`gh repo list | grep`, read "not logged in", and reported that it had no GitHub access. The
+login was there. A sandboxed session is now told this in its prompt, and told to run the
+command again on its own.
+
+**Private repositories reach the manager through `org clone <owner/name>`**, because git inside
+the sandbox has no login either. The command takes a repository name or URL and nothing else,
+so it cannot be turned into another git invocation, clones into `desk/scratch/<name>`, fetches
+when the copy exists, and points the copy's push URL nowhere. The manager may run it without
+asking. Putting the token inside the sandbox would have been simpler and was rejected: every
+sandboxed command could then read it, and the token can push.
+
 **What the chat must not reach inside the manager's machine** is the host agent's socket: whoever
 can write to it can run anything on any engineer's machine. Sandboxed shell commands get no Unix
 sockets, so the chat cannot open it, and `org exec`, which can, always asks the person. The same
@@ -390,6 +404,7 @@ boundary anyway for something that holds the Docker socket.
 | the same with the manager on the Mac and no agent | `ORG_LOCAL=1 python3 tests/e2e.py --machine orb --base org-base` |
 | the manager's confinement | `tests/live_manager_rules.py` inside the manager's machine with the sandbox live, in the default and auto modes: thirteen outcomes, among them that the agent's socket and the Docker daemon are out of the chat's reach |
 | the manager chat starts in its machine with no first-run screens, and answers from `org status` | by hand, in a terminal |
+| the manager reaches a private repository from its sandboxed chat | a headless session under `org talk`'s settings and prompt, sonnet at low effort, asked for a project by an inexact name: its first `gh … \| grep` was told nobody was logged in, it ran `gh` again on its own, found the repository, and `org clone` put it in scratch |
 | Docker in an engineer's machine | a pull and a run inside an isolated machine and inside a clone of it; the daemon answers on the first try after the clone starts |
 | what an isolated machine cannot do | no `/mnt/mac`, no `/mnt/machines`, `mac` refused, no connection to a listener on the Mac |
 | the pipe the agent depends on | line by line through `orb -m` with a 20 second silence and a 200 kB line; what the far end sees when the client is terminated, killed, or closes its stdin |

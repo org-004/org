@@ -17,6 +17,8 @@
     org ls|cat|diff <run> [path]   look at the files on a run's machine, read-only
     org exec <run> -- <command>    run a command on a run's machine
     org pool                       how many engineers may run at once, and what is queued
+    org project add <name> --repo  name a project's repositories   org project ls
+    org clone <owner/name>         a copy of a repository in the manager's scratch space
     org config get|set <key>       read or change config.json
     org machine rm <run>           delete the container or OrbStack machine a run used
     org login                      the logins engineers are given: Claude, GitHub, git identity
@@ -423,6 +425,78 @@ def cmd_project(args) -> int:
     return 2
 
 
+def repo_url(repo: str):
+    """(clone URL, directory name) for a repository named as owner/name or by URL; None if it is neither."""
+    import re
+
+    repo = repo.strip()
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+", repo):
+        url = "https://github.com/%s.git" % (repo[:-4] if repo.endswith(".git") else repo)
+    elif re.fullmatch(r"(https://|ssh://|git@)[A-Za-z0-9][A-Za-z0-9@:/._~+-]*", repo):
+        url = repo.rstrip("/")
+        url = url if url.endswith(".git") else url + ".git"
+    else:
+        return None
+    name = url.rstrip("/").split("/")[-1].split(":")[-1]
+    name = name[:-4] if name.endswith(".git") else name
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", name) or name.startswith("."):
+        return None
+    return url, name
+
+
+def cmd_clone(args) -> int:
+    """A copy of a repository in the manager's scratch space, to read, build and test.
+
+    The manager chat's shell is sandboxed away from the GitHub login, so a clone typed there
+    reaches public repositories only. `org` runs outside that sandbox: this is how a private one
+    arrives. It takes a repository and nothing else, so it cannot be turned into anything but a
+    clone, and the copy is left with nowhere to push.
+    """
+    import shutil
+    import subprocess
+
+    ledger = Ledger(args.home)
+    ledger.init()
+    found = repo_url(args.repo)
+    if not found:
+        die("%r is not a repository: give owner/name or an https or ssh URL" % args.repo)
+    url, name = found
+    dest = ledger.scratch / name
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    git = ["git"]
+    if shutil.which("gh"):
+        # GitHub's login, wherever gh keeps it, even where git was never told to ask gh.
+        git += ["-c", "credential.https://github.com.helper=!gh auth git-credential"]
+
+    def run(*argv, **kw):
+        return subprocess.run(git + list(argv), env=env, **kw)
+
+    if dest.exists():
+        have = run("-C", str(dest), "config", "--get", "remote.origin.url", capture_output=True, text=True)
+        if have.returncode != 0 or repo_url(have.stdout.strip()) != found:
+            die("%s is already there and is not a clone of %s%s. Remove it, or clone under another name by its URL."
+                % (dest, url, (" (its origin is %s)" % have.stdout.strip()) if have.returncode == 0 else ""))
+        if run("-C", str(dest), "fetch", "--prune", "--tags", "origin").returncode != 0:
+            die("could not fetch %s. `gh auth status`, on its own, says whether this side is logged in to GitHub." % url)
+        behind = run("-C", str(dest), "rev-list", "--count", "HEAD..@{upstream}", capture_output=True, text=True)
+        n = behind.stdout.strip() if behind.returncode == 0 else ""
+        print("%s  fetched%s" % (dest, (
+            "; up to date" if n == "0" else "; the checked-out branch is %s commit%s behind: `git merge --ff-only` in it"
+            % (n, "" if n == "1" else "s")) if n else ""))
+        return 0
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if run("clone", "--", url, str(dest)).returncode != 0:
+        shutil.rmtree(dest, ignore_errors=True)
+        die("could not clone %s. `gh repo view %s`, on its own, says whether it exists and this side may read it."
+            % (url, args.repo))
+    # A scratch copy is for reading and trying things. Nothing made in it is delivered from here.
+    run("-C", str(dest), "remote", "set-url", "--push", "origin", "no-push://scratch-copy")
+    head = run("-C", str(dest), "log", "-1", "--format=%h %ad %s", "--date=short", capture_output=True, text=True).stdout.strip()
+    branch = run("-C", str(dest), "rev-parse", "--abbrev-ref", "HEAD", capture_output=True, text=True).stdout.strip()
+    print("%s  %s  %s" % (dest, branch, head))
+    return 0
+
+
 def cmd_talk(args) -> int:
     from . import manager
 
@@ -760,6 +834,10 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--repo", action="append", help="owner/name or a clone URL; repeatable")
     a.add_argument("--path", help="a local checkout the manager may read")
     s.set_defaults(fn=cmd_project)
+
+    s = sub.add_parser("clone", help="copy a repository, private or not, into the manager's scratch space; again to fetch")
+    s.add_argument("repo", help="owner/name on GitHub, or an https or ssh URL")
+    s.set_defaults(fn=cmd_clone)
 
     s = sub.add_parser("dash", help="the dashboard as a local web page")
     s.add_argument("--port", type=int)
