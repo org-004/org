@@ -6,7 +6,7 @@ machine sees a different $HOME from the test process and from other machines. Th
 exercise provisioning, the token copy, the bundle transfer, the detached start and sync.
 
     orb create [flags] <distro> <name>     orb clone <base> <name>     orb delete -f <name>
-    orb start <name>   orb stop <name>     orb list                    orb status
+    orb start <name>   orb stop <name>     orb list                    orb status   orb config …
     orb -m <name> <argv...>                run argv with HOME set to the machine's home
 
 A clone copies its source's home, as the real one copies the whole machine. A machine is stopped
@@ -38,6 +38,8 @@ def main(argv):
         path.write_text(value + "\n")
 
     if argv[0] == "status":
+        return 0
+    if argv[0] == "config":
         return 0
     if argv[0] == "create":
         words, flags, i = [], [], 1
@@ -106,7 +108,8 @@ def main(argv):
         state(argv[1], "running")
         env = dict(os.environ, HOME=str(home))
         env.pop("ORG_HOME", None)       # a machine has its own ledger, if it has one at all
-        env.pop("ORG_HOST_DIR", None)   # and it cannot see the host's files
+        env.pop("ORG_HOST_DIR", None)   # and it cannot see the host's files,
+        env.pop("FAKE_GH_TOKEN", None)  # or use its GitHub login
         os.chdir(home)
         os.execvpe(argv[2], argv[2:], env)
     sys.stderr.write("fake orb: unsupported: %s\n" % " ".join(argv))

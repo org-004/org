@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A stand-in for `gh`, so tests never read or copy a real GitHub login.
 
-    gh auth token                 prints $FAKE_GH_TOKEN (exit 1 when unset)
+    gh auth token                 prints $FAKE_GH_TOKEN, else the token stored in $HOME (exit 1 when neither)
     gh auth login --with-token    stores the token read from stdin in $HOME/.config/gh/token
     gh auth setup-git             records that it ran
 """
@@ -11,13 +11,13 @@ from pathlib import Path
 
 
 def main(argv):
+    conf = Path(os.environ["HOME"]) / ".config" / "gh"
     if argv[:2] == ["auth", "token"]:
-        token = os.environ.get("FAKE_GH_TOKEN")
+        token = os.environ.get("FAKE_GH_TOKEN") or ((conf / "token").read_text().strip() if (conf / "token").is_file() else "")
         if not token:
             return 1
         print(token)
         return 0
-    conf = Path(os.environ["HOME"]) / ".config" / "gh"
     if argv[:2] == ["auth", "login"]:
         conf.mkdir(parents=True, exist_ok=True)
         (conf / "token").write_text(sys.stdin.read().strip())
