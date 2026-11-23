@@ -170,7 +170,9 @@ def settings(ledger: Ledger, mode: str, with_sandbox: Optional[bool] = None) -> 
 
 def launch_env(ledger: Ledger) -> dict:
     env = dict(os.environ)
-    env["PATH"] = str(BIN) + os.pathsep + env.get("PATH", "")
+    # ~/.local/bin is where Claude Code installs itself, and a command started by `orb -m` or by
+    # the host agent has only the PATH it was given.
+    env["PATH"] = os.pathsep.join([str(BIN), str(Path.home() / ".local" / "bin"), env.get("PATH", "")])
     env["ORG_HOME"] = str(ledger.root)
     # On the Mac the manager uses the Mac's own login. Inside an OrbStack machine the only login
     # that works is the long-lived token `box` copies in, and only shells started by zsh export
@@ -180,6 +182,32 @@ def launch_env(ledger: Ledger) -> dict:
     if in_box and not env.get("CLAUDE_CODE_OAUTH_TOKEN") and not env.get("ANTHROPIC_API_KEY") and token.is_file():
         env["CLAUDE_CODE_OAUTH_TOKEN"] = token.read_text().strip()
     return env
+
+
+def machines_help(cfg: dict) -> str:
+    """The sentence of the persona that says what a spec's `machine` may be, from what is configured here."""
+    from . import backends
+
+    machines = cfg.get("machines") or {}
+    default = (machines.get("default") or "orb").split(":")[0]
+    try:
+        kinds = backends.kinds(cfg)
+    except backends.BackendError:
+        kinds = [default]
+    known = {
+        "orb": "`orb` (a fresh OrbStack machine for the run, cloned from the template)",
+        "docker": "`docker` (a fresh container; `docker:<node>` names a Docker host from `org pool`)",
+    }
+    parts = [known.get(default, "`%s`" % default) + ", the default"]
+    parts += [known[k] for k in ("orb", "docker") if k in kinds and k != default]
+    ssh = sorted(machines.get("ssh") or {})
+    if ssh:
+        parts.append("`ssh:<name>` for a remote machine that is configured (%s); choose one only when the work needs what "
+                     "the default cannot give" % ", ".join("`ssh:%s`" % n for n in ssh))
+    if (machines.get("local") or {}).get("enabled"):
+        parts.append("`local` (this machine, with no isolation)")
+    text = "`machine` is " + "; or ".join(parts) + "."
+    return text + " Leave it out unless there is a reason: the default is what this installation is set up for."
 
 
 def persona(ledger: Ledger, live_state: bool = True, extra: str = "") -> str:
@@ -193,23 +221,27 @@ def persona(ledger: Ledger, live_state: bool = True, extra: str = "") -> str:
                 for name, p in sorted(projects.items()))
     else:
         state = "(sent with each question)"
-    return render(read_text(PROMPTS / "manager.md"), desk=ledger.desk, root=ledger.root, state=state) + extra
+    return render(read_text(PROMPTS / "manager.md"), desk=ledger.desk, root=ledger.root, state=state,
+                  machines=machines_help(ledger.config())) + extra
 
 
 def _claude(ledger: Ledger) -> Optional[str]:
     return shutil.which(ledger.config().get("claude_bin") or "claude", path=launch_env(ledger)["PATH"])
 
 
-def prepare_container_session(ledger: Ledger, claude: str) -> None:
-    """In the manager's own container, skip Claude Code's first-run screens.
+def prepare_own_session(ledger: Ledger, claude: str) -> None:
+    """In a manager that `org up` made, skip Claude Code's first-run screens.
 
-    The install inside the image is org's, used for nothing else, so org answers the two questions
-    a new install asks: the theme screen, and whether the desk is trusted. On a Mac this does
-    nothing: that install and its answers are the person's.
+    The install inside the manager's container or machine is org's, used for nothing else, so org
+    answers the two questions a new install asks: the theme screen, and whether the desk is
+    trusted. `org up` marks such a manager (ORG_IN_CONTAINER in the image, manager.own_claude in a
+    machine's config). On a Mac this does nothing: that install and its answers are the person's.
     """
-    if not os.environ.get("ORG_IN_CONTAINER"):
+    if not (os.environ.get("ORG_IN_CONTAINER") or (ledger.config().get("manager") or {}).get("own_claude")):
         return
-    path = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")) / ".claude.json"
+    # Claude Code keeps this file in its config directory when one is set, and in the home otherwise.
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    path = (Path(config_dir) if config_dir else Path.home()) / ".claude.json"
     data = read_json(path, {}) or {}
     project = data.setdefault("projects", {}).setdefault(str(ledger.desk), {})
     changed = False
@@ -247,7 +279,7 @@ def talk(ledger: Ledger, prompt: Optional[str] = None, project: Optional[str] = 
         sync_all(ledger)  # so the persona opens with what the machines say now
     except Exception:
         pass
-    prepare_container_session(ledger, claude)
+    prepare_own_session(ledger, claude)
     mgr = ledger.config().get("manager") or {}
     if not with_sandbox and mgr.get("sandbox", True):
         print("org: no shell sandbox on this machine; the manager will ask before any shell command that is not a read.\n"

@@ -2,8 +2,15 @@
 """End-to-end smoke test with a real engineer. Spends real tokens (about a dollar on sonnet).
 
     python3 tests/e2e.py                      an engineer on this machine (use inside a box)
-    python3 tests/e2e.py --machine orb        from the Mac: clone `base`, run there
+    python3 tests/e2e.py --machine orb        an engineer in a fresh OrbStack machine
     python3 tests/e2e.py --machine ssh:gpu    a host from ~/.org/config.json
+
+After `org up` the whole system is one command, run from the Mac:
+
+    org shell -c 'python3 ~/.local/share/org/tests/e2e.py --machine orb'
+
+There the manager is itself a machine, so the engineer's machine is created through the host agent,
+exactly as for a real run.
 
 It approves a small, self-contained spec (build a tiny Python package in a repository the engineer
 creates on its own machine, so nothing touches GitHub), dispatches it, follows the run to the end
@@ -11,6 +18,9 @@ and prints the plan-against-outcome scorecard. Exit status 0 means the engineer 
 with every acceptance criterion passing.
 
 The ledger is a temporary directory unless --home is given, so this never mixes with real work.
+It borrows the real ledger's machines, and its link to the host agent when there is one. A ledger
+named with --home is used as it is: its config is not changed. When the run passes, the machine
+it used is deleted (--keep leaves it).
 """
 import argparse
 import sys
@@ -21,8 +31,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from org import dispatch, spec, status, sync  # noqa: E402
+from org import agent, dispatch, spec, status, sync  # noqa: E402
+from org.backends import BackendError  # noqa: E402
 from org.ledger import Ledger  # noqa: E402
+from org.transport import TransportError  # noqa: E402
 from org.util import fmt_clock, fmt_dur, fmt_usd, read_json, read_text, write_json  # noqa: E402
 
 SPEC = """---
@@ -144,8 +156,9 @@ def main() -> int:
     ap.add_argument("--effort", default="low")
     ap.add_argument("--max-cost", type=float, default=5.0)
     ap.add_argument("--base", default=None, help="OrbStack template machine to clone (default from ~/.org/config.json, else base)")
-    ap.add_argument("--home", default=None, help="ledger directory to use (default: a new temporary one)")
+    ap.add_argument("--home", default=None, help="ledger to use, as it is (default: a new temporary one that borrows ~/.org's machines)")
     ap.add_argument("--timeout", type=int, default=3600, help="seconds to wait for the run")
+    ap.add_argument("--keep", action="store_true", help="leave the engineer's machine in place after a pass")
     ap.add_argument("--recheck", metavar="RUN", help="only repeat the independent check for a run already in --home")
     ap.add_argument("--ssh-host", help="with --machine ssh:<name>: define that machine here instead of in ~/.org/config.json")
     ap.add_argument("--ssh-option", action="append", default=[], help="an ssh option for --ssh-host, e.g. --ssh-option=-p --ssh-option=2222")
@@ -157,18 +170,29 @@ def main() -> int:
         print("independent check of %s:" % run_id)
         return 0 if independent_check(ledger, run_id, ledger.run(run_id)["spec_id"]) else 1
     ledger.init()
-    real = read_json(Path.home() / ".org" / "config.json", {}) or {}
-    machines = dict(real.get("machines") or {})
-    machines["default"] = args.machine
-    machines["local"] = {"enabled": args.machine == "local"}
-    if args.base:
-        machines["orb"] = dict(machines.get("orb") or {}, base=args.base)
-    if args.ssh_host and args.machine.startswith("ssh:"):
-        machines["ssh"] = dict(machines.get("ssh") or {}, **{args.machine[4:]: {"host": args.ssh_host, "options": args.ssh_option}})
-    write_json(ledger.config_path, {"machines": machines})
+    if not args.home:
+        real_home = Ledger().root
+        real = read_json(real_home / "config.json", {}) or {}
+        machines = dict(real.get("machines") or {})
+        machines["default"] = args.machine
+        machines["local"] = {"enabled": args.machine == "local"}
+        orb = dict(machines.get("orb") or {})
+        if args.base:
+            orb["base"] = args.base
+        if orb.get("via") == "agent":
+            # The host agent's bridge listens beside the real ledger; this one borrows it.
+            orb.setdefault("socket", str(agent.socket_path(real_home)))
+        if orb:
+            machines["orb"] = orb
+        if args.ssh_host and args.machine.startswith("ssh:"):
+            machines["ssh"] = dict(machines.get("ssh") or {}, **{args.machine[4:]: {"host": args.ssh_host, "options": args.ssh_option}})
+        write_json(ledger.config_path, {"machines": machines})
     print("ledger:  %s" % ledger.root)
 
-    spec_id = spec.new_draft(ledger, "textkit smoke test", "textkit")
+    # A temporary ledger starts numbering at 001 every time, and a machine is named after its run:
+    # the time in the title keeps one smoke test's machine from colliding with the last one's.
+    title = "textkit smoke test" if args.home else "textkit smoke " + time.strftime("%m%d-%H%M%S")
+    spec_id = spec.new_draft(ledger, title, "textkit")
     ledger.draft_path(spec_id).write_text(SPEC.format(machine=args.machine, model=args.model, effort=args.effort,
                                                        max_cost=args.max_cost, spec_id=spec_id))
     errors, warnings = spec.check(read_text(ledger.draft_path(spec_id)))
@@ -222,6 +246,11 @@ def main() -> int:
     print()
     if reported and verified:
         print("PASS: the engineer reported done and the independent check agrees")
+        if not args.keep:
+            try:
+                print("machine: %s" % dispatch.remove_machine(ledger, run_id))
+            except (TransportError, BackendError) as e:
+                print("machine: not removed (%s)" % e)
     elif reported:
         print("FAIL: the engineer reported done but the independent check does not agree")
     else:

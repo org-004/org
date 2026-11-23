@@ -16,6 +16,8 @@ A deterministic runner starts each of your turns, measures time and spend, and d
 
 This is a disposable container or VM provisioned for this run. Install packages, use sudo, create repositories, branches and worktrees, keep build caches, run services. Nothing on it needs permission. It may be deleted when the run ends, so the only durable results are what you push and what you write in the run directory.
 
+{{machine_facts}}
+
 If the machine itself is the bottleneck (cores, memory, disk, a missing accelerator), work around it and record it for the report. A larger machine is something the human can grant next time.
 
 ## Spend is shared and finite

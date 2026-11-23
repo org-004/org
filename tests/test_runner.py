@@ -71,6 +71,18 @@ class RunnerCase(unittest.TestCase):
     def status(self):
         return read_json(self.run_dir / "status.json")
 
+    def test_the_engineer_is_told_what_its_machine_has(self):
+        for facts, expected in (({"docker": "yes", "cores": "10"}, "It has 10 CPU cores. Docker works here"),
+                                ({"docker": "no", "cores": "1"}, "It has 1 CPU core. Docker does not work here"),
+                                ({}, "Whether Docker works here was not checked")):
+            self.assertTrue(runner.machine_facts(facts).startswith(expected), (facts, runner.machine_facts(facts)))
+        self.job({"plan": PLAN_TURN}, facts={"docker": "yes", "cores": "4"})
+        r = runner.Runner(self.run_dir)
+        r.prepare()
+        self.addCleanup(lambda: (r._events.close(), r._log.close()))
+        self.assertIn("Docker works here", r.system_prompt)
+        self.assertNotIn("{{", r.system_prompt)
+
     # ------------------------------------------------------------ the normal path
     def test_plan_execute_report(self):
         self.job({"plan": PLAN_TURN, "milestone:M1": dict(DONE("M1"), subagents=2), "milestone:M2": DONE("M2"), "report": REPORT})

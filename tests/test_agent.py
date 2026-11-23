@@ -38,7 +38,9 @@ class AgentCase(unittest.TestCase):
     dash_port = None
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="org-agent-"))
+        # Under /tmp: a unix socket's path is limited to about a hundred bytes, and macOS's own
+        # temporary directory uses most of them.
+        self.tmp = Path(tempfile.mkdtemp(prefix="org-agent-", dir="/tmp"))
         self.addCleanup(self._cleanup)
         self.old_env = dict(os.environ)
         self.orb_root = self.tmp / "orb"

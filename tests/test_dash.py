@@ -229,6 +229,35 @@ class ManagerSettings(unittest.TestCase):
         self.assertIn("No runs yet.", text)
         self.assertNotIn("{{", text)
 
+    def test_persona_offers_the_machines_this_installation_has(self):
+        text = manager.persona(self.ledger)
+        self.assertIn("`machine` is `orb` (a fresh OrbStack machine for the run, cloned from the template), the default.", text)
+        self.assertNotIn("docker", manager.machines_help(self.ledger.config()))
+        self.assertNotIn("ssh:", manager.machines_help(self.ledger.config()))
+        write_json(self.ledger.config_path, {"machines": {"plugins": ["org.backends.docker"], "default": "docker",
+                                                           "ssh": {"gpu": {"host": "me@gpu"}}}})
+        said = manager.machines_help(self.ledger.config())
+        self.assertTrue(said.startswith("`machine` is `docker` (a fresh container"), said)
+        self.assertIn("the default; or `orb`", said)
+        self.assertIn("`ssh:gpu`", said)
+
+    def test_first_run_screens_are_answered_only_in_a_manager_org_made(self):
+        home = self.tmp / "home"
+        home.mkdir()
+        old = dict(os.environ)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(old)))
+        os.environ["HOME"] = str(home)
+        for key in ("ORG_IN_CONTAINER", "CLAUDE_CONFIG_DIR"):
+            os.environ.pop(key, None)
+        manager.prepare_own_session(self.ledger, "true")
+        self.assertFalse((home / ".claude.json").exists(), "on the person's own machine their Claude Code is left alone")
+        write_json(self.ledger.config_path, {"manager": {"own_claude": True}})
+        manager.prepare_own_session(self.ledger, "true")
+        data = read_json(home / ".claude.json")
+        self.assertTrue(data["hasCompletedOnboarding"])
+        self.assertTrue(data["projects"][str(self.ledger.desk)]["hasTrustDialogAccepted"])
+        self.assertEqual(os.stat(home / ".claude.json").st_mode & 0o777, 0o600)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -390,8 +390,8 @@ def socket_path(home) -> Path:
 
 def _address(path: str):
     """A unix socket address for path. A path too long for one goes by way of its directory."""
-    if len(os.fsencode(path)) < 100:
-        return path, None
+    if len(os.fsencode(path)) < 100 or not os.path.isdir("/proc/self/fd"):
+        return path, None  # without /proc (not Linux) a path that is too long fails as one, in bind or connect
     fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
     return "/proc/self/fd/%d/%s" % (fd, os.path.basename(path)), fd
 

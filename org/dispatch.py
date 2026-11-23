@@ -201,7 +201,11 @@ def preflight(tr: Transport) -> dict:
               'printf "tmux=%s\\n" "$(command -v tmux || true)"; '
               'printf "git=%s\\n" "$(command -v git || true)"; '
               # Can an engineer build and run containers here? Only an answer from a daemon counts.
-              'printf "docker=%s\\n" "$(docker info >/dev/null 2>&1 && echo yes || echo no)"; '
+              # A machine started a second ago may still be starting one, so where a daemon is
+              # set to start with the machine it is given a few seconds.
+              'D=no; if command -v docker >/dev/null 2>&1; then for i in 1 2 3 4 5 6; do '
+              'if docker info >/dev/null 2>&1; then D=yes; break; fi; '
+              'systemctl is-enabled docker >/dev/null 2>&1 || break; sleep 1; done; fi; printf "docker=%s\\n" "$D"; '
               # An OrbStack machine that is not isolated has the Mac's file system mounted here.
               'printf "mac_files=%s\\n" "$([ -n "$(ls -A /mnt/mac 2>/dev/null)" ] && echo yes || echo no)"; '
               'printf "cores=%s\\n" "$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"; '

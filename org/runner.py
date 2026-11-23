@@ -591,6 +591,7 @@ class Runner:
             model=self.job.get("model") or "fable",
             delivery=self.job.get("delivery") or "pr",
             price_table=pricing.prompt_table(self.prices),
+            machine_facts=machine_facts(self.job.get("facts") or {}),
         )
 
     def check_spec(self) -> None:
@@ -1021,6 +1022,23 @@ class Runner:
 
 
 # ---------------------------------------------------------------- what the manager's side pulls
+
+
+def machine_facts(facts: dict) -> str:
+    """What dispatch found on the machine just before the run, as the engineer is told it."""
+    cores = str(facts.get("cores") or "").strip()
+    out = ["It has %s CPU core%s." % (cores, "" if cores == "1" else "s")] if cores.isdigit() else []
+    docker = facts.get("docker")
+    if docker == "yes":
+        out.append("Docker works here: a daemon of this machine's own answered `docker info` just before the run, so you can "
+                   "build images and run containers, and nothing you start there outlives the machine.")
+    elif docker == "no":
+        out.append("Docker does not work here: no daemon answered `docker info` just before the run. If the work needs "
+                   "containers, try to install or start one, and if that fails say so in the plan or the report instead "
+                   "of working around it silently; a machine with Docker is something the human can grant next time.")
+    else:
+        out.append("Whether Docker works here was not checked; `docker info` says.")
+    return " ".join(out)
 
 
 def pid_alive(pid) -> bool:

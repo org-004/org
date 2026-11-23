@@ -35,9 +35,11 @@ class OrbBackend(Backend):
     def _settings(cfg: dict) -> dict:
         return (cfg.get("machines") or {}).get("orb") or {}
 
-    @staticmethod
-    def _client(cfg: dict) -> agent.Client:
-        return agent.Client(agent.socket_path(cfg["_home"]))
+    @classmethod
+    def _client(cls, cfg: dict) -> agent.Client:
+        # The bridge listens beside the manager's ledger. machines.orb.socket names it for a
+        # second ledger on the same machine, which is how the smoke test keeps out of the real one.
+        return agent.Client(cls._settings(cfg).get("socket") or agent.socket_path(cfg["_home"]))
 
     def choose(self, cfg: dict, want: str, run_id: str) -> dict:
         if ":" in want:
