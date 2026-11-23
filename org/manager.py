@@ -166,9 +166,11 @@ def settings(ledger: Ledger, mode: str, with_sandbox: Optional[bool] = None) -> 
                 "network": {"allowedDomains": list(mgr.get("network_allow") or [])},
             }
             # The same files, kept from sandboxed shell commands by the operating system.
-            # So is Incus's socket: whoever can write to it can enter every engineer's container.
-            hidden = [q for q in secrets.all_paths() + ["/var/lib/incus/unix.socket", "/var/lib/incus/unix.socket.user"]
-                      if os.path.exists(q)]
+            # So is Incus's directory, which holds its sockets: whoever can write to one can enter
+            # every engineer's container. The directory and not the sockets: this user cannot
+            # list it, and the sandbox can cover a directory it can reach but not a file inside
+            # one it cannot read, so naming the sockets stops the sandbox from starting at all.
+            hidden = [q for q in secrets.all_paths() + ["/var/lib/incus"] if os.path.exists(q)]
             if hidden:
                 out["sandbox"]["filesystem"] = {"denyRead": hidden}
     return out
