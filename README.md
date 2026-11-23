@@ -478,13 +478,20 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
     addresses, the Mac's LAN address, the LAN router and a second container do not.
   - Docker installs, pulls, builds and runs inside a container. bubblewrap works for the `org`
     user in the VM and inside a container. A copy of a container takes about 0.06 s.
-  - `tests/e2e.py --machine incus` against real Incus with no tokens in the VM: the container
-    was copied from the template, vetted, given its bundle, the runner started, and status
-    flowed back. The engineer's model calls answered "Not logged in", as expected without a
-    token.
+  - `tests/e2e.py --machine incus` with a real engineer, twice: once on the VM as first built,
+    once after the VM was deleted, recreated from `org-host` and installed from this repository
+    with `org-vm install main`. Each time the engineer planned, built, pushed and reported
+    `done` in about thirty seconds for about $0.33 on sonnet, the script's own check in a fresh
+    clone agreed with all five acceptance criteria, and the container was deleted afterwards.
+  - The same test first with no tokens, and then with a Claude token that had been cut short
+    when it was copied: everything up to the model call worked, and the run ended `failed` with
+    the API's own message, "Not logged in" and "OAuth access token is invalid".
+  - With the GitHub token in the VM: both of the organization's repositories answered, and two
+    private repositories in the owner's personal account answered 404.
+  - `claude mcp list` in the VM, with the Claude token: no MCP servers.
 - **Not yet exercised:**
-  - Any real model call in the VM: the manager chat, `org ask`, an engineer finishing a run. The
-    tokens have not been handed in yet.
+  - The manager chat and `org ask` in the VM, and an engineer delivering a pull request to a
+    repository on GitHub (the smoke spec pushes to a repository inside its own container).
   - `tests/live_manager_rules.py` and `tests/live_manager_refine.py` in this layout.
   - `org upgrade` and its rollback against a real repository.
   - `org drain`, `org undrain` and `org resume --interrupted` on a real installation, and a
