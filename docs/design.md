@@ -560,12 +560,15 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
 | Docker in an engineer's container | it installed, pulled, built and ran inside a container |
 | the sandbox's footing | bubblewrap worked for the `org` user in the VM and inside a container |
 | the cost of a copy | a copy of a container took about 0.06 s |
-| the path from dispatch to status, on real Incus | `tests/e2e.py --machine incus` with no tokens in the VM: the container was copied from the template, vetted, given its bundle, the runner started, and status flowed back. The engineer's model calls answered "Not logged in", as expected without a token |
+| a real engineer plans, builds, pushes and reports in a container | `tests/e2e.py --machine incus`, twice: on the VM as first built, and again after the VM was deleted, recreated from `org-host` and installed from this repository with `org-vm install main`. Each time: `done` in about thirty seconds for about $0.33 on sonnet, the script's own check in a fresh clone agreed with all five acceptance criteria, and the container was deleted afterwards |
+| a run without a working login fails with a reason | the same test with no tokens, and with a Claude token cut short when it was copied: everything up to the model call worked, and the run ended `failed` with the API's own message |
+| the GitHub token reaches one organization | from the VM, both of the organization's repositories answered and two private repositories in the owner's personal account answered 404 |
+| no MCP servers in the VM | `claude mcp list` there, with the Claude token: none |
 
 Not yet exercised:
 
-- Any real model call in the VM: the manager chat, `org ask`, an engineer finishing a run. The
-  tokens have not been handed in yet.
+- The manager chat and `org ask` in the VM, and an engineer delivering a pull request to a
+  repository on GitHub (the smoke spec pushes to a repository inside its own container).
 - `tests/live_manager_rules.py` and `tests/live_manager_refine.py` in this layout.
 - `org upgrade` and its rollback against a real repository.
 - `org drain`, `org undrain` and `org resume --interrupted` on a real installation.
