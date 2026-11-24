@@ -184,8 +184,9 @@ PERL
   adj=$(incus exec "$a" -T -- /root/wrapper 'cat /proc/self/oom_score_adj' </dev/null)
   say "a command run through it has oom_score_adj $adj; one run without it has $(incus exec "$a" -T -- cat /proc/self/oom_score_adj </dev/null)"
   [ "${adj:-0}" -gt 0 ] || fail "the wrapper did not raise the adjustment of what it runs"
-  [ "$(incus exec "$a" -T -- /root/wrapper 'echo "$0 $# $1"; exit 7' </dev/null; echo " $?")" = "bash 0  7" ] \
-    || fail "the wrapper does not hand the command line to bash as it was given, or loses its exit status"
+  out=$(echo said | incus exec "$a" -T -- /root/wrapper 'read -r line; echo "$line, with $# more words"; exit 7'; echo "status $?")
+  [ "$(echo $out)" = "said, with 0 more words status 7" ] \
+    || fail "the wrapper does not run the command line as it was given, with its input and its exit status: $out"
 
   before=$(kills "$a")
   incus exec "$a" -T -- perl /root/session.pl </dev/null > "$tmp/control.out" 2>&1
