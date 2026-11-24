@@ -52,7 +52,7 @@ if [ "$(sha256sum "$bin" 2>/dev/null | cut -d' ' -f1)" != "$sum" ]; then
   note "downloading bazel-remote $version ($arch)"
   url="https://github.com/buchgr/bazel-remote/releases/download/v$version/bazel-remote-$version-linux-$arch"
   mkdir -p "$(dirname "$bin")"
-  curl -fsSL --retry 3 -o "$bin.download" "$url" || { rm -f "$bin.download"; refuse "the download from $url failed"; }
+  curl -fsSL --retry 3 --max-time 300 -o "$bin.download" "$url" || { rm -f "$bin.download"; refuse "the download from $url failed"; }
   if [ "$(sha256sum "$bin.download" | cut -d' ' -f1)" != "$sum" ]; then
     rm -f "$bin.download"
     note "cache: the download's SHA-256 is not the pinned one, so it was removed and nothing was installed"
@@ -60,7 +60,7 @@ if [ "$(sha256sum "$bin" 2>/dev/null | cut -d' ' -f1)" != "$sum" ]; then
     say "server=down"
     exit 1
   fi
-  chmod 755 "$bin.download" && mv -f "$bin.download" "$bin"
+  chmod 755 "$bin.download" && mv -f "$bin.download" "$bin" || { rm -f "$bin.download"; refuse "the download could not be put at $bin"; }
 fi
 say "sha256=ok"
 

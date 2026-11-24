@@ -113,13 +113,18 @@ case "$base" in "$prefix"*) die "the template \`$base\` starts with the engineer
 # The build cache (step 5). The prefix marks what a run may be asked to delete, and the cache is never that.
 cache_on=$(get machines.incus.cache.enabled)
 if [ "$cache_on" != false ]; then
-  cache=$(get machines.incus.cache.name | tr -d '"'); cache=${cache:-org-cache}
-  cache_port=$(get machines.incus.cache.port | tr -d '"'); cache_port=${cache_port:-9092}
-  cache_gb=$(get machines.incus.cache.max_gb | tr -d '"'); cache_gb=${cache_gb:-20}
+  # A setting that is not given, or is null, is its default, as in org/cache.py.
+  setting() { local v; v=$(get "machines.incus.cache.$1" | tr -d '"'); case "$v" in ""|null) v=$2 ;; esac; printf '%s' "$v"; }
+  cache=$(setting name org-cache)
+  cache_port=$(setting port 9092)
+  cache_gb=$(setting max_gb 20)
+  case "$cache" in [!A-Za-z]*|*[!A-Za-z0-9-]*) die "machines.incus.cache.name \`$cache\` is not a container's name" ;; esac
   case "$cache" in "$prefix"*) die "the build cache \`$cache\` starts with the engineers' prefix \`$prefix\`" ;; esac
   [ "$cache" != "$base" ] || die "the build cache and the template are both named \`$cache\`"
-  case "$cache_port" in ""|*[!0-9]*) die "machines.incus.cache.port must be a number, not $cache_port" ;; esac
-  case "$cache_gb" in ""|*[!0-9]*) die "machines.incus.cache.max_gb must be a whole number of gigabytes, not $cache_gb" ;; esac
+  # 8080 is where the server's other port listens, on the container's own loopback.
+  case "$cache_port" in ""|0*|*[!0-9]*|??????*|8080) die "machines.incus.cache.port must be a port (and not 8080), not $cache_port" ;; esac
+  [ "$cache_port" -le 65535 ] || die "machines.incus.cache.port must be a port, not $cache_port"
+  case "$cache_gb" in ""|0*|*[!0-9]*|??????*) die "machines.incus.cache.max_gb must be a whole number of gigabytes, not $cache_gb" ;; esac
 fi
 
 # ---- 4. the template every engineer is a copy of
@@ -170,28 +175,37 @@ if [ "$cache_on" != false ]; then
     say "build cache: making $name"
     # Unprivileged and without nesting: it runs one server and no containers of its own. It comes
     # back by itself when this machine restarts.
-    inc init -q images:debian/13 "$name" -c boot.autostart=true
+    inc init -q images:debian/13 "$name" -c boot.autostart=true \
+      || { cache_failed="build cache: incus could not make $name. Engineers build without it; \`org up\` tries again."; return 0; }
+    # From here on there is a container: whatever stops this, it is not left half made, or the
+    # next \`org up\` would take it for the cache.
+    trap 'inc delete -q -f "$name" >/dev/null 2>&1; exit 130' INT TERM
     # Its network card: an address it cannot change, as an engineer's card has. It is not given
     # the port isolation an engineer's card has, and that is the point: an isolated card cannot
     # reach another isolated card, so engineers could never reach a cache that had it.
-    inc config device override "$name" eth0 security.ipv4_filtering=true >/dev/null
-    inc start -q "$name"
+    { inc config device override "$name" eth0 security.ipv4_filtering=true >/dev/null && inc start -q "$name"; } \
+      || { inc delete -q -f "$name" || true; trap - INT TERM; cache_failed="build cache: $name could not be set up and started, so it was removed. Engineers build without it; \`org up\` tries again."; return 0; }
     incus exec "$name" -T -- sh -c 'for i in $(seq 1 60); do ip -4 -o addr show scope global 2>/dev/null | grep -q inet && exit 0; sleep 0.5; done; exit 1' </dev/null \
-      || { inc delete -q -f "$name"; cache_failed="build cache: $name got no network address, so it was removed"; return 0; }
+      || { inc delete -q -f "$name" || true; trap - INT TERM; cache_failed="build cache: $name got no network address, so it was removed. Engineers build without it; \`org up\` tries again."; return 0; }
     # The script is its stdin. Nothing else goes in: no login, no key, nothing of this user's.
     facts=$(incus exec "$name" -T --env "ORG_CACHE_PORT=$cache_port" --env "ORG_CACHE_MAX_GB=$cache_gb" -- sh -s < "$rel/incus/cache.sh") || true
     if [ "$(printf '%s\n' "$facts" | sed -n 's/^server=//p')" != up ]; then
       # Removed, so that the next `org up` makes it again and does not take a broken one for the cache.
-      inc delete -q -f "$name"
+      inc delete -q -f "$name" || true
+      trap - INT TERM
       cache_failed="build cache: the server did not come up in $name (sha256: $(printf '%s\n' "$facts" | sed -n 's/^sha256=//p')), so it was removed. Engineers build without it; \`org up\` tries again."
       return 0
     fi
+    trap - INT TERM
     say "build cache: $name ready (bazel-remote $(printf '%s\n' "$facts" | sed -n 's/^version=//p'), port $cache_port, at most $cache_gb GB)"
   }
   if exists "$cache"; then
     # An existing one is left as it is, with what it holds. To empty it: incus delete -f, then `org up`.
-    [ "$(status_of "$cache")" = Running ] || inc start -q "$cache"
-    say "build cache: $cache is here"
+    if [ "$(status_of "$cache")" = Running ] || inc start -q "$cache"; then
+      say "build cache: $cache is here"
+    else
+      cache_failed="build cache: $cache is here but did not start. Engineers build without it."
+    fi
   else
     build_cache "$cache"
   fi

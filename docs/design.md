@@ -387,13 +387,23 @@ capabilities"), which was tried with Bazel 9.3.0. Bazel 9.3.0 then succeeds with
 warning: the only sign is a wait, about 3 s when the connection is refused and about 20 s when
 the address does not answer.
 
+That last setting is also the file's weak point. It exists from Bazel 8.6.0 on: 8.5.0 and 7.7.3
+do not know it, and a Bazel that meets an option it does not know in an rc file stops
+("Unrecognized option"), whatever the command. An rc file cannot say "if this version knows
+it", and dispatch cannot know which Bazel a project will fetch. So in a container that reached
+the cache, a project pinned to a Bazel older than 8.6 fails every build until
+`/etc/bazel.bazelrc` is removed there, which the file's own comment tells the engineer to do.
+Leaving the setting out would be worse for the project this was built for: Bazel 9.3.0 without
+it fails the build whenever the cache stops answering.
+
 A stopped cache gets a line saying so; a cache container that is not what `org up` makes (it is
 privileged, or has a device beyond its disk and its card) is not used, and the line says why; a
 missing cache prints nothing and the run goes on as before. The checks on an engineer's container
 (`problems()`) are unchanged. When a stopped engineer's container is resumed the same is done
 again, so a cache whose address changed is found, and a settings file org wrote earlier is
-removed if the cache is no longer reachable. A failure anywhere in this never fails a dispatch,
-because a build must never fail or wait because of the cache.
+removed if the cache is there and no longer reachable. A failure anywhere in this never fails a
+dispatch: whatever goes wrong while the cache is looked at or offered is caught there, said in
+one line, and recorded as `error`.
 
 **The backend does not manage it.** It acts only on names with the engineers' prefix, exactly as
 before, and only reads Incus's description of the cache (`incus list`). It never creates, enters
@@ -416,8 +426,11 @@ line, `build cache: org-cache running at <address>:<port>` (or stopped, or missi
 
 **Switching it off, and emptying it.** `org config set machines.incus.cache.enabled false`: `org
 up` then makes no cache, dispatch looks at none, asks Incus nothing about it and writes no
-settings, and the installation behaves exactly as before the cache existed. A cache container
-that already exists is left where it is; `incus delete -f org-cache` removes it. To empty it,
+settings, and the installation behaves as before the cache existed, but for the row in `org
+doctor` that says it is switched off. A cache container that already exists is left where it
+is, and so are the settings in engineers' containers dispatched before, which nothing reaches
+into: `incus delete -f org-cache` removes the container, and their builds then go on without
+it. To empty it,
 delete it and run `org up`, which makes a new, empty one. That is also how a changed port or size
 takes effect, since an existing container is not reconfigured. Engineers dispatched in between
 build without the cache.
@@ -795,6 +808,11 @@ none is claimed for this layout.
 
 - Nothing in this layout has made a real model call yet; see what has been checked.
 - An engineer lands its own work on the default branch; nothing on GitHub reviews it first.
+- The build cache's settings stop a Bazel older than 8.6 with "Unrecognized option" (see "The
+  build cache"); the file has to be removed in such a project's container.
+- An `org up` that loses power between making the cache container and seeing its server up
+  leaves a container the next `org up` takes for the cache; `org doctor` then shows it running
+  and dispatch says "not reachable". `incus delete -f org-cache`, then `org up`, makes it again.
 - The build cache cannot tell a true stored result from a false one, has no credential and no
   TLS, and is reached by every engineer; one engineer's wrong output is used by the others until
   the cache is emptied. Its network card is not isolated, so it can open connections to

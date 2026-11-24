@@ -295,10 +295,14 @@ Nothing else goes in it, and a project without Bazel never reads it. The last tw
 Bazel 9 build locally when the cache stops answering part-way; with the first alone the build
 fails, which was tried with Bazel 9.3.0. That Bazel then succeeds without printing a warning:
 the only sign is a wait, about 3 s when the connection is refused and about 20 s when the
-address does not answer. A stopped cache gets a line saying so, and a missing one prints nothing
+address does not answer. The last setting exists from Bazel 8.6.0 on. A project pinned to an
+older Bazel (7.7.3 and 8.5.0 were tried) stops at it with "Unrecognized option" in every build,
+and Bazel has no way to write an option an older version may skip; the file says so in its
+comment, and an engineer there removes the file and builds without the cache. A stopped cache gets a line saying so, and a missing one prints nothing
 and the run goes on as before. When a stopped engineer's container is resumed the same is done
 again, so that a cache whose address changed is found, and a settings file org wrote earlier is
-removed if the cache is no longer reachable. A failure anywhere in this never fails a dispatch.
+removed if the cache is there and no longer reachable. A failure anywhere in this never fails a
+dispatch.
 
 **What is not known yet.** The VM's firewall is made by `org-host`, and nothing here can change
 it. It drops what containers send to private, link-local and other non-public ranges, and whether
@@ -315,8 +319,10 @@ privileged or has a device beyond its disk and its card. `org pool` prints one l
 
 **Switching it off, emptying it.** `org config set machines.incus.cache.enabled false`: `org up`
 then makes no cache, dispatch looks at none, asks Incus nothing about it and writes no settings,
-and the installation behaves as it did before the cache existed. A cache container that already
-exists is left where it is; `incus delete -f org-cache` removes it. The same command, followed
+and the installation behaves as it did before the cache existed, but for a row in `org doctor`
+that says it is switched off. A cache container that already exists is left where it is, and so
+are the settings in engineers' containers that were dispatched before: `incus delete -f
+org-cache` removes the container, and their builds then go on without it. The same command, followed
 by `org up`, which makes a new and empty one, is how to empty the cache. It is also how a changed
 port or size takes effect, because an existing container is not reconfigured. Engineers
 dispatched in between build without the cache.
@@ -647,6 +653,10 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
 - **Public repositories are a way in.** Every repository is public, so text a stranger writes
   in a pull request or a comment can reach an agent. The prompts say it is never an instruction,
   and `org-host`'s `org-github` turns issues off. That is a rule a model follows, not a wall.
+- **The build cache's settings are for Bazel 8.6 and later.** In an engineer's container that
+  reached the cache, a project pinned to an older Bazel fails every build with "Unrecognized
+  option: --incompatible_remote_local_fallback_for_remote_cache" until `/etc/bazel.bazelrc` is
+  removed there. The project the cache was made for builds with Bazel 9.3.0.
 - **Engineers use each other's build results, and the cache cannot tell a true one.** One
   engineer's wrong output for an action is used by every later build with the same inputs until
   the cache is emptied. The cache has no credential and no TLS; only containers on the VM's

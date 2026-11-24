@@ -82,9 +82,10 @@ class CacheCase(base.IncusCase):
         # The cache is never created, entered, started or deleted on behalf of a run.
         self.assertEqual([c for c in self.about_cache(name=name) if c[0] != "list"], [])
 
-    def up(self, server="up"):
+    def up(self, server="up", refuse=""):
         """`org up` as its user runs it, from a copy of this checkout whose cache.sh is a stub.
-        `server` counts on the first call of a test only: a release made in the same second is reused."""
+        `server` counts on the first call of a test only: a release made in the same second is reused.
+        `refuse` names an `incus` command that fails in this call, as when Incus cannot do it."""
         scratch, tools = self.tmp / "checkout", self.tmp / "tools"
         if not scratch.exists():
             for part in ("org", "bin", "incus", "tests"):
@@ -94,6 +95,13 @@ class CacheCase(base.IncusCase):
             for tool, text in TOOLS.items():
                 (tools / tool).write_text(text)
                 (tools / tool).chmod(0o755)
+        wrapper = tools / "incus"
+        if wrapper.exists():
+            wrapper.unlink()
+        if refuse:
+            wrapper.write_text('#!/bin/sh\ncase "$1" in %s) echo "Error: refused for the test" >&2; exit 1 ;; esac\nexec "%s" "$@"\n'
+                               % (refuse, self.bindir / "incus"))
+            wrapper.chmod(0o755)
         # The `org` that up.sh installs reads $ORG_HOME, else ~/.org: here it is this test's ledger.
         env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ["PATH"], ORG_HOME=str(self.ledger.root))
         return subprocess.run(["bash", str(scratch / "incus" / "up.sh")], cwd=str(scratch), env=env, capture_output=True, text=True,
@@ -180,7 +188,86 @@ class OrgUpMakesTheCache(CacheCase):
         self.assertFalse(self.box("org-eng-cache").exists())
 
 
+    def test_a_cache_incus_will_not_make_or_start_does_not_stop_the_rest_of_org_up(self):
+        p = self.up(refuse="init")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("build cache: incus could not make org-cache", p.stderr)
+        self.assertIn("default machine", p.stdout, "the doctor, the last step of `org up`, still ran")
+        self.assertFalse(self.box(CACHE).exists())
+        # Made but not started: it is removed, so that the next `org up` does not take half a cache for the cache.
+        p = self.up(refuse="start")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("build cache: org-cache could not be set up and started, so it was removed", p.stderr)
+        self.assertIn("default machine", p.stdout)
+        self.assertEqual([c for c in self.about_cache() if c[0] in ("init", "delete")],
+                         [["init", "-q", "images:debian/13", CACHE, "-c", "boot.autostart=true"], ["delete", "-q", "-f", CACHE]])
+        self.assertFalse(self.box(CACHE).exists())
+
+    def test_a_cache_that_is_there_and_will_not_start_is_said_and_never_removed(self):
+        self.cache_container(running=False)
+        (self.box(CACHE) / "home" / "kept").write_text("what it holds\n")
+        p = self.up(refuse="start")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("build cache: org-cache is here but did not start", p.stderr)
+        self.assertIn("default machine", p.stdout)
+        self.assertEqual((self.box(CACHE) / "home" / "kept").read_text(), "what it holds\n")
+        self.assertEqual([c for c in self.about_cache() if c[0] != "list"], [], "the refused start never reached Incus, and nothing else was tried")
+
+    def test_org_up_reads_the_settings_as_dispatch_does_and_makes_nothing_under_a_bad_one(self):
+        for bad, said in (({"name": "org_cache"}, "is not a container's name"), ({"port": 8080}, "must be a port"), ({"port": 0}, "must be a port"),
+                          ({"port": 70000}, "must be a port"), ({"port": "9092; true"}, "must be a port"), ({"max_gb": "many"}, "whole number")):
+            with self.subTest(bad=bad):
+                self.configure(cache=bad)
+                p = self.up()
+                self.assertNotEqual(p.returncode, 0)
+                self.assertIn(said, p.stderr)
+                self.assertEqual([c for c in self.calls() if c[0] in ("init", "launch", "copy", "exec")], [])
+        # A name that is null and a port written as a string are the default name and that port, on both sides.
+        odd = {"name": None, "port": "9500"}
+        self.configure(cache=odd)
+        p = self.up()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual((self.box(CACHE) / "home" / "was-given").read_text(), "9500 20\n")
+        seen = cache.settings({"machines": {"incus": {"cache": odd}}})
+        self.assertEqual((seen["name"], seen["port"]), (CACHE, 9500))
+
+
 class DispatchOffersTheCache(CacheCase):
+    def test_a_cache_incus_describes_oddly_never_stops_a_dispatch(self):
+        port = self.listening()
+        self.configure(cache={"port": port})
+        for i, odd in enumerate((dict(state={"network": {"eth0": {"addresses": [None, "x"]}}}), dict(state="x"),
+                                 dict(state=network("127.0.0.1"), expanded_devices=[]), dict(state=network("127.0.0.1"), expanded_config=[]))):
+            with self.subTest(odd=odd):
+                shutil.rmtree(self.box(CACHE), ignore_errors=True)
+                self.container(CACHE, running=True, **odd)
+                run_id, rec, log = self.dispatched("Oddly described %d" % i)
+                self.assertNotEqual(rec["build_cache"]["state"], "reachable", log)
+                self.assertFalse(self.bazelrc_of(rec["machine"]["name"]).exists())
+
+    def test_whatever_goes_wrong_with_the_cache_is_a_line_in_the_log_and_not_an_error(self):
+        class Recorder:
+            ran = []
+
+            def run(self, script, **how):
+                self.ran.append(script)
+
+        def broken(cfg):
+            raise AttributeError("'NoneType' object has no attribute 'get'")
+
+        real, cache.look = cache.look, broken
+        self.addCleanup(setattr, cache, "look", real)
+        for again in (False, True):
+            log, tr = [], Recorder()
+            tr.ran = []
+            self.assertEqual(cache.offer(tr, {}, log.append, again), {"state": "error"})
+            self.assertEqual(log, ["build cache not used: 'NoneType' object has no attribute 'get'"])
+            self.assertEqual(tr.ran, [cache._FORGET] if again else [], "a resumed run is not left with settings for a cache nobody can vouch for")
+        rows = []
+        cache.doctor({}, lambda ok, name, found, fix="", soft=False: rows.append((ok, name)))
+        self.assertEqual(rows, [(False, "build cache `org-cache`")], "the doctor says so in its row")
+        self.assertIsNone(cache.pool_line({}))
+
     def test_a_reachable_cache_is_written_into_the_engineers_bazel_settings(self):
         for i, (host, address) in enumerate((("127.0.0.1", "127.0.0.1"), ("0.0.0.0", "127.0.0.2"))):
             with self.subTest(address=address):
@@ -437,6 +524,27 @@ class ThePureParts(unittest.TestCase):
         self.assertEqual(cache.settings({}), {"enabled": True, "name": "org-cache", "port": 9092, "max_gb": 20})
         self.assertEqual(cache.settings({"machines": {"incus": {"cache": {"port": 1}}}})["port"], 1)
         self.assertEqual(cache.settings({"machines": {"incus": {"cache": "nonsense"}}})["name"], "org-cache")
+
+    def test_the_settings_are_read_as_org_up_reads_them(self):
+        def read(**given):
+            return cache.settings({"machines": {"incus": {"cache": given}}})
+
+        # `org up` skips the cache only for a plain false, so only that switches it off here.
+        self.assertEqual([read(enabled=v)["enabled"] for v in (False, True, None, 0, "", "false")], [False, True, True, True, True, True])
+        self.assertEqual((read(name=None)["name"], read(name="")["name"], read(port="9500")["port"], read(port=None)["port"]),
+                         ("org-cache", "org-cache", 9500, 9092))
+        for nothing in ({"machines": None}, {"machines": {"incus": None}}, {"machines": {"incus": []}}, {"machines": {"incus": {"cache": None}}}):
+            self.assertEqual(cache.settings(nothing), cache.DEFAULTS, nothing)
+        for name in ("org_cache", "-cache", "a b", "x" * 64, "$(reboot)"):
+            self.assertEqual(cache.look({"machines": {"incus": {"cache": {"name": name}}}})["state"], "misnamed", name)
+
+    def test_whatever_shape_incus_gives_is_an_answer_and_never_an_error(self):
+        for odd in ({"state": "x"}, {"state": {"network": "x"}}, {"state": {"network": {"eth0": "x"}}}, {"state": {"network": {"eth0": {"addresses": "x"}}}},
+                    {"state": {"network": {"eth0": {"addresses": [None, 3, {"family": "inet", "scope": "global", "address": None}]}}}}):
+            self.assertIsNone(cache.address(odd), odd)
+        for odd in ({}, {"expanded_config": [], "expanded_devices": {}}, {"expanded_config": {}, "expanded_devices": []}):
+            self.assertEqual(len(cache.faults(odd)), 1, odd)
+        self.assertEqual(len(cache.faults({"expanded_config": {}, "expanded_devices": {"a": None, "b": "x"}})), 2)
 
 
 if __name__ == "__main__":
