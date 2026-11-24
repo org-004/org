@@ -271,10 +271,9 @@ class FinishedTests(NotifyCase):
         self.assertEqual((a["run"], a["kind"]), ("002-b-r1", "finished"))
         self.assertEqual(a["reason"], "the plan finished: 001-a-r1 done, 002-b-r1 partial; $12.30 spent")
         self.assertEqual(req["headers"]["Title"], "org: a plan finished")
-        self.assertTrue(req["body"].startswith("org: plan finished: 001-a-r1 done, 002-b-r1 partial; $12"))
-        self.assertTrue(req["body"].endswith(". org status"))
-        self.assertLessEqual(len(req["body"]), 400)
-        assert_safe(self, req["body"])
+        self.assertEqual(req["body"], "org: plan finished: 001-a-r1 done, 002-b-r1 partial; $12.30 spent. org status")
+        # The amount is made in code from a number; everything else in the line went through `clean`.
+        assert_safe(self, req["body"].replace("$12.30", "$"))
 
     def test_a_finished_plan_with_no_url_is_only_an_alert(self):
         notify.finished(self.ledger, "r1", [("r1", "done")], 0)

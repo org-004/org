@@ -36,7 +36,8 @@ What this module keeps on a run's record (run.json):
                   "started_at": time, "finished_at": time, "cost_usd": dollars over every attempt,
                   "answer": the session's answer as validated, or absent,
                   "verdict": "continue", "retry" or "pause" as honoured, "reason": str,
-                  "notes": {waiting spec id: note}}
+                  "notes": {waiting spec id: note},
+                  "reviewed": {waiting spec id: sha256 of the approved text the review was given}}
   resumes        n               times `tick` resumed it
   dead_since     time            when `tick` first saw its runner gone; cleared when it is alive
 
@@ -65,8 +66,10 @@ PAUSE_KINDS = (
     "resumes",     # the runner died or the machine stopped more than graph.max_resumes times
     "dispatch",    # the run never got a machine, twice
     "budget",      # the weekly limit is at or above graph.pause_above_weekly_pct
+    "unreviewed",  # a spec it waits on was reviewed before this text was approved, so no review read it
 )
 REPORT_OK = ("done", "partial")
+UNREVIEWED = "reviewed before this text was approved"
 # Where the reports of earlier runs travel in a run's bundle, relative to its run directory.
 EARLIER = "earlier"
 
@@ -300,8 +303,13 @@ def report_status(ledger: Ledger, run_id: str) -> Optional[str]:
     return status if status in ("done", "partial", "fail") else None
 
 
-def satisfied(ledger: Ledger, spec_id: str) -> Tuple[bool, str]:
+def satisfied(ledger: Ledger, spec_id: str, waiter: Optional[dict] = None) -> Tuple[bool, str]:
     """Is the spec satisfied, and the words for it in a `waiting for` clause.
+
+    `waiter` is the record of the run that asks. A `continue` is a statement about the waiting
+    specs the review was given, so for a waiter whose approved text was not among them (it was
+    approved, or approved again, after the review) the spec is not satisfied: the words are
+    `<state>, reviewed before this text was approved`, and `hold` makes that a pause.
 
     True only when `current_run` is final, its report's status is `done` or `partial`, and its
     record's `review.verdict` is `continue`. Otherwise the words say where it stands, such as
@@ -332,6 +340,8 @@ def satisfied(ledger: Ledger, spec_id: str) -> Tuple[bool, str]:
         return False, "%s, being copied" % state  # sync has not yet pulled all of it
     review = rec.get("review") or {}
     if review.get("verdict") == "continue" and report_status(ledger, run_id) in REPORT_OK:
+        if waiter and (review.get("reviewed") or {}).get(waiter.get("spec_id")) != waiter.get("spec_sha"):
+            return False, "%s, %s" % (state, UNREVIEWED)
         return True, state
     if review.get("verdict") == "retry":
         return False, "%s, being run again" % state
@@ -348,7 +358,7 @@ def waiting_for(ledger: Ledger, record: dict) -> Optional[str]:
     more are joined with commas and a final `and`. None when every named spec is satisfied."""
     clauses = []
     for spec_id in record.get("after") or []:
-        ok, words = satisfied(ledger, spec_id)
+        ok, words = satisfied(ledger, spec_id, record)
         if not ok:
             clauses.append("%s (%s)" % (short(spec_id), words))
     return ("waiting for " + _and(clauses)) if clauses else None
@@ -548,7 +558,8 @@ def _redispatch(ledger: Ledger, run_id: str, rec: dict, log) -> None:
         return
     spec_id = rec["spec_id"]
     try:
-        new_id, _ = dispatch.dispatch(ledger, spec_id, log=log, plan={"redispatch_of": run_id})
+        # What it retried travels on: the failed run's report is in the new run's bundle too.
+        new_id, _ = dispatch.dispatch(ledger, spec_id, log=log, plan={"redispatch_of": run_id, "retry_of": rec.get("retry_of")})
     except dispatch.DispatchError as e:
         if current_run(ledger, spec_id) == run_id:
             # No new run was even recorded, so nothing would stop this from being tried at every pump.
@@ -608,6 +619,16 @@ def reviews(ledger: Ledger, log=lambda message: None) -> None:
                 _review_running(ledger, run_id, rec, log)
             elif not review and spec_id in waited and _finished(rec) and not rec.get("paused"):
                 _review_due(ledger, run_id, rec, log)
+            elif review.get("state") == "done" and review.get("verdict") in ("retry", "pause") and not rec.get("paused"):
+                # The verdict is on record and what follows it is not: the tick that recorded it
+                # ended before it dispatched the run again or marked the pause. A retry would by
+                # now have put a newer run in this one's place. Left alone, what waits would wait
+                # for ever with nobody told; so it is a pause, and the person decides.
+                said = "the review said %s: %s" % (review["verdict"], review.get("reason") or "no reason given")
+                if review["verdict"] == "retry":
+                    pause(ledger, run_id, "dispatch", "%s; it was not dispatched again, because the process doing that ended first" % said)
+                else:
+                    pause(ledger, run_id, "review", said)
         except Exception as e:  # noqa: BLE001  (one review's trouble must not stop the others)
             log("plans: the review of %s failed: %s: %s" % (run_id, type(e).__name__, e))
 
@@ -709,6 +730,7 @@ def _failed_attempt(ledger: Ledger, run_id: str, attempt: int, why: str, log) ->
 
 
 def _review_failed(ledger: Ledger, run_id: str, why: str) -> None:
+    why = notify.plain(why)
     _save(ledger, run_id, lambda r: r["review"].update(state="done", verdict="pause", reason=why, finished_at=now()))
     pause(ledger, run_id, "review_failed", why)
 
@@ -730,15 +752,19 @@ def apply_verdict(ledger: Ledger, run_id: str, answer: dict, log=lambda message:
     spec_id = rec.get("spec_id") or ""
     status = report_status(ledger, run_id)
     asked = answer.get("verdict") if isinstance(answer, dict) else None
-    said = clip((answer or {}).get("reason") or "", 300) if isinstance(answer, dict) else ""
+    # The reason and the notes were written by a model that read text from public sources, and
+    # they are printed in a terminal: kept as one plain line each, with no control character.
+    said = notify.plain(clip((answer or {}).get("reason") or "", 300)) if isinstance(answer, dict) else ""
     told = "the review said %s: %s" % (asked or "nothing usable", said or "no reason given")
-    kind, why, notes = "review", None, {}
+    kind, why, notes, reviewed = "review", None, {}, {}
     if asked == "continue":
         if status in REPORT_OK:
             waiting = waiters(ledger, spec_id)
             for n in (answer.get("notes") or []):
                 if isinstance(n, dict) and n.get("spec") in waiting and isinstance(n.get("note"), str):
-                    notes[n["spec"]] = n["note"]
+                    notes[n["spec"]] = notify.plain(n["note"])
+            # Which text of each waiting spec this `continue` is about: the one approved now.
+            reviewed = {w: (ledger.spec_meta(w) or {}).get("sha256") for w in notes}
         else:
             why = "a run whose report says %s does not satisfy what waits on it" % (status or "nothing (there is no report)")
     elif asked == "retry":
@@ -758,7 +784,7 @@ def apply_verdict(ledger: Ledger, run_id: str, answer: dict, log=lambda message:
 
     def record(r):
         rv = r.get("review") or {}
-        rv.update(state="done", verdict=honoured, reason=said, notes=notes, finished_at=now())
+        rv.update(state="done", verdict=honoured, reason=said, notes=notes, reviewed=reviewed, finished_at=now())
         if isinstance(answer, dict):
             rv.setdefault("answer", answer)
         r["review"] = rv
@@ -786,7 +812,7 @@ def pause(ledger: Ledger, run_id: str, kind: str, reason: str) -> None:
     def mark(r):
         if r.get("paused"):
             return False
-        r["paused"] = {"kind": kind, "reason": clip(reason, 600), "at": now()}
+        r["paused"] = {"kind": kind, "reason": notify.plain(clip(reason, 600)), "at": now()}
 
     _save(ledger, run_id, mark)
 
@@ -812,6 +838,17 @@ def hold(ledger: Ledger) -> None:
             if (rec.get("state") == "queued" and _of_plan(rec) and not rec.get("held") and not rec.get("paused")
                     and not rec.get("released_at") and not waiting_for(ledger, rec)):
                 pause(ledger, run_id, "budget", "it could start, and was not started because %s" % reason)
+
+    # A run that waits on a spec whose review was not given this run's text would start on a
+    # `continue` that says nothing about it. Nothing reads the report for it a second time (a
+    # finished run is reviewed once), so it is a pause, and `org release` is the person's answer.
+    for run_id in ledger.run_ids():
+        rec = ledger.run(run_id)
+        if rec.get("state") == "queued" and rec.get("after") and not rec.get("held") and not rec.get("paused") and not rec.get("released_at"):
+            unread = [s for s in rec["after"] if satisfied(ledger, s, rec)[1].endswith(UNREVIEWED)]
+            if unread:
+                pause(ledger, run_id, "unreviewed", "%s %s reviewed before this text of %s was approved, so no review has read it against "
+                      "what was built" % (_and([short(s) for s in unread]), "was" if len(unread) == 1 else "were", short(rec.get("spec_id") or "")))
 
     records = {r: ledger.run(r) for r in ledger.run_ids()}
     current = {}
@@ -871,19 +908,21 @@ def tell(ledger: Ledger) -> None:
         paused = rec.get("paused") or {}
         if not paused or paused.get("alerted_at"):
             continue
-        n, marked = _held_by(ledger, run_id), []
+        reason, since = paused.get("reason") or "", paused.get("at") or 0
 
         def mark(r):
             if not r.get("paused") or r["paused"].get("alerted_at"):
                 return False
             r["paused"]["alerted_at"] = now()
-            marked.append(r["paused"].get("reason") or "")
 
-        # Marked first: a pause is told once, even if the telling itself goes wrong. A record
-        # whose lock is busy is marked, and told, on a later tick.
+        # Told first and marked after, so that a tick that ends in between leaves a pause that
+        # is looked at again and never one that nobody was told of. The line in alerts.jsonl is
+        # the sign that it was told: a record whose lock is busy now is marked on a later tick
+        # without a second message.
+        if not any(a.get("run") == run_id and a.get("kind") == "pause" and a.get("reason") == reason and (a.get("at") or 0) >= since
+                   for a in notify.alerts(ledger)):
+            notify.pause(ledger, run_id, reason, _held_by(ledger, run_id))
         _save(ledger, run_id, mark)
-        if marked:
-            notify.pause(ledger, run_id, marked[0], n)
 
     marker = read_json(_marker(ledger), {}) or {}
     told = marker.get("finished") or {}
@@ -1028,7 +1067,7 @@ def annotate(ledger: Ledger, record: dict, view: dict) -> dict:
     Adds `after`, `held`, `paused` and `review` (without `proc`) as on the record, and appends to
     `warnings`: for a held run `held: <reason>. \\`org release <run>\\` starts it anyway`; for a
     paused run that holds something or has not ended `paused: <reason>. <n> run(s) held`; and
-    `notify.failed`'s sentence when the alert for its pause could not be sent.
+    `notify.failed`'s sentence when a message about this run could not be sent.
     """
     if not any(record.get(k) for k in ("after", "held", "paused", "review", "retry_of", "redispatch_of", "released_at")):
         return view
@@ -1048,9 +1087,9 @@ def annotate(ledger: Ledger, record: dict, view: dict) -> dict:
         # A paused queued run that holds only itself is told by its `held` line already.
         if n - itself > 0 or not (record.get("final") or itself):
             warnings.append("paused: %s. %d run(s) held" % (paused.get("reason") or "", n))
-        failed = notify.failed(ledger, run_id)
-        if failed:
-            warnings.append(failed)
+    failed = notify.failed(ledger, run_id)
+    if failed:
+        warnings.append(failed)
     view["warnings"] = warnings
     return view
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import unicodedata
 import urllib.error
 import urllib.request
@@ -72,6 +73,13 @@ def alerts(ledger: Ledger) -> List[dict]:
     return out
 
 
+def plain(text) -> str:
+    """`text` as one line with nothing in it that a terminal or a phone would act on: control and
+    format characters, line and paragraph separators included, become spaces, and runs of
+    whitespace one space. For text a model wrote that is shown to the person as it is."""
+    return " ".join("".join(" " if (unicodedata.category(c) in _DROP or c.isspace()) else c for c in str(text)).split())
+
+
 def clean(text: str, limit: int) -> str:
     """`text` as one line that is safe to show on a phone, at most `limit` characters.
 
@@ -80,17 +88,19 @@ def clean(text: str, limit: int) -> str:
     `scheme://`, no `www.`, no `name.tld` or dotted address, no `@` between words (the dots and
     the `://` are spaced out or replaced, so the words can still be read). Cut text ends in `…`.
     """
-    # Why each step: NFKC first, so a full-width dot or at-sign cannot slip past the rules below.
-    # Then the characters that draw nothing or break the line become spaces. `://` becomes a space,
-    # `www.` loses its dot, a dot between two word characters becomes a space (a dot that ends a
-    # sentence is followed by a space or the end, so it stays) and an `@` between two word
-    # characters becomes ` at `. None of these steps can make a new `://` or dot-pair, so one pass is enough.
-    text = unicodedata.normalize("NFKC", str(text))
-    text = "".join(" " if (unicodedata.category(c) in _DROP or c.isspace()) else c for c in text)
+    # Why each step: NFKC first, so a full-width dot or at-sign cannot slip past the rules below,
+    # and the ideographic full stop, which link detectors read as a dot and NFKC leaves alone,
+    # becomes one. Then the characters that draw nothing or break the line become spaces. `://`
+    # becomes a space. Every dot that is not followed by a space becomes a space, whatever stands
+    # around it: a rule that looked for a letter on each side would let `evil` with a combining
+    # mark through. A dot that ends a sentence is followed by a space or the end, so it stays.
+    # Every `@` becomes ` at `. None of these steps can make a new `://` or dotted name, so one
+    # pass is enough.
+    text = unicodedata.normalize("NFKC", str(text)).replace("\u3002", ".")
+    text = plain(text)
     text = text.replace("://", " ")
-    text = re.sub(r"(?i)\bwww\.", lambda m: m.group(0)[:3] + " ", text)
-    text = re.sub(r"(?<=\w)\.(?=\w)", " ", text)
-    text = re.sub(r"(?<=\w)@(?=\w)", " at ", text)
+    text = re.sub(r"\.(?=\S)", " ", text)
+    text = text.replace("@", " at ")
     text = " ".join(text.split())
     if len(text) > limit:
         text = text[: max(limit - 1, 0)].rstrip() + "…"
@@ -128,8 +138,12 @@ def _enqueue(ledger: Ledger, run_id: str, title: str, body: str) -> None:
     box = read_json(outbox_path(ledger), None)
     if not isinstance(box, dict):
         box = {}
-    box.setdefault("pending", []).append({"run": run_id, "title": title, "body": body, "tries": 0, "error": None, "at": now()})
     box.setdefault("failed", [])
+    # The same message about the same run is waiting already: a tick that ended between queueing
+    # it and writing its line to alerts.jsonl is doing this a second time.
+    if any(isinstance(e, dict) and e.get("run") == run_id and e.get("body") == body for e in box.setdefault("pending", [])):
+        return
+    box["pending"].append({"run": run_id, "title": title, "body": body, "tries": 0, "error": None, "at": now()})
     write_json(outbox_path(ledger), box)
 
 
@@ -163,11 +177,13 @@ def post(cfg: dict, title: str, body: str) -> Tuple[Optional[int], Optional[str]
 
 
 def pause(ledger: Ledger, run_id: str, reason: str, held: int) -> None:
-    """Record one pause: `alert(..., "pause", reason)`, and, when `notify.url` is set, put
-    `pause_body` in the outbox to be sent by `flush`. Called once for each pause, by `graph.tell`."""
-    alert(ledger, run_id, "pause", reason)
+    """Record one pause: when `notify.url` is set, put `pause_body` in the outbox to be sent by
+    `flush`, and then `alert(..., "pause", reason)`. Called once for each pause, by `graph.tell`,
+    which takes the line in alerts.jsonl as the sign that this was done: so the line is written
+    last, and a process that ends halfway leaves a pause that is told again, never one that is not."""
     if (ledger.config().get("notify") or {}).get("url"):
         _enqueue(ledger, run_id, TITLE, pause_body(run_id, reason, held))
+    alert(ledger, run_id, "pause", reason)
 
 
 def finished(ledger: Ledger, run_id: str, outcomes: List[Tuple[str, str]], total_usd: float) -> None:
@@ -179,8 +195,10 @@ def finished(ledger: Ledger, run_id: str, outcomes: List[Tuple[str, str]], total
     last = outcomes[-1][0] if outcomes else ""
     alert(ledger, last, "finished", "the plan finished: " + detail)
     if (ledger.config().get("notify") or {}).get("url"):
-        head, tail = "org: plan finished: ", ". org status"
-        body = head + clean(detail, max(BODY_MAX - len(head) - len(tail), 1)) + tail
+        # The amount is made here from a number, so it needs no cleaning, and cleaning would
+        # space out its dot: only the runs' names and outcomes go through `clean`.
+        head, tail = "org: plan finished: ", "; $%.2f spent. org status" % total_usd
+        body = head + clean(what, max(BODY_MAX - len(head) - len(tail), 1)) + tail
         _enqueue(ledger, last, FINISHED_TITLE, body[:BODY_MAX])
 
 
@@ -188,8 +206,10 @@ def flush(ledger: Ledger) -> None:
     """Send what the outbox holds. Each entry is {"run", "title", "body", "tries", "error", "at"}.
     A send that gets a 2xx removes the entry; any other outcome counts a try, and after MAX_TRIES
     the entry moves to the outbox's `failed` list with its last error. One try per entry per
-    call, so retries fall on later pumps. Does nothing, and reads nothing but the outbox's
-    existence, when there is no outbox. Never raises."""
+    call, so retries fall on later pumps, and a call that has spent TIMEOUT_S leaves the rest
+    for the next one without counting a try: a pump waits for a server that does not answer at
+    most about twice that, however many messages are waiting. Does nothing, and reads nothing
+    but the outbox's existence, when there is no outbox. Never raises."""
     try:
         if not outbox_path(ledger).exists():
             return
@@ -197,8 +217,11 @@ def flush(ledger: Ledger) -> None:
         if not isinstance(box, dict) or not box.get("pending"):
             return
         cfg = ledger.config()
-        still, gone = [], box.get("failed") or []
+        still, gone, began = [], box.get("failed") or [], time.monotonic()
         for entry in box["pending"]:
+            if time.monotonic() - began > TIMEOUT_S:
+                still.append(entry)
+                continue
             status, why = post(cfg, entry.get("title") or TITLE, entry.get("body") or "")
             if status is not None and 200 <= status < 300:
                 continue

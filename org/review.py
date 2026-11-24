@@ -21,6 +21,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import uuid
 from pathlib import Path
 from typing import List, Optional
@@ -168,6 +169,11 @@ def session(ledger: Ledger, text: str, timeout_s: float) -> dict:
             result["timed_out"] = True
             result["error"] = "the review session ran longer than %g seconds and was killed" % timeout_s
             return result
+        except BaseException:
+            # This process is being ended (org/graph.py does that to a review that outlives its
+            # time): the session is in a group of its own and would go on spending without it.
+            _kill(proc)
+            raise
         final = None
         for raw in out.decode("utf-8", "replace").splitlines():
             try:
@@ -220,7 +226,15 @@ def run(ledger: Ledger, run_id: str, attempt: int = 1) -> int:
     except (TypeError, ValueError):
         timeout_s = 15 * 60.0
     spec_id = ledger.run(run_id).get("spec_id") or ""
-    got = session(ledger, message(ledger, run_id), timeout_s)
+    # Ended from outside, this process leaves as an exception would, so that `session` ends the
+    # model's session on the way out. Only where a handler can be set: the main thread.
+    main = threading.current_thread() is threading.main_thread()
+    before = signal.signal(signal.SIGTERM, lambda *_: sys.exit(143)) if main else None
+    try:
+        got = session(ledger, message(ledger, run_id), timeout_s)
+    finally:
+        if main:
+            signal.signal(signal.SIGTERM, before)
     problems, answer = [], None
     if got["timed_out"]:
         kind = "timeout"

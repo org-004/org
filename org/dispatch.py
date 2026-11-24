@@ -510,9 +510,14 @@ def stop(ledger: Ledger, run_id: str) -> str:
     """Ask the runner to stop. It ends the engineer's turn and records the run as stopped."""
     rec = ledger.run(run_id)
     if rec.get("state") == "queued":
-        rec.update(state="stopped", final=True, error="stopped while queued")
-        ledger.save_run(run_id, rec)
-        return "removed from the queue"
+        # Under the placement lock, as every other writer of a queued run's record is (`start`,
+        # and the holds of org/graph.py): written beside one of them, the run could come back queued.
+        with _placing(ledger):
+            rec = ledger.run(run_id)
+            if rec.get("state") == "queued":
+                rec.update(state="stopped", final=True, error="stopped while queued")
+                ledger.save_run(run_id, rec)
+                return "removed from the queue"
     tr = for_machine(rec["machine"], ledger.config())
     script = ('RUN="%s"; touch "$RUN/STOP"; '
               'PID=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(\'pid\',\'\'))" "$RUN/status.json" 2>/dev/null); '

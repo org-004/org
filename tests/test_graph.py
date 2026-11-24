@@ -123,7 +123,10 @@ class GraphCase(AfterCase):
 
     def reviewed(self, run_id, verdict="continue", reason="the next spec still fits", notes=None):
         rec = self.ledger.run(run_id)
-        rec["review"] = {"state": "done", "attempts": 1, "verdict": verdict, "reason": reason, "notes": notes or {}, "cost_usd": 0.4}
+        # As `apply_verdict` leaves it: a `continue` is about the text of each spec that waited then.
+        read = {w: self.ledger.spec_meta(w)["sha256"] for w in graph.waiters(self.ledger, rec["spec_id"])} if verdict == "continue" else {}
+        rec["review"] = {"state": "done", "attempts": 1, "verdict": verdict, "reason": reason, "notes": notes or {}, "reviewed": read,
+                         "cost_usd": 0.4}
         self.ledger.save_run(run_id, rec)
         return run_id
 
