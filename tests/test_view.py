@@ -32,6 +32,9 @@ from org.util import write_json  # noqa: E402
 # directory of its own, they are nowhere.
 os.environ["ORG_SECRETS_DIR"] = os.path.join(tempfile.gettempdir(), "org-tests-no-secrets")
 
+# The kernel's count of memory kills is read from $ORG_CGROUP_DIR: this machine's own count may be above zero, and no test may depend on it.
+os.environ["ORG_CGROUP_DIR"] = os.path.join(tempfile.gettempdir(), "org-tests-no-cgroup")
+
 RUN = "001-viewer-r1"
 
 
@@ -199,6 +202,46 @@ class ViewCase(unittest.TestCase):
         while time.time() < end and self.server.views.relays():
             time.sleep(0.05)
         return self.server.views.relays() == 0
+
+
+class MemoryKills(ViewCase):
+    LINE = "%s: 2 processes were killed for memory in its container (limit 2219MiB)" % RUN
+
+    def killed(self, count, limit="2219MiB"):
+        self.run_record(RUN, oom_kill=count, machine={"kind": "incus", "name": "org-eng-" + RUN, "limits": {"memory": limit} if limit else {}})
+
+    def org(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(["--home", str(self.ledger.root)] + list(argv))
+        return code, out.getvalue()
+
+    def test_a_run_with_kills_is_flagged_in_status_and_peek_and_carried_in_json(self):
+        self.killed(2)
+        code, out = self.org("status", "--no-sync")
+        self.assertEqual(code, 0)
+        self.assertIn("  ! " + self.LINE, out.splitlines())
+        code, out = self.org("peek", RUN)
+        self.assertIn("warning:   2 processes were killed for memory in its container (limit 2219MiB)", out.splitlines())
+        code, out = self.org("status", "--no-sync", "--json")
+        run = json.loads(out)["runs"][0]
+        self.assertEqual((run["oom_kill"], run["memory_limit"]), (2, "2219MiB"))
+
+    def test_one_kill_is_in_the_singular_and_an_unknown_limit_leaves_out_the_parenthesis(self):
+        self.killed(1, limit=None)
+        _, out = self.org("status", "--no-sync")
+        self.assertIn("  ! %s: 1 process was killed for memory in its container" % RUN, out.splitlines())
+        self.assertNotIn("(limit", out)
+        self.assertIsNone(json.loads(self.org("status", "--no-sync", "--json")[1])["runs"][0]["memory_limit"])
+
+    def test_no_kills_or_no_count_print_no_line_and_zero_stays_zero_in_json(self):
+        for count in (0, None):
+            self.killed(count)
+            for argv in (("status", "--no-sync"), ("peek", RUN)):
+                self.assertNotIn("killed for memory", self.org(*argv)[1])
+            self.assertEqual(json.loads(self.org("status", "--no-sync", "--json")[1])["runs"][0]["oom_kill"], count)
+        self.run_record(RUN)  # a record from before the count existed
+        self.assertIsNone(json.loads(self.org("status", "--no-sync", "--json")[1])["runs"][0]["oom_kill"])
 
 
 class WhoGetsIn(ViewCase):

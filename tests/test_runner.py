@@ -18,6 +18,9 @@ sys.path.insert(0, str(ROOT))
 from org import runner, schemas  # noqa: E402
 from org.util import read_json, sha256_bytes  # noqa: E402
 
+# The kernel's count of memory kills is read from $ORG_CGROUP_DIR: this machine's own count may be above zero, and no test may depend on it.
+os.environ["ORG_CGROUP_DIR"] = os.path.join(tempfile.gettempdir(), "org-tests-no-cgroup")
+
 FAKE = ROOT / "tests" / "fake_claude.py"
 SPEC = "---\ntitle: Test spec\n---\n\n## Intent\n\nProve the runner.\n"
 
@@ -337,6 +340,38 @@ class RunnerCase(unittest.TestCase):
         self.assertEqual(self.status()["state"], "done")
         self.assertEqual([c["label"] for c in self.calls()], ["plan", "milestone:M1", "milestone:M2", "report"])
         self.assertAlmostEqual(self.status()["cost"]["confirmed_usd"], 0.25 + 0.3 + 0.3 + 0.1, places=6)
+
+    def test_the_engineer_is_told_how_much_memory_it_has_and_what_a_kill_looks_like(self):
+        text = runner.machine_facts({"docker": "yes", "cores": "4", "memory_limit": "2219MiB"})
+        for phrase in ("2219MiB of memory", "hard limit", "killed by the kernel", "`Killed`", "`terminated`",
+                       "lower its parallelism", "not to run it again unchanged", "/sys/fs/cgroup/memory.events", "`oom_kill`"):
+            self.assertIn(phrase, text)
+        self.assertLess(text.index("CPU cores"), text.index("2219MiB"))
+        self.assertLess(text.index("oom_kill"), text.index("Docker works here"))
+        self.assertIn("5GiB of memory", runner.machine_facts({"memory_limit": "5GiB"}))
+
+    def test_without_a_valid_memory_limit_the_engineer_is_told_exactly_what_it_was_before(self):
+        base = {"docker": "yes", "cores": "4"}
+        expected = runner.machine_facts(base)
+        self.assertTrue(expected.startswith("It has 4 CPU cores. Docker works here"))
+        for bad in (None, "", "lots", "12", "12MB", "-5GiB", "5 GiB", "5GiB\n", 2219, ["5GiB"]):
+            self.assertEqual(runner.machine_facts(dict(base, memory_limit=bad)), expected, bad)
+
+    def test_snapshot_carries_the_kernels_count_of_memory_kills(self):
+        self.job({"plan": PLAN_TURN, "milestone:M1": DONE("M1"), "milestone:M2": DONE("M2"), "report": REPORT})
+        self.go()
+        self.assertIsNone(runner.snapshot(self.run_dir)["oom_kill"], "no memory.events, no count")
+        cgroup = Path(tempfile.mkdtemp(prefix="org-cgroup-"))
+        self.addCleanup(shutil.rmtree, cgroup, ignore_errors=True)
+        self.addCleanup(os.environ.__setitem__, "ORG_CGROUP_DIR", os.environ["ORG_CGROUP_DIR"])
+        os.environ["ORG_CGROUP_DIR"] = str(cgroup)
+        for text, want in (("low 0\nhigh 0\nmax 3\noom 4\noom_kill 2\noom_group_kill 0\n", 2), ("oom_kill 0\n", 0),
+                           ("low 0\noom 1\n", None), ("oom_kill many\n", None), ("", None)):
+            (cgroup / "memory.events").write_text(text)
+            self.assertEqual(runner.snapshot(self.run_dir)["oom_kill"], want, text)
+        (cgroup / "memory.events").unlink()
+        (cgroup / "memory.events").mkdir()  # unreadable as a file
+        self.assertIsNone(runner.snapshot(self.run_dir)["oom_kill"])
 
     def test_snapshot_is_incremental(self):
         self.job({"plan": PLAN_TURN, "milestone:M1": DONE("M1"), "milestone:M2": DONE("M2"), "report": REPORT})

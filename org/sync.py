@@ -106,6 +106,8 @@ def _sync_locked(ledger: Ledger, run_id: str, rec: dict, timeout: float, slices:
         heartbeat_age_s=max(0.0, remote_now - beat),
         clock_skew_s=round(now() - remote_now, 1),
         state=state or rec.get("state"),
+        # Kept only as a whole number: an older bundle sends none, and this one is input from outside.
+        oom_kill=_count(snap.get("oom_kill"), None),
     )
     if state in TERMINAL_STATES and events["offset"] >= events["size"]:
         rec["final"] = True  # finished and fully copied: no reason to ask again

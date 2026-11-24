@@ -335,6 +335,8 @@ def cmd_peek(args) -> int:
             print("           subagent running: %s" % a)
     for w in v["warnings"]:
         print("warning:   %s" % w)
+    if status.oom_line(v):
+        print("warning:   %s" % status.oom_line(v))
     if v["health"] != "ok":
         print("health:    %s%s" % (v["health"], (" — " + str(rec.get("last_error"))) if rec.get("last_error") else ""))
     if args.lines:

@@ -1034,6 +1034,13 @@ def machine_facts(facts: dict) -> str:
     """What dispatch found on the machine just before the run, as the engineer is told it."""
     cores = str(facts.get("cores") or "").strip()
     out = ["It has %s CPU core%s." % (cores, "" if cores == "1" else "s")] if cores.isdigit() else []
+    limit = facts.get("memory_limit")
+    if isinstance(limit, str) and re.fullmatch(r"[0-9]+(MiB|GiB)", limit):
+        out.append("This machine has %s of memory, and that is a hard limit: a process that takes the container past it is "
+                   "killed by the kernel." % limit)
+        out.append("A build tool that sizes itself by the number of cores can use more than that, so a compiler or a test that "
+                   "ends with `Killed` or `terminated` is a reason to lower its parallelism, not to run it again unchanged.")
+        out.append("`/sys/fs/cgroup/memory.events` counts such kills on its `oom_kill` line.")
     docker = facts.get("docker")
     if docker == "yes":
         out.append("Docker works here: a daemon of this machine's own answered `docker info` just before the run, so you can "
@@ -1053,6 +1060,22 @@ def pid_alive(pid) -> bool:
         return True
     except (OSError, ValueError, TypeError):
         return False
+
+
+def oom_kills():
+    """The kernel's count of processes killed in this machine's cgroup, and everything under it, for being over its memory limit.
+
+    None when the file is missing, unreadable or has no such line; it never raises.
+    """
+    try:
+        text = Path(os.environ.get("ORG_CGROUP_DIR") or "/sys/fs/cgroup", "memory.events").read_text()
+        for line in text.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0] == "oom_kill" and parts[1].isdigit():
+                return int(parts[1])
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 def snapshot(run_dir, events_from: int = 0, max_bytes: int = 2_000_000) -> dict:
@@ -1090,4 +1113,5 @@ def snapshot(run_dir, events_from: int = 0, max_bytes: int = 2_000_000) -> dict:
         "files": files,
         "events": events,
         "log_tail": log[-4000:],
+        "oom_kill": oom_kills(),
     }

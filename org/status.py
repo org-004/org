@@ -18,6 +18,15 @@ STALE_AFTER_S = 180
 MARK = {"done": "done ✓", "partial": "partial ◑", "failed": "failed ✗", "stopped": "stopped ■", "waiting": "waiting ⏸"}
 
 
+def oom_line(v: dict) -> Optional[str]:
+    """The sentence about processes killed for memory in a run's container, or None when there were none."""
+    n = v.get("oom_kill")
+    if not isinstance(n, int) or n <= 0:
+        return None
+    limit = " (limit %s)" % v["memory_limit"] if v.get("memory_limit") else ""
+    return "%d process%s killed for memory in its container%s" % (n, " was" if n == 1 else "es were", limit)
+
+
 def run_view(ledger: Ledger, run_id: str, rate: Optional[float]) -> dict:
     rec = ledger.run(run_id)
     st = read_json(ledger.mirror_dir(run_id) / "status.json") or {}
@@ -86,6 +95,8 @@ def run_view(ledger: Ledger, run_id: str, rate: Optional[float]) -> dict:
         "result": st.get("result"),
         "end_reason": st.get("end_reason"),
         "warnings": st.get("warnings") or [],
+        "oom_kill": rec.get("oom_kill"),
+        "memory_limit": ((machine.get("limits") or {}).get("memory")),
         "retries": st.get("retries") or 0,
         "turns": st.get("turns") or 0,
         "caps": st.get("caps") or {},
@@ -235,6 +246,8 @@ def render(state: dict, width: Optional[int] = None) -> str:
         for v in runs:
             for w in v["warnings"]:
                 lines.append("  ! %s: %s" % (v["run_id"], clip(w, width - 8)))
+            if oom_line(v):
+                lines.append("  ! %s: %s" % (v["run_id"], oom_line(v)))
     else:
         lines.append("No runs yet.")
     if state["drafts"]:
