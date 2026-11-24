@@ -485,6 +485,69 @@ organization named by `github.owner` (the only place an engineer can push), and 
 the spec names is one this installation has. Changing an approved spec means revising the draft
 and approving again, which records a new version and starts a new run.
 
+### Plans
+
+Work that builds on other work is written as several specs, each approved on its own text, and
+joined by one more line in the header:
+
+```
+---
+title: Memory kills in org status
+project: org
+repos: org-004/org
+after: 008, 9           # spec ids or numbers; the spec waits for each of them
+max_cost_usd: 20
+---
+```
+
+Approving it creates its run as usual, and the run stays `queued` until every spec it names is
+satisfied. A spec is satisfied when the latest run of its latest approved version reported `done`
+or `partial` and the review of that run said `continue`. A stopped run, a failed run and a run of
+an earlier version never satisfy. The run's `queue_reason` says what it waits for, for example
+`waiting for 009 (executing) and 011 (not approved yet)`, and the specs may be approved in any
+order. `org spec check` refuses a spec that names itself, one that does not exist, or a set whose
+`after` lines form a cycle, and says which. A spec without `after` is checked, approved and run
+as it always was, and a ledger with no plan in it does nothing new.
+
+When a run that another spec waits on ends, `pump` starts a review of it: one headless `claude -p`
+session with exactly the settings of the manager's `ask` mode, so it can read and run the
+read-only `org` commands and nothing outward. It is given the run's spec, its report, the output
+of `org review` and the text of every spec that names the run in `after`, and answers `continue`,
+`retry` or `pause` with a reason of at most 300 characters and, for `continue`, a note for each
+waiting spec. Code bounds what the answer can do. `continue` is honoured only when the report said
+`done` or `partial`. `retry` dispatches the same approved text again, only when the report did not
+say `done`, and at most `graph.max_retries` times per version of a spec. An answer that is invalid
+twice, a session that fails, one that takes longer than `graph.review_timeout_min`, or a review
+process that dies twice is a pause. The review changes no spec and approves none. Its cost is
+recorded on the run and shown by `org review`; its model and effort are `manager.review_model` and
+`manager.review_effort`.
+
+A run that starts in a plan finds `earlier/<run id>/report.md` and `review.md` in its run directory
+for each run it came after, and for the failed attempt it retries: what was really built before it,
+how that run ended, and what the review noted for it. Without a review, and only for runs of a plan,
+a runner that has been dead for `graph.dead_after_min` minutes or a machine that stopped is resumed,
+at most `graph.max_resumes` times per run, and a run that never got a machine is dispatched once more.
+Nothing starts, retries or resumes by itself while the weekly limit is at or above
+`graph.pause_above_weekly_pct` percent.
+
+Everything else is a pause. The run that caused it is marked, every queued run that waits on it,
+directly or through other specs, is held, and `org status` shows the held reason and a `!` line on
+the cause; the dashboard shows the same through the run's warnings. Every pause, retry and resume is
+a line in `alerts.jsonl`. With `notify.url` set, each pause is also one HTTP POST made by `org`
+itself, `org: <run> paused: <reason>. <n> run(s) held. org status`, at most 400 characters, with a
+`Title` header and the headers in `notify.headers`. The reason was written by a model that read
+text from public sources, so links and control characters are removed in code before it is sent. A
+failed send is tried again on later pumps, three times in all, and then shown as a `!` line. A push
+service that takes a POST can forward it to a phone or to mail; org holds no mail account and no
+secret for it. When the last run of a plan ends with nothing held, one message says so.
+
+`org release <run or spec>` is yours alone: it starts a held run when a slot is free, whatever it
+waited for, and what depends on it waits for it as usual. The manager chat and the headless modes
+cannot run it. Dispatching the paused spec again by hand also lifts the holds, and the waiting runs
+then wait for the new run. `org stop` on a queued or held run ends it without it ever starting.
+`org graph` prints every plan. Set the address with `org config set notify.url '"https://..."'`
+and check it with `org notify test`.
+
 ## Time, money and the weekly limit
 
 - **Spend** is the CLI's own cost figure at list prices, taken at the end of every turn. Inside a
@@ -512,6 +575,9 @@ org plan|report|review <run>
 org ls|cat|diff <run>           an engineer's files        org exec <run> -- <cmd>
 org view <run> <port>           a web app in an engineer's container (new; needs dash.view)
 org stop <run>                  org resume <run> | --interrupted
+org graph                       every plan: specs, runs, what waits, each review's verdict
+org release <run or spec>       start a held run of a plan anyway
+org notify test                 send one test message to notify.url
 org machine ls | rm <run>       org pool                   org pump
 org drain [--wait] [--reason R] [--status]                 org undrain
 org upgrade <ref> | --rollback  install a commit from the default branch, or go back one
@@ -540,10 +606,14 @@ Everything is optional; these are the values `org up` sets and the defaults arou
   "github": {"owner": "<organization>"},
   "engineer": {"model": "fable", "effort": "high", "max_turn_retries": 3, "report_reserve_usd": 3.0},
   "manager": {"model": "fable", "effort": "high", "ask_model": "sonnet", "sandbox": true, "own_claude": true,
+              "review_model": null, "review_effort": null,
               "network_allow": ["github.com", "*.github.com", "*.githubusercontent.com"]},
   "budget": {"usd_per_weekly_pct": null},
   "status": {"sync_timeout_s": 8},
-  "dash": {"port": 8787, "sync_interval_s": 10}
+  "dash": {"port": 8787, "sync_interval_s": 10},
+  "graph": {"max_retries": 1, "max_resumes": 2, "dead_after_min": 5, "review_timeout_min": 15,
+            "pause_above_weekly_pct": 80},
+  "notify": {"url": null, "headers": {}}
 }
 ```
 
@@ -552,6 +622,15 @@ Everything is optional; these are the values `org up` sets and the defaults arou
 and do not change an existing one. The memory limit's settings, `machines.incus.memory` and
 `machines.incus.memory_reserve`, are described under [The memory limit](#the-memory-limit); both
 are absent from the file above because they have defaults.
+
+The plan's settings are described under [Plans](#plans). `manager.review_model` and
+`manager.review_effort` are the review's model and effort, and `null` means the manager chat's own.
+`graph.max_retries` is the reviews' retries per version of a spec, `graph.max_resumes` the resumes
+per run, `graph.dead_after_min` the minutes a runner is dead before it is resumed,
+`graph.review_timeout_min` the minutes a review may take, and `graph.pause_above_weekly_pct` the
+share of the weekly limit at which nothing starts by itself. `notify.url` is where a pause is posted
+and `notify.headers` the headers sent with it; with no url, pauses show only in `org status` and the
+dashboard, and `org doctor` says so in its `alerts` row.
 
 Claude Code's settings in the template are written when it is built: no attribution lines in
 commits or pull requests, no auto memory, no claude.ai connectors, and a managed file that
@@ -575,6 +654,10 @@ in the VM, as the org user:
     runs/<run>/mirror/       status.json, plan.frozen.md, report.md, actuals.json, events.jsonl
     budget.json              weekly-limit readings
     drain.json               there while a drain is in force
+    graph.json               there once a spec with `after` was dispatched: this ledger has a plan
+    alerts.jsonl             every pause, automatic retry and resume, one line each
+    outbox.json              pauses on their way to notify.url, and those that could not be sent
+    runs/<run>/review.json   what the review's process wrote; review.log is its session's output
   ~/src/org/                 the checkout `org-vm install` made and `org upgrade` fetches into
   ~/.local/share/org/        releases/<commit>/, and the links `current` and `previous`
   the container org-cache    bazel-remote and /var/lib/bazel-remote (its results); holds no login
@@ -637,6 +720,7 @@ cd ~/.local/share/org/current
 python3 -m unittest discover -s tests       # no tokens spent: a scripted stand-in for the claude
                                             # CLI, and simulated incus and docker
 python3 tests/demo_ledger.py /tmp/demo && org --home /tmp/demo status      # made-up runs in every state
+python3 tests/demo_graph.py                 # three plans against the stand-ins; three lines ending in ok
 
 # with real Claude Code and the tokens handed in
 python3 tests/e2e.py --machine incus        # a real engineer in a real container (about a dollar)
@@ -670,6 +754,17 @@ bootstrap), then runs the whole of `org up`, which makes the cache container. Wi
 the copies, offers them the cache, builds in the first and requires cache hits in the second,
 requires that neither engineer's container can open a connection to the other, and removes what
 it made.
+
+Plans have unit tests in `tests/test_after.py` (the header, the refusals, what a run waits for and
+when a spec is satisfied), `tests/test_graph.py` (recovery, bounds, holds, release, the bundle),
+`tests/test_review.py` (each verdict under each report status, an invalid answer, a timeout, two
+pumps at once, a review process that died) and `tests/test_notify.py` (the body for a reason with a
+link, a newline and 2000 characters, and a local HTTP server that fails twice and then answers).
+`tests/demo_graph.py` runs three plans from approval to their end in a ledger of its own: B after A
+where A reports `done`; B after A where A fails, the review says `retry` and the second run reports
+`done`; and B after A where A fails twice, so that B is held, one message reaches a local server and
+`org release` starts B. It prints one line for each, ending in `ok`. All of it runs against
+`tests/fake_claude.py` and the simulated Incus.
 
 `tests/live_memory_incus.sh` needs the same kind of Incus and root. It copies a stand-in for the
 template with `machines.incus.memory` set to 128MiB, as dispatch does, and shows that `vet` finds
@@ -715,6 +810,11 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
   - The memory limit, apart from the VM: the unit tests, and `tests/live_memory_incus.sh` in an
     Incus of one's own, as described under Tests.
 - **Not yet exercised:**
+  - Plans: no real review has run and no real notification service has been posted to. Only the
+    scripted stand-in for the claude CLI and a local HTTP server have, so what a real review costs
+    and whether it reads a report well are not known. The first checks after upgrading are
+    `org notify test` against your `notify.url`, and then a plan of two specs of trivial work, to
+    see one real review in `org graph` and `org review`.
   - The manager chat and `org ask` in the VM, and an engineer landing a commit on the default
     branch of a repository on GitHub (the smoke spec pushes to a repository inside its own
     container).
@@ -775,6 +875,9 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
   reach the hosts on the sandbox's allow list, and its web search and fetch tools reach the web.
 - **A page an engineer serves is an untrusted web page** running in your browser on the Mac,
   when you open it with the web-app view.
+- **A plan acts without you only within bounds, and tells you only if you set an address.** One
+  retry and two resumes are the most it does; alerts are written on the next pump, not at the
+  instant of a pause; with no `notify.url` a pause shows only in `org status` and the dashboard.
 - **Nothing starts by itself.** After the Mac restarts, `org-vm up` brings the VM and the tokens
   back and `org resume --interrupted` restarts the runners. Until then nothing runs.
 - **Containers stay.** A finished run's container is kept until `org machine rm`; nothing
