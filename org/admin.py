@@ -25,7 +25,7 @@ from typing import List, Optional, Tuple
 
 from . import dispatch
 from .backends import BackendError
-from .backends.incus import memory_limit
+from .backends.incus import WITHOUT_A_LIMIT, memory_limit
 from .ledger import Ledger
 from .transport import Incus, TransportError
 from .util import now
@@ -185,7 +185,13 @@ def test_commit(sha: str, base: str, log=print, limit: Optional[str] = None) -> 
     log("testing %s in a container with no tokens (%s)" % (sha[:12], name))
     try:
         # The same limit an engineer's container gets: a suite that needs more fails here, not there.
-        tr = Incus.create(base, name, {"limits.memory": limit} if limit else None)
+        try:
+            tr = Incus.create(base, name, {"limits.memory": limit} if limit else None)
+        except TransportError as e:
+            if not limit:
+                raise
+            raise AdminError("%s. The copy was asked for limits.memory=%s; if Incus will not take that key here, %s."
+                             % (str(e).rstrip("."), limit, WITHOUT_A_LIMIT))
         tr.run("mkdir -p /root/t && tar -xf - -C /root/t", input=tar.stdout, timeout=120)
         p = tr.run("cd /root/t && python3 -m unittest discover -s tests 2>&1 | tail -25", timeout=1800, check=False)
         out = p.stdout.decode("utf-8", "replace").strip()

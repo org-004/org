@@ -271,6 +271,9 @@ is the first thing you will notice: on a 4 GiB machine with 4 slots the limit is
 (4096 - 3072) / 4 = 256 MiB each, which `org doctor` warns is too little. Lower the slots or the
 reserve, or set a size. The limit applies to containers made after the upgrade. A container
 already running is left alone, and a stopped one gets the limit when `org resume` starts it.
+A run that was dispatched before the upgrade carries the old release's runner, which knows
+nothing of the limit: resumed, its container is limited and its engineer is not told. A run
+dispatched after it is told at resume what its container was given then.
 
 Dispatch gives the limit to Incus on the `incus copy` command itself (`-c limits.memory=<n>MiB`),
 so the copy never exists or starts without it, and Incus enforces it hard by default. Before any
@@ -296,7 +299,9 @@ daemon's children, not the shell's, and are not covered.
 for example `! <run>: 2 processes were killed for memory in its container (limit 2219MiB)`;
 `org peek` shows the same, and `org status --json` carries `oom_kill`. The count includes kills
 in containers the engineer runs inside its own, because the kernel counts a cgroup together with
-everything under it. `org doctor` has a row `memory per engineer` (the limit, the slots, the
+everything under it. A container that is stopped and started counts from zero again, so the
+ledger keeps the highest count it has seen: the line does not go away, and may then say fewer
+than there were. `org doctor` has a row `memory per engineer` (the limit, the slots, the
 reserve and the machine's memory), and warns when there is no limit, when the limit times the
 slots exceeds `MemTotal` minus the reserve, or when the limit is under 2 GiB.
 

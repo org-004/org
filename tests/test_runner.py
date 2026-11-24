@@ -20,6 +20,9 @@ from org.util import read_json, sha256_bytes  # noqa: E402
 
 # The kernel's count of memory kills is read from $ORG_CGROUP_DIR: this machine's own count may be above zero, and no test may depend on it.
 os.environ["ORG_CGROUP_DIR"] = os.path.join(tempfile.gettempdir(), "org-tests-no-cgroup")
+# An engineer that runs this suite has a CLAUDE_CODE_SHELL_PREFIX of its own, from its runner, and a
+# runner keeps one it finds: the tests of the wrapper start without one.
+os.environ.pop("CLAUDE_CODE_SHELL_PREFIX", None)
 
 FAKE = ROOT / "tests" / "fake_claude.py"
 SPEC = "---\ntitle: Test spec\n---\n\n## Intent\n\nProve the runner.\n"
@@ -109,9 +112,10 @@ class RunnerCase(unittest.TestCase):
         if mine.exists():
             self.assertEqual(p.stdout.splitlines()[1:], [str(max(500, int(mine.read_text())))], "what it runs is killed first")
             # A command that is already marked higher is left as it is: the wrapper only ever raises.
-            p = subprocess.run(["sh", "-c", 'echo 800 > /proc/self/oom_score_adj && exec "$0" "cat /proc/self/oom_score_adj"', str(wrapper)],
+            higher = str(min(1000, max(500, int(mine.read_text())) + 100))
+            p = subprocess.run(["sh", "-c", 'echo "$1" > /proc/self/oom_score_adj && exec "$0" "cat /proc/self/oom_score_adj"', str(wrapper), higher],
                                capture_output=True, text=True, timeout=30)
-            self.assertEqual(p.stdout.strip(), "800")
+            self.assertEqual(p.stdout.strip(), higher)
         # A user who chose a prefix of their own keeps it.
         os.environ["CLAUDE_CODE_SHELL_PREFIX"] = "/somebody/elses"
         self.addCleanup(os.environ.pop, "CLAUDE_CODE_SHELL_PREFIX", None)

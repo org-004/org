@@ -213,7 +213,10 @@ small machine it is noticeable: 4 GiB and 4 slots give (4096 - 3072) / 4 = 256 M
 `org doctor` warns that is too little (it warns under 2 GiB). The owner lowers the slots or the
 reserve, or sets a size. It applies to containers made after the upgrade; one already running
 is left alone, since a limit that arrived under a build in progress could kill it, and a stopped
-one gets the limit when `org resume` starts it.
+one gets the limit when `org resume` starts it: set, read back from Incus as `vet` reads a new
+container's, and written into the run's facts so that the runner about to start tells the
+engineer. A run dispatched before the upgrade carries the old release's runner, which does not
+know the fact, so its container is limited and its engineer is not told.
 
 The limit rides on the copy command itself: `incus copy` is given `-c limits.memory=<n>MiB`, so
 the copy never exists, and never starts, without it. Setting it afterwards would leave a window
@@ -249,7 +252,9 @@ from `/sys/fs/cgroup/memory.events`. `org status` prints a `!` line under the ta
 (`! <run>: 2 processes were killed for memory in its container (limit 2219MiB)`), `org peek`
 shows the same and `org status --json` carries `oom_kill`. The count includes kills in
 containers the engineer runs inside its own, as the kernel counts a cgroup with everything under
-it, so it can say more than the engineer's own shell did. `org doctor` has a row `memory per
+it, so it can say more than the engineer's own shell did. A restarted container counts from
+zero, so sync keeps the highest count it has seen and never lowers it: that kills happened in
+a run stays visible, at the price of undercounting after a restart. `org doctor` has a row `memory per
 engineer` (limit, slots, reserve, machine memory) and warns when there is no limit, when the
 limit times the slots exceeds `MemTotal` minus the reserve, and when the limit is under 2 GiB.
 `org pool` shows the limit on the Incus line.

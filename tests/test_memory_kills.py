@@ -63,8 +63,11 @@ class MemoryKills(IncusCase):
         self.ledger.save_run(run_id, {"run_id": run_id, "state": "dispatched", "remote_dir": "$HOME/org-runs/" + run_id,
                                       "machine": {"kind": "incus", "name": "org-eng-" + run_id}, "events_offset": 0})
         base = {"ok": True, "now": 1.0, "files": {}, "events": {"offset": 0, "size": 0, "data": ""}}
-        cases = [({}, None), ({"oom_kill": 0}, 0), ({"oom_kill": 7}, 7), ({"oom_kill": "7"}, None), ({"oom_kill": -1}, None),
-                 ({"oom_kill": True}, None), ({"oom_kill": 2.0}, None), ({"oom_kill": None}, None), ({"oom_kill": [1]}, None)]
+        # In this order: what is not a count leaves none on record, and once there is one it never
+        # goes down, because a container that was restarted counts from zero and the kills still happened.
+        cases = [({}, None), ({"oom_kill": "7"}, None), ({"oom_kill": -1}, None), ({"oom_kill": True}, None), ({"oom_kill": 2.0}, None),
+                 ({"oom_kill": None}, None), ({"oom_kill": [1]}, None), ({"oom_kill": 0}, 0), ({"oom_kill": 7}, 7), ({"oom_kill": 0}, 7),
+                 ({}, 7), ({"oom_kill": "9"}, 7), ({"oom_kill": 9}, 9)]
         for extra, want in cases:
             with mock.patch.object(sync, "for_machine", return_value=Canned(dict(base, **extra))):
                 rec = sync.sync_run(self.ledger, run_id)

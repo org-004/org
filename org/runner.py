@@ -1063,7 +1063,8 @@ class Runner:
 SHELL_PREFIX = """#!/bin/bash
 # Written by org's runner. This machine has a hard memory limit, and Claude Code runs every
 # shell command of the session through this file so that, when the limit is reached, the kernel
-# kills a command before it kills the session that ran it. Only /proc/<pid>/oom_score_adj differs.
+# kills a command before it kills the session that ran it. The command's input, output,
+# environment and exit status pass through; what it is given is a higher /proc/<pid>/oom_score_adj.
 adj=
 { read -r adj < /proc/self/oom_score_adj; } 2>/dev/null
 case "$adj" in

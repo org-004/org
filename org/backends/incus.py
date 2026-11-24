@@ -230,8 +230,20 @@ class IncusBackend(Backend):
                 Incus.set_config(name, "limits.memory", limit)
             except TransportError as e:
                 raise TransportError("%s. If Incus will not take limits.memory here, %s." % (str(e).rstrip("."), WITHOUT_A_LIMIT))
+            # Read back before the start, as `vet` reads a new container's: what the record and the
+            # engineer are told is what Incus says, not what it was asked.
+            got = ((Incus.info(name) or {}).get("expanded_config") or {}).get("limits.memory")
+            if got != limit:
+                raise BackendError("%s was asked for limits.memory=%s and Incus describes it with %s, so its memory is not "
+                                   "limited as asked. If Incus will not keep that key here, %s."
+                                   % (name, limit, "no limits.memory" if got is None else "limits.memory=%s" % got, WITHOUT_A_LIMIT))
             machine["limits"] = dict(machine.get("limits") or {}, memory=limit)
         Incus.start(name)
+
+    def resume_facts(self, machine: dict, cfg: dict) -> dict:
+        # The limit on record is one Incus confirmed, at dispatch or just now in `before_resume`.
+        limit = (machine.get("limits") or {}).get("memory")
+        return {"memory_limit": limit} if limit else {}
 
     def build_cache(self, tr: Transport, cfg: dict, log, again: bool = False) -> Optional[dict]:
         # The cache is a container `org up` made, outside the prefix: this backend only reads

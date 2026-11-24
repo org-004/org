@@ -830,6 +830,39 @@ class AMemoryLimit(IncusCase):
         self.assertIn("If Incus will not take limits.memory here, " + WITHOUT_A_LIMIT, str(ctx.exception))
         self.assertFalse([c for c in self.calls()[before:] if c[0] == "start"])
 
+    def test_a_limit_given_at_resume_is_read_back_and_told_to_the_engineer(self):
+        self.configure(memory="none")
+        self.scenario(dict(TURNS, **{"milestone:M1": dict(TURNS["milestone:M1"], sleep=60)}))
+        run_id, rec = dispatch.dispatch(self.ledger, self.approved(), log=lambda m: None)
+        name = rec["machine"]["name"]
+        job = self.box(name) / "home" / "org-runs" / run_id / "job.json"
+        self.assertNotIn("memory_limit", read_json(job)["facts"])
+        st = self.wait_executing(run_id)
+        os.kill(st["pid"], 9)
+        subprocess.run(["pkill", "-f", str(self.tmp)], capture_output=True)
+        self.assertEqual(self.incus("stop", "-q", name).returncode, 0)
+        # The owner sets a limit, and one that Incus does not keep stops the resume before the start.
+        self.configure()
+        os.environ["FAKE_INCUS_LOSES"] = "limits.memory"
+        before = len(self.calls())
+        with self.assertRaises(BackendError) as ctx:
+            dispatch.resume(self.ledger, run_id)
+        self.assertIn("%s was asked for limits.memory=2219MiB and Incus describes it with no limits.memory" % name, str(ctx.exception))
+        self.assertFalse([c for c in self.calls()[before:] if c[0] == "start"])
+        del os.environ["FAKE_INCUS_LOSES"]
+        self.scenario(TURNS)
+        dispatch.resume(self.ledger, run_id)
+        self.assertEqual([c for c in self.calls()[before:] if c[0] in ("config", "start")][-2:],
+                         [["config", "set", name, "limits.memory", "2219MiB"], ["start", "-q", name]])
+        rec = self.ledger.run(run_id)
+        self.assertEqual((rec["machine"]["limits"], rec["facts"]["memory_limit"]), ({"memory": "2219MiB"}, "2219MiB"))
+        self.assertEqual(read_json(job)["facts"]["memory_limit"], "2219MiB", "the runner reads its facts from here when it starts")
+        self.assertEqual(read_json(job)["facts"]["cores"], rec["facts"]["cores"], "and the facts it had are still there")
+        self.assertEqual(self.wait_final(run_id)["state"], "done")
+        told = [json.loads(line)["env"]["CLAUDE_CODE_SHELL_PREFIX"] for line in (self.scen / "invocations.jsonl").read_text().splitlines()]
+        self.assertIsNone(told[0], "the session that began with no limit had no wrapper")
+        self.assertTrue(told[-1] and told[-1].endswith("/.org/shell-prefix"), "the one that went on under a limit has")
+
     def test_org_pool_shows_the_limit_and_a_setting_it_cannot_read(self):
         def pool():
             p = subprocess.run([sys.executable, "-m", "org", "--home", str(self.ledger.root), "pool"], capture_output=True, text=True,
