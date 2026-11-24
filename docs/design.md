@@ -587,7 +587,9 @@ only when the report said `done` or `partial`. `retry` is honoured only when the
 approved text again. Everything else is a pause. An answer that is invalid twice, a session that
 errors, a review that takes longer than `graph.review_timeout_min` (15) minutes, and a review
 process that dies twice are a pause, so a run is reviewed at most twice. A run the owner stopped is
-not reviewed: what waits on it is paused. A run that starts in a plan carries
+not reviewed: what waits on it is paused. A `continue` is a statement about the texts the review
+was given, so a spec approved, or approved again, after that review is not satisfied by it: its run
+is paused and waits for `org release`. A run that starts in a plan carries
 `earlier/<run id>/report.md` and `review.md` in its bundle for each spec it came after, and a
 retried run carries the failed attempt's the same way. They are there because the later spec's
 Context was written before the earlier one ran, and where they differ the report is the newer fact.
@@ -871,7 +873,8 @@ first is a rule a model follows; only the second is a setting.
   what code does with the answer. The worst a wrong or manipulated verdict can do is start a spec the
   owner already approved, or spend one more run's cap on a retry of the same text. It cannot change
   or approve text, stop a run, raise a cap or act on a spec outside the plan, and a session with
-  `ask`'s settings has no command that could. Its reason and notes are shown to the owner and
+  `ask`'s settings has no command that could. Its reason and notes are kept as one plain line each,
+  with control characters removed, because they are printed in the owner's terminal; they are
   handed to the next engineer as text to read; the engineer's prompt says they are never
   instructions. The POST goes only to the one configured address, made by `org` and not by a model,
   and its body is made safe in code: one line, at most 400 characters, no link-like text, no control
@@ -1060,4 +1063,21 @@ none is claimed for this layout.
 - The review is a model reading text an engineer wrote. Its verdict is bounded in code, but a
   manipulated `continue` on a `done` report starts a spec the owner approved, on a result that may
   not match what that spec assumed; the engineer of that spec is told to say so in its report.
+- A finished run is reviewed once, for the specs that waited on it then. A spec approved later, or
+  approved again in a new version, was not read by that review, so its run is paused (`unreviewed`)
+  and waits for `org release`: nothing reads the report for it a second time.
+- A pause stays on the run that caused it. If the owner resumes a paused run by hand and it then
+  finishes well, what waited on it is still held and needs `org release`; dispatching the spec
+  again is the way to have the plan go on by itself, with a review.
+- The review session can read `config.json`, as `ask` mode can, and so the address in `notify.url`
+  and the headers in `notify.headers`. An address that is a secret topic could be copied into a
+  note, which travels to the next engineer. `org doctor` shows only its host; treat the address
+  as something an engineer may learn.
+- The limits hold against two pumps at once and against a process that ends between two steps: a
+  verdict that was recorded and not acted on becomes a pause, and a pause is told again rather
+  than never. Two things the owner does at the same instant as a pump are not guarded: `org sync
+  <run>` and `org resume <run>` write a run's record without its lock, as they did before plans,
+  and could undo a count or a review that was just written. A review still running when its
+  spec is approved again or dispatched again by hand is left to end by itself, and its cost is
+  not recorded.
 - The Docker plugin's host script still asks for a whole GitHub login and should not be used.

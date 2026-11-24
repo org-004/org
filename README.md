@@ -876,7 +876,8 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
 - **A page an engineer serves is an untrusted web page** running in your browser on the Mac,
   when you open it with the web-app view.
 - **A plan acts without you only within bounds, and tells you only if you set an address.** One
-  retry and two resumes are the most it does; alerts are written on the next pump, not at the
+  retry of a spec's text and two resumes of each run are the most it does; a spec approved after
+  the review of what it waits on is held until you release it, because no review read it; alerts are written on the next pump, not at the
   instant of a pause; with no `notify.url` a pause shows only in `org status` and the dashboard.
 - **Nothing starts by itself.** After the Mac restarts, `org-vm up` brings the VM and the tokens
   back and `org resume --interrupted` restarts the runners. Until then nothing runs.
