@@ -6,6 +6,7 @@ import shutil
 import socket
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -95,6 +96,30 @@ class CleanTests(NotifyCase):
 
     def test_a_dot_that_ends_a_sentence_stays(self):
         self.assertEqual(notify.clean("It failed. Then it stopped.", 100), "It failed. Then it stopped.")
+
+
+    def test_nothing_that_reads_as_a_dot_in_a_name_or_an_at_sign_is_left(self):
+        for text in ("see evil。com now", "evil̲.com", "a.b", "x..y", "1.2.3.4", "a@b", "@evil", "mail x @ y", "ends with at@", "evil\u3002com"):
+            out = notify.clean(text, 100)
+            self.assertNotIn("\u3002", out, text)
+            self.assertNotIn("@", out, text)
+            # A dot is left only where a space or the end follows it, as at the end of a sentence.
+            self.assertIsNone(re.search(r"\.(?!\s|$)", out), (text, out))
+            self.assertIsNone(re.search(r"\w\.\w", out), (text, out))
+        self.assertEqual(notify.clean("see evil。com now", 100), "see evil com now")
+        self.assertEqual(notify.clean("1.2.3.4", 100), "1 2 3 4")
+
+    def test_a_sentences_final_dot_followed_by_a_space_or_the_end_stays(self):
+        self.assertEqual(notify.clean("It ended. Then evil.com did.", 100), "It ended. Then evil com did.")
+        self.assertEqual(notify.clean("Done.", 100), "Done.")
+
+    def test_plain_keeps_dots_and_removes_control_and_format_characters_and_newlines(self):
+        self.assertEqual(notify.plain("see a.b and 1.2.3. Next"), "see a.b and 1.2.3. Next")
+        self.assertEqual(notify.plain("a\x1b[2Jb\x07c\u202ed\u200be\nf\r\ng\u2028h\u2029i\tj"), "a [2Jb c d e f g h i j")
+        out = notify.plain("x\x00y\x7fz\u2066w\ufeffv")
+        for c in out:
+            self.assertNotIn(__import__("unicodedata").category(c), ("Cc", "Cf", "Zl", "Zp"), repr(c))
+        self.assertEqual(notify.plain(None), "None")
 
     def test_text_over_the_limit_is_cut_and_ends_in_an_ellipsis(self):
         out = notify.clean("word " * 100, 20)
@@ -200,6 +225,46 @@ class SendTests(NotifyCase):
             self.assertEqual(len(r.requests), 1)
             self.assertEqual(r.requests[0]["body"], "org: 001-a-r1 paused: needs a person. 2 run(s) held. org status")
             self.assertEqual(r.requests[0]["headers"]["Title"], notify.TITLE)
+        self.assertEqual(self.outbox(), {"pending": [], "failed": []})
+
+
+    def test_a_pause_told_twice_is_one_pending_entry_and_two_lines_in_alerts(self):
+        self.configure("http://127.0.0.1:9/x")
+        for _ in range(2):
+            notify.pause(self.ledger, "001-a-r1", "needs a person", 2)
+        self.assertEqual(len(self.outbox()["pending"]), 1)
+        self.assertEqual(len(notify.alerts_path(self.ledger).read_text().splitlines()), 2)
+        notify.pause(self.ledger, "001-a-r1", "needs a person", 3)
+        notify.pause(self.ledger, "002-b-r1", "needs a person", 2)
+        self.assertEqual(len(self.outbox()["pending"]), 3, "another count or another run is another message")
+
+    def test_the_message_is_queued_before_the_line_is_written(self):
+        self.configure("http://127.0.0.1:9/x")
+        with mock.patch.object(notify, "alert", side_effect=RuntimeError("ended here")):
+            with self.assertRaises(RuntimeError):
+                notify.pause(self.ledger, "001-a-r1", "needs a person", 2)
+        self.assertEqual([e["run"] for e in self.outbox()["pending"]], ["001-a-r1"])
+        self.assertEqual(notify.alerts(self.ledger), [])
+
+    def test_a_flush_that_has_spent_the_timeout_leaves_the_rest_untried_for_a_later_flush(self):
+        self.configure("http://127.0.0.1:9/x")
+        for run in ("r1", "r2", "r3"):
+            notify.pause(self.ledger, run, "why", 1)
+        calls = []
+
+        def slow(cfg, title, body):
+            calls.append(body)
+            time.sleep(0.6)
+            return None, "timed out"
+
+        with mock.patch.object(notify, "TIMEOUT_S", 0.2), mock.patch.object(notify, "post", slow):
+            notify.flush(self.ledger)
+        self.assertEqual(len(calls), 1, "only the first was tried")
+        self.assertEqual([(e["run"], e["tries"]) for e in self.outbox()["pending"]], [("r1", 1), ("r2", 0), ("r3", 0)])
+        sent = []
+        with mock.patch.object(notify, "post", lambda cfg, title, body: sent.append(body) or (200, None)):
+            notify.flush(self.ledger)
+        self.assertEqual(len(sent), 3, "a later flush goes on with all that is left")
         self.assertEqual(self.outbox(), {"pending": [], "failed": []})
 
     def test_a_server_that_fails_twice_and_then_answers_gets_the_message_on_the_third_flush(self):

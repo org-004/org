@@ -5,6 +5,7 @@ org/graph.py they are about; a few run real engineers in the simulated Incus whe
 itself is the point. The review process and the sending of alerts are stood in for in one
 place, `Stand-ins`, so that the real org/review.py and org/notify.py can replace them later.
 """
+import hashlib
 import io
 import json
 import os
@@ -260,6 +261,56 @@ class Satisfaction(GraphCase):
         self.assertEqual(graph.satisfied(self.ledger, a), (False, "executing"))
 
 
+    def test_a_waiter_approved_after_the_review_is_not_satisfied_and_is_paused_until_the_person_releases_it(self):
+        a = self.spec("First")
+        b = self.spec("Second", "1")
+        run_b = self.made(b, "queued")
+        run_a = self.reviewed(self.made(a))
+        self.assertIsNone(graph.waiting_for(self.ledger, self.rec(run_b)), "B was read by the review")
+        # C is approved only now, so the `continue` above says nothing about its text.
+        c = self.spec("Third", "1")
+        run_c = self.made(c, "queued")
+        words = "waiting for 001 (done, reviewed before this text was approved)"
+        self.assertEqual(graph.waiting_for(self.ledger, self.rec(run_c)), words)
+        self.assertEqual(graph.blocked(self.ledger, self.rec(run_c)), words)
+        self.tick()
+        rec = self.rec(run_c)
+        self.assertEqual(rec["paused"]["kind"], "unreviewed")
+        self.assertEqual(rec["held"]["cause"], run_c)
+        self.assertIn("no review has read it", rec["paused"]["reason"])
+        self.assertEqual([args[:2] for args in self.fake.calls("pause")], [(run_c, rec["paused"]["reason"])])
+        for _ in range(2):
+            self.tick()
+        self.assertEqual(len(self.fake.calls("pause")), 1, "told once")
+        for key in ("paused", "held"):
+            self.assertNotIn(key, self.rec(run_b), "the run the review did read is untouched")
+        self.assertIsNone(graph.blocked(self.ledger, self.rec(run_b)))
+        self.assertEqual(dispatch.pump(self.ledger), [run_b], "B starts, C does not")
+        self.assertEqual(self.rec(run_c)["state"], "queued")
+        self.assertEqual(self.rec(run_c)["queue_reason"], "held: " + rec["paused"]["reason"])
+        self.wait_final(run_b)
+        code, out, _ = self.org("release", run_c)
+        self.assertEqual(code, 0, out)
+        self.assertIsNone(graph.blocked(self.ledger, self.rec(run_c)))
+        self.tick()
+        self.assertNotIn("paused", self.rec(run_c), "a released run is not paused again")
+        self.assertEqual(self.rec(run_a)["review"]["verdict"], "continue")
+
+    def test_a_waiter_approved_again_in_a_new_version_after_the_review_is_paused_the_same_way(self):
+        a = self.spec("First")
+        b = self.spec("Second", "1")
+        self.reviewed(self.made(a))
+        self.ledger.draft_path(b).write_text(text_of("Second", "1").replace("without copy and paste", "without copying"))
+        self.assertEqual(self.approve(b)["version"], 2)
+        run_b = self.made(b, "queued")
+        self.assertEqual(graph.waiting_for(self.ledger, self.rec(run_b)), "waiting for 001 (done, reviewed before this text was approved)")
+        self.tick()
+        self.assertEqual(self.rec(run_b)["paused"]["kind"], "unreviewed")
+        self.assertEqual(self.rec(run_b)["held"]["cause"], run_b)
+        self.assertEqual(len(self.fake.calls("pause")), 1)
+        self.assertEqual(dispatch.pump(self.ledger), [], "it does not start")
+
+
 class Verdicts(GraphCase):
     def setUp(self):
         super().setUp()
@@ -313,6 +364,55 @@ class Verdicts(GraphCase):
         run_id = self.made(a)
         self.assertEqual(graph.apply_verdict(self.ledger, run_id, {"verdict": "approve", "reason": "go"}), "pause")
         self.assertEqual(self.rec(run_id)["paused"]["kind"], "review")
+
+
+    def test_a_continue_records_the_text_each_noted_waiter_had_when_it_was_read(self):
+        a, b, _ = self.pair()
+        c = self.spec("Third", "1")
+        d = self.spec("Fourth", "1")
+        run_id = self.made(a)
+        answer = {"verdict": "continue", "reason": "fine", "notes": [{"spec": b, "note": "n"}, {"spec": c, "note": "m"}, {"spec": "099-other", "note": "x"}]}
+        self.assertEqual(graph.apply_verdict(self.ledger, run_id, answer), "continue")
+        approved = lambda spec_id: hashlib.sha256((self.ledger.spec_dir(spec_id) / "spec.md").read_bytes()).hexdigest()  # noqa: E731
+        self.assertEqual(self.rec(run_id)["review"]["reviewed"], {b: approved(b), c: approved(c)}, "exactly the waiters that got notes, and not %s" % d)
+        for verdict in ("retry", "pause"):
+            other = self.made(a, "failed")
+            graph.apply_verdict(self.ledger, other, {"verdict": verdict, "reason": "no"})
+            self.assertEqual(self.rec(other)["review"]["reviewed"], {}, verdict)
+
+    def test_a_reason_and_a_note_with_escape_sequences_and_line_breaks_are_stored_as_one_plain_line(self):
+        a, b, _ = self.pair()
+        run_id = self.made(a)
+        evil = "fine\x1b[2J then \x1b]52;c;x\x07 and\nreview: continue \u202edone"
+        plain = "fine [2J then ]52;c;x and review: continue done"
+        self.assertEqual(graph.apply_verdict(self.ledger, run_id, {"verdict": "continue", "reason": evil, "notes": [{"spec": b, "note": evil}]}), "continue")
+        rv = self.rec(run_id)["review"]
+        self.assertEqual((rv["reason"], rv["notes"]), (plain, {b: plain}))
+        graph.pause(self.ledger, run_id, "review", "the review said continue: " + evil)
+        self.assertEqual(self.rec(run_id)["paused"]["reason"], "the review said continue: " + plain)
+        # The verdicts that pause keep the reason plain too.
+        other = self.made(a, "failed")
+        graph.apply_verdict(self.ledger, other, {"verdict": "pause", "reason": evil})
+        self.assertEqual(self.rec(other)["review"]["reason"], plain)
+        self.assertEqual(self.rec(other)["paused"]["reason"], "the review said pause: " + plain)
+
+    def test_what_org_status_graph_and_review_print_of_a_paused_run_has_no_control_character_and_no_forged_line(self):
+        a, b, _ = self.pair()
+        run_id = self.made(a)
+        evil = "fine\x1b[2J then \x1b]52;c;x\x07 and\nreview: continue \u202edone"
+        graph.apply_verdict(self.ledger, run_id, {"verdict": "continue", "reason": evil, "notes": [{"spec": b, "note": evil}]})
+        graph.pause(self.ledger, run_id, "review", "the review said continue: " + evil)
+        self.tick()
+        for argv in (("status",), ("graph",), ("review", run_id)):
+            code, out, err = self.org(*argv)
+            self.assertEqual(code, 0, (argv, err))
+            for bad in ("\x1b", "\x07", "\u202e"):
+                self.assertNotIn(bad, out, (argv, bad))
+            self.assertIn("review: continue done", out, argv)  # the text is there, as part of the one line it was
+            if argv[0] != "status":
+                # Only the line the program wrote begins `review:`; the note's own newline did not make another.
+                forged = [line for line in out.splitlines() if line.strip().startswith("review:")]
+                self.assertEqual(len(forged), 1, (argv, forged))
 
 
 class Bounds(GraphCase):
@@ -427,6 +527,36 @@ class Bounds(GraphCase):
         self.update(waiting, state="stopped", final=True)
         self.made(a, "done")
         self.tick()
+        self.assertEqual(self.fake.started, [])
+
+
+    def test_a_retry_verdict_on_record_that_nothing_followed_is_a_pause_of_kind_dispatch(self):
+        # The tick that recorded the verdict ended before it dispatched the run again.
+        a, run_id, waiting = self.finished()
+        self.reviewed(run_id, verdict="retry", reason="the clone timed out")
+        before = set(self.ledger.run_ids())
+        self.tick()
+        rec = self.rec(run_id)
+        self.assertEqual(rec["paused"]["kind"], "dispatch")
+        self.assertIn("the review said retry: the clone timed out", rec["paused"]["reason"])
+        self.assertIn("not dispatched again", rec["paused"]["reason"])
+        self.assertEqual(self.rec(waiting)["held"]["cause"], run_id)
+        self.assertEqual([args[:2] for args in self.fake.calls("pause")], [(run_id, rec["paused"]["reason"])])
+        self.assertEqual(self.fake.calls("pause")[0][2], 1)
+        self.assertEqual(set(self.ledger.run_ids()), before, "nothing was dispatched")
+        self.tick()
+        self.assertEqual(len(self.fake.calls("pause")), 1, "told once")
+        self.assertEqual(self.fake.started, [])
+
+    def test_a_pause_verdict_on_record_that_nothing_followed_is_a_pause_of_kind_review(self):
+        a, run_id, waiting = self.finished("done")
+        self.reviewed(run_id, verdict="pause", reason="the schema moved")
+        self.tick()
+        rec = self.rec(run_id)
+        self.assertEqual(rec["paused"]["kind"], "review")
+        self.assertEqual(rec["paused"]["reason"], "the review said pause: the schema moved")
+        self.assertEqual(self.rec(waiting)["held"]["cause"], run_id)
+        self.assertEqual(len(self.fake.calls("pause")), 1)
         self.assertEqual(self.fake.started, [])
 
 
@@ -550,6 +680,21 @@ class Recovery(GraphCase):
         self.assertEqual(self.rec(again)["paused"]["kind"], "dispatch")
         self.assertEqual(self.rec(waiting)["held"]["cause"], again)
 
+
+    def test_a_retry_that_never_got_a_machine_is_dispatched_again_with_what_it_retried_and_carries_that_report(self):
+        a, _, _ = self.pair()
+        dispatch.drain(self.ledger)
+        failed = self.reviewed(self.made(a, "failed"), verdict="retry", reason="the clone timed out")
+        retry = self.made(a, "dispatch_failed", plan={"retry_of": failed}, error="incus copy failed")
+        self.tick()
+        again = graph.current_run(self.ledger, a)
+        self.assertNotEqual(again, retry)
+        rec = self.rec(again)
+        self.assertEqual((rec["redispatch_of"], rec["retry_of"], rec["state"]), (retry, failed, "queued"))
+        files = dict(graph.bundle_files(self.ledger, again))
+        self.assertEqual(files["earlier/%s/report.md" % failed].decode(), REPORT)
+        self.assertIn("another attempt at the same spec", files["earlier/%s/review.md" % failed].decode())
+
     def test_a_run_of_no_plan_is_never_recovered(self):
         self.pair()
         lone = self.spec("Alone")
@@ -665,6 +810,16 @@ class Chain(GraphCase):
         view = status.run_view(self.ledger, run_a, None)
         self.assertIn("the alert for this pause could not be sent: HTTP 500", view["warnings"])
 
+
+    def test_a_message_about_a_run_that_is_not_paused_that_could_not_be_sent_is_a_warning_too(self):
+        a, b, waiting = self.pair()
+        sentence = "a message about this run could not be sent: HTTP 500"
+        self.fake.failed[waiting] = sentence
+        self.assertNotIn("paused", self.rec(waiting))
+        self.assertIn(sentence, status.run_view(self.ledger, waiting, None)["warnings"])
+        view = graph.annotate(self.ledger, self.rec(waiting), {"run_id": waiting, "warnings": []})
+        self.assertIn(sentence, view["warnings"])
+
     def test_a_pause_lifts_when_the_person_dispatches_that_spec_again(self):
         (a, b, c), (run_a, run_b, run_c) = self.chain()
         graph.pause(self.ledger, run_a, "review", "the review said pause: no")
@@ -724,6 +879,21 @@ class Release(GraphCase):
         self.assertFalse(self.box(rec["machine"]["name"]).exists())
 
 
+    def test_org_stop_ends_a_queued_run_that_waits_and_no_later_pump_starts_it(self):
+        a, b, waiting = self.pair()
+        self.assertNotIn("held", self.rec(waiting))
+        code, out, _ = self.org("stop", waiting)
+        self.assertEqual((code, out.strip()), (0, "removed from the queue"))
+        rec = self.rec(waiting)
+        self.assertEqual((rec["state"], rec["final"]), ("stopped", True))
+        self.assertEqual(dispatch.pump(self.ledger), [])
+        self.reviewed(self.made(a))
+        for _ in range(2):
+            self.assertEqual(dispatch.pump(self.ledger), [], "what it waited for is satisfied, and it is still not started")
+        self.assertEqual((self.rec(waiting)["state"], self.rec(waiting)["final"]), ("stopped", True))
+        self.assertFalse(self.box(rec["machine"]["name"]).exists())
+
+
 class WhatTravels(GraphCase):
     def test_a_run_after_another_carries_its_report_and_the_reviews_note(self):
         a, b, waiting = self.pair()
@@ -754,6 +924,19 @@ class WhatTravels(GraphCase):
         self.assertIn("The review said retry: the clone timed out", said)
         self.assertIn("earlier/%s/report.md" % failed, files)
 
+
+    def test_a_released_run_after_a_run_that_failed_is_told_that_it_did_not_satisfy_its_spec(self):
+        a, _, waiting = self.pair()
+        failed = self.made(a, "failed")
+        self.update(waiting, released_at=time.time())
+        said = dict(graph.bundle_files(self.ledger, waiting))["earlier/%s/review.md" % failed].decode()
+        self.assertIn("That run did not satisfy %s (" % a, said)
+        self.assertIn("the person released this run, and it started anyway", said)
+        self.assertIn("It ended failed", said)
+        # A run nobody released does not say so.
+        self.update(waiting, released_at=None)
+        self.assertNotIn("released", dict(graph.bundle_files(self.ledger, waiting))["earlier/%s/review.md" % failed].decode())
+
     def test_a_run_of_no_plan_carries_nothing_more(self):
         lone = self.made(self.spec("Alone"), "queued")
         self.assertEqual(graph.bundle_files(self.ledger, lone), [])
@@ -771,6 +954,40 @@ class Telling(GraphCase):
         self.assertEqual(len(self.fake.calls("finished")), 1)
         self.assertIn(",".join([first, waiting]), read_json(self.ledger.root / "graph.json")["finished"])
         self.assertTrue(self.fake.calls("flush"), "what waits to be sent is sent at every tick")
+
+
+    def test_a_pause_with_its_line_in_alerts_already_is_not_told_again_and_is_marked(self):
+        # The tick that told it ended before it marked the record: the line is the sign that it was told.
+        a, b, waiting = self.pair()
+        run_a = self.made(a, "failed")
+        graph.pause(self.ledger, run_a, "review", "the review said pause: no")
+        paused = self.rec(run_a)["paused"]
+        with open(notify.alerts_path(self.ledger), "a") as f:
+            f.write(json.dumps({"at": paused["at"] + 1, "run": run_a, "kind": "pause", "reason": paused["reason"]}) + "\n")
+        self.tick()
+        self.assertEqual(self.fake.calls("pause"), [])
+        self.assertIsNotNone(self.rec(run_a)["paused"].get("alerted_at"))
+
+    def test_a_line_that_is_older_than_the_pause_or_about_another_reason_does_not_count_as_telling_it(self):
+        a, b, waiting = self.pair()
+        run_a = self.made(a, "failed")
+        graph.pause(self.ledger, run_a, "review", "the review said pause: no")
+        paused = self.rec(run_a)["paused"]
+        with open(notify.alerts_path(self.ledger), "a") as f:
+            f.write(json.dumps({"at": paused["at"] - 100, "run": run_a, "kind": "pause", "reason": paused["reason"]}) + "\n")
+            f.write(json.dumps({"at": paused["at"] + 1, "run": run_a, "kind": "pause", "reason": "another reason"}) + "\n")
+            f.write(json.dumps({"at": paused["at"] + 1, "run": waiting, "kind": "pause", "reason": paused["reason"]}) + "\n")
+        self.tick()
+        self.assertEqual(len(self.fake.calls("pause")), 1)
+
+    def test_a_pause_with_no_line_is_told_exactly_once_over_several_ticks(self):
+        a, b, waiting = self.pair()
+        run_a = self.made(a, "failed")
+        graph.pause(self.ledger, run_a, "review", "the review said pause: no")
+        for _ in range(4):
+            self.tick()
+        self.assertEqual(self.fake.calls("pause"), [(run_a, "the review said pause: no", 1)])
+        self.assertIsNotNone(self.rec(run_a)["paused"]["alerted_at"])
 
     def test_a_plan_with_a_pause_is_not_told_as_finished(self):
         a, b, waiting = self.pair()

@@ -5,6 +5,7 @@ written by hand where its content matters, and run for real once.
 """
 import json
 import os
+import signal
 import sys
 import time
 import unittest
@@ -345,6 +346,59 @@ class Starting(ReviewCase):
         self.assertTrue(dispatch._gone(who), "it ended, and was not left as a zombie")
         self.assertEqual(review.outcome(self.ledger, run_id, 1)["kind"], "answer")
         self.assertTrue((self.ledger.run_dir(run_id) / "review.log").exists())
+
+
+    def processes_of_the_scripted_claude(self):
+        """Pids whose command line names this test's `claude`, found in /proc and not zombies."""
+        found, mine = [], str(self.bindir / "claude")
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                args = (entry / "cmdline").read_bytes().split(b"\0")
+                state = (entry / "stat").read_text().rsplit(")", 1)[1].split()[0]
+            except (OSError, IndexError):
+                continue
+            if mine.encode() in args and state != "Z":
+                found.append(int(entry.name))
+        return found
+
+    def test_a_review_process_ended_with_sigterm_takes_its_session_with_it(self):
+        run_id = self.finish()
+        self.script({"structured": GOOD_ANSWER, "sleep": 30})
+        who = review.start(self.ledger, run_id, 1)
+
+        def cleanup():
+            for pid in self.processes_of_the_scripted_claude() + [who["pid"]]:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+
+        self.addCleanup(cleanup)
+        end = time.time() + 30
+        while time.time() < end and not (self.invocations() and self.processes_of_the_scripted_claude()):
+            time.sleep(0.1)
+        sessions = self.processes_of_the_scripted_claude()
+        self.assertTrue(self.invocations(), "the scripted claude was invoked")
+        self.assertEqual(len(sessions), 1, sessions)
+        self.assertFalse(dispatch._gone(who), "the review process is alive")
+        os.kill(who["pid"], signal.SIGTERM)
+        end = time.time() + 30
+        while time.time() < end and (not dispatch._gone(who) or self.processes_of_the_scripted_claude()):
+            time.sleep(0.1)
+        self.assertTrue(dispatch._gone(who), "the review process ended")
+        self.assertEqual(self.processes_of_the_scripted_claude(), [], "and so did the session it had started")
+
+    def test_running_a_review_in_this_process_leaves_its_sigterm_handler_as_it_was(self):
+        run_id = self.finish()
+        self.script({"structured": GOOD_ANSWER})
+        marker = lambda *_: None  # noqa: E731
+        before = signal.signal(signal.SIGTERM, marker)
+        self.addCleanup(signal.signal, signal.SIGTERM, before)
+        review.run(self.ledger, run_id, 1)
+        self.assertIs(signal.getsignal(signal.SIGTERM), marker)
+        self.assertEqual(self.written(run_id)["kind"], "answer")
 
 
 class ThePrompt(ReviewCase):
