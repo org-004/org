@@ -82,7 +82,7 @@ class CacheCase(base.IncusCase):
         # The cache is never created, entered, started or deleted on behalf of a run.
         self.assertEqual([c for c in self.about_cache(name=name) if c[0] != "list"], [])
 
-    def up(self, server="up", refuse=""):
+    def up(self, server="up", refuse="", args=()):
         """`org up` as its user runs it, from a copy of this checkout whose cache.sh is a stub.
         `server` counts on the first call of a test only: a release made in the same second is reused.
         `refuse` names an `incus` command that fails in this call, as when Incus cannot do it."""
@@ -104,7 +104,7 @@ class CacheCase(base.IncusCase):
             wrapper.chmod(0o755)
         # The `org` that up.sh installs reads $ORG_HOME, else ~/.org: here it is this test's ledger.
         env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ["PATH"], ORG_HOME=str(self.ledger.root))
-        return subprocess.run(["bash", str(scratch / "incus" / "up.sh")], cwd=str(scratch), env=env, capture_output=True, text=True,
+        return subprocess.run(["bash", str(scratch / "incus" / "up.sh")] + list(args), cwd=str(scratch), env=env, capture_output=True, text=True,
                               stdin=subprocess.DEVNULL, timeout=120)
 
     def dispatched(self, title="CSV export"):
@@ -230,6 +230,21 @@ class OrgUpMakesTheCache(CacheCase):
         self.assertEqual((self.box(CACHE) / "home" / "was-given").read_text(), "9500 20\n")
         seen = cache.settings({"machines": {"incus": {"cache": odd}}})
         self.assertEqual((seen["name"], seen["port"]), (CACHE, 9500))
+
+
+class OrgUpSetsTheMemoryLimit(CacheCase):
+    def test_org_up_memory_writes_the_setting_and_refuses_what_dispatch_would_refuse_before_anything(self):
+        for value in ("lots", "05GiB", "4GB", "0MiB", "Auto", ""):
+            p = self.up(args=("--memory", value))
+            self.assertEqual(p.returncode, 1, value)
+            self.assertIn("org: --memory %s is not auto, none or a size" % value, p.stderr)
+            self.assertEqual(self.calls(), [], "refused before incus hears of it")
+            self.assertNotIn("memory", self.ledger.config()["machines"]["incus"])
+        p = self.up(args=("--memory", "4GiB"))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.ledger.config()["machines"]["incus"]["memory"], "4GiB")
+        self.assertEqual(self.up(args=("--memory", "none")).returncode, 0)
+        self.assertEqual(self.ledger.config()["machines"]["incus"]["memory"], "none")
 
 
 class DispatchOffersTheCache(CacheCase):

@@ -4,6 +4,7 @@
 #   org up                      install this copy of org, make what is missing, start the dashboard
 #   org up --rebuild-template   also build a new template for engineers and switch to it
 #   org up --slots 6            engineers that may run at once (default 4)
+#   org up --memory 4GiB        each engineer's memory limit: auto (the default), none, or a size
 #   org up --port 9000          the dashboard's port (default 8787)
 #   org up --owner org-004      the GitHub organization specs may name repositories in
 #   org down                    stop the dashboard. Engineers keep running.
@@ -34,15 +35,19 @@ say() { printf 'org: %s\n' "$*"; }
 die() { printf 'org: %s\n' "$*" >&2; exit 1; }
 inc() { incus "$@" </dev/null; }   # incus reads stdin when it is not a terminal; never ours
 
-down="" rebuild="" slots="" port="" owner=""
+down="" rebuild="" slots="" memory="" port="" owner=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --down) down=1; shift ;;
     --rebuild-template) rebuild=1; shift ;;
     --slots) [ $# -ge 2 ] || die "--slots takes a number"; slots="$2"; shift 2 ;;
+    --memory) [ $# -ge 2 ] || die "--memory takes auto, none or a size"; memory="$2"; shift 2
+      # Refused before anything is written, as org/backends/incus.py refuses it at dispatch.
+      [[ "$memory" =~ ^(auto|none|[1-9][0-9]*(MiB|GiB))$ ]] \
+        || die "--memory $memory is not auto, none or a size: write a whole number followed by MiB or GiB, such as 4GiB" ;;
     --port) [ $# -ge 2 ] || die "--port takes a number"; port="$2"; shift 2 ;;
     --owner) [ $# -ge 2 ] || die "--owner takes a GitHub organization or user"; owner="$2"; shift 2 ;;
-    -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option $1 (org up --help)" ;;
   esac
 done
@@ -104,6 +109,7 @@ get() { "$org" config get "$1" 2>/dev/null || true; }
 cfg machines.default '"incus"'
 cfg manager.own_claude true
 [ -z "$slots" ] || cfg machines.incus.slots "$slots"
+[ -z "$memory" ] || cfg machines.incus.memory "\"$memory\""
 [ -z "$port" ] || cfg dash.port "$port"
 [ -z "$owner" ] || cfg github.owner "\"$owner\""
 case "$(get manager.model)" in ""|null) cfg manager.model '"fable"'; cfg manager.effort '"high"' ;; esac

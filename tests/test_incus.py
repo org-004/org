@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from org import backends, dispatch, spec, status, sync  # noqa: E402
 from org.backends import BackendError  # noqa: E402
-from org.backends.incus import IncusBackend, machine_memory_mib, memory_limit, memory_reserve_mib, problems, size_mib  # noqa: E402
+from org.backends.incus import WITHOUT_A_LIMIT, IncusBackend, machine_memory_mib, memory_limit, memory_reserve_mib, problems, size_mib  # noqa: E402
 from org.ledger import Ledger  # noqa: E402
 from org.transport import Incus, TransportError  # noqa: E402
 from org.util import read_json, write_json  # noqa: E402
@@ -146,8 +146,10 @@ class ARun(IncusCase):
         self.assertEqual(rec["provisioner"]["pid"], os.getpid(), "who was setting it up is on record, for `reap`")
         calls = self.calls()
         self.assertEqual([c for c in calls if c[0] in ("copy", "init", "launch", "start", "stop", "delete")],
-                         [["copy", "-q", TEMPLATE, name], ["start", "-q", name]])
+                         [["copy", "-q", TEMPLATE, name, "-c", "limits.memory=2219MiB"], ["start", "-q", name]])
         self.assertEqual(self.state(name), "running")
+        # The limit is the arithmetic's for this machine (tests/meminfo) and four at once, and it is on record.
+        self.assertEqual((machine["limits"], rec["facts"]["memory_limit"]), ({"memory": "2219MiB"}, "2219MiB"))
         home = self.box(name) / "home"
         self.assertEqual((home / "from-the-template").read_text(), "installed once\n", "the container is a copy of the template")
 
@@ -183,7 +185,8 @@ class ARun(IncusCase):
                 self.assertEqual(len(c), 7)
             named.add(c[-1].strip("^$") if c[0] == "list" else c[1].rsplit("/", 1)[-1] if c[0] == "query" else c[1] if c[0] == "exec" else c[-1])
             if c[0] == "copy":
-                named.add(c[-2])
+                named.discard(c[-1])
+                named.update(c[2:4])
         # The build cache is the one other name, and only in `incus list`: dispatch looks at it and never enters it.
         self.assertEqual([c for c in calls if any("org-cache" in word for word in c)], [["list", "--format", "json", "^org-cache$"]])
         named.discard("org-cache")
@@ -703,12 +706,150 @@ class TheCopy(IncusCase):
         self.assertIn("Invalid value: lots", str(failed.exception))
 
 
+class AMemoryLimit(IncusCase):
+    """Each engineer's container is given a hard memory limit, and dispatch reads it back from Incus."""
+    NAME = "org-eng-001-csv-export-r1"
+
+    def failed(self, spec_id=None):
+        """A dispatch that must fail: the run's record, what was logged, and the error it raised."""
+        log = []
+        with self.assertRaises(dispatch.DispatchError) as ctx:
+            dispatch.dispatch(self.ledger, spec_id or self.approved(), log=log.append)
+        run_id = sorted(r for r in self.ledger.run_ids())[-1]
+        rec = self.ledger.run(run_id)
+        self.assertEqual(rec["state"], "dispatch_failed")
+        self.assertEqual(dispatch.pool(self.ledger)[0]["used"], 0, "a failed run holds no slot")
+        return rec, log, str(ctx.exception)
+
+    def test_with_no_limit_the_copy_is_made_as_before_and_none_is_on_record(self):
+        self.configure(memory="none")
+        run_id, rec = dispatch.dispatch(self.ledger, self.approved(), log=lambda m: None)
+        self.assertEqual(rec["state"], "dispatched")
+        self.assertEqual([c for c in self.calls() if c[0] in ("copy", "start", "config")],
+                         [["copy", "-q", TEMPLATE, self.NAME], ["start", "-q", self.NAME]])
+        self.assertNotIn("limits", rec["machine"])
+        self.assertNotIn("memory_limit", rec["facts"])
+        self.assertEqual(self.ledger.run(run_id)["facts"], rec["facts"])
+        self.assertEqual(Incus.info(self.NAME)["expanded_config"], {})
+
+    def test_a_size_that_is_set_is_the_limit_and_is_confirmed(self):
+        self.configure(memory="3GiB")
+        run_id, rec = dispatch.dispatch(self.ledger, self.approved(), log=lambda m: None)
+        self.assertEqual([c for c in self.calls() if c[0] in ("copy", "start", "config")],
+                         [["copy", "-q", TEMPLATE, self.NAME, "-c", "limits.memory=3GiB"], ["start", "-q", self.NAME]])
+        saved = self.ledger.run(run_id)
+        self.assertEqual((saved["machine"]["limits"], saved["facts"]["memory_limit"]), ({"memory": "3GiB"}, "3GiB"))
+        self.assertNotIn("limits.memory.enforce", " ".join(" ".join(c) for c in self.calls()), "Incus's default is hard")
+
+    def test_a_limit_incus_does_not_keep_or_does_not_enforce_fails_the_dispatch_before_any_token_goes_in(self):
+        # Not even allow_open lets a run go on without the limit its owner set.
+        self.configure(allow_open=True)
+        spec_id = self.approved()
+        for n, (lose, enforce, said) in enumerate((
+                ("limits.memory", None, "Incus describes it with no limits.memory, so its memory is not limited as asked"),
+                ("limits.memory=1GiB", None, "Incus describes it with limits.memory=1GiB, so its memory is not limited as asked"),
+                ("", "soft", "Incus describes it with limits.memory.enforce=soft, so the limit is not hard"))):
+            os.environ["FAKE_INCUS_LOSES"] = lose
+            if enforce:
+                self.describe(TEMPLATE, expanded_config={"limits.memory.enforce": enforce})
+            name = "org-eng-001-csv-export-r%d" % (n + 1)
+            rec, log, error = self.failed(spec_id)
+            self.assertEqual(rec["machine"]["name"], name)
+            self.assertIn(name + " was asked for ", error)
+            self.assertIn("limits.memory=2219MiB", error)
+            self.assertIn(said, error)
+            self.assertIn(WITHOUT_A_LIMIT, error)
+            self.assertIn(said, rec["error"])
+            self.assertNotIn("Claude token copied in", log)
+            self.assertFalse(self.box(name).exists(), "a container refused is removed")
+            self.assertIn(["delete", "-q", "-f", name], self.calls())
+            self.assertNotIn("memory_limit", rec.get("facts") or {})
+        self.assertFalse(any(c[0] == "exec" and "base64" in " ".join(c) for c in self.calls()), "no bundle went in")
+
+    def test_a_copy_incus_refuses_fails_the_dispatch_in_its_words_with_the_way_out(self):
+        os.environ["FAKE_INCUS_REFUSE"] = "limits.memory=the project does not allow it"
+        spec_id = self.approved()
+        rec, _, error = self.failed(spec_id)
+        said = ("incus copy org-base %s failed: Error: Failed creating instance record: the project does not allow it. The copy "
+                "was asked for limits.memory=2219MiB; if Incus will not take that key here, `org config set "
+                "machines.incus.memory none` dispatches without a limit." % self.NAME)
+        self.assertEqual(rec["error"], said)
+        self.assertEqual(error, "001-csv-export-r1: " + said)
+        self.assertFalse(self.box(self.NAME).exists())
+        self.assertFalse([c for c in self.calls() if c[0] in ("start", "exec", "delete")])
+        # What the sentence says works: the same Incus takes a copy that asks for no limit.
+        self.configure(memory="none")
+        run_id, rec = dispatch.dispatch(self.ledger, spec_id, log=lambda m: None)
+        self.assertEqual((run_id, rec["state"]), ("001-csv-export-r2", "dispatched"))
+
+    def test_a_copy_that_was_made_and_did_not_start_is_not_said_to_be_the_limits_fault(self):
+        wrapper = self.tmp / "refusing" / "incus"
+        wrapper.parent.mkdir()
+        wrapper.write_text('#!/bin/sh\ncase "$1" in start) echo "Error: refused for the test" >&2; exit 1 ;; esac\nexec "%s" "$@"\n'
+                           % (self.bindir / "incus"))
+        wrapper.chmod(0o755)
+        os.environ["PATH"] = str(wrapper.parent) + os.pathsep + os.environ["PATH"]
+        rec, _, error = self.failed()
+        self.assertEqual(rec["error"], "incus start %s failed: Error: refused for the test" % self.NAME)
+        self.assertFalse(self.box(self.NAME).exists())
+
+    def test_a_memory_setting_that_cannot_be_read_fails_the_dispatch_before_any_copy(self):
+        self.configure(memory="lots")
+        rec, _, error = self.failed()
+        self.assertIn("machines.incus.memory 'lots' is not auto, none or a size", rec["error"])
+        self.assertIn("machines.incus.memory 'lots'", error)
+        self.assertFalse([c for c in self.calls() if c[0] in ("copy", "start", "config")])
+
+    def test_a_stopped_container_is_given_the_limit_before_it_starts_and_a_running_one_is_left_alone(self):
+        backend, machine = IncusBackend(), {"kind": "incus", "name": "org-eng-001-x-r1", "base": TEMPLATE}
+        self.container(machine["name"])
+        backend.before_resume(machine, self.ledger.config())
+        self.assertEqual([c for c in self.calls() if c[0] in ("config", "start")],
+                         [["config", "set", machine["name"], "limits.memory", "2219MiB"], ["start", "-q", machine["name"]]])
+        self.assertEqual(machine["limits"], {"memory": "2219MiB"})
+        self.assertEqual(Incus.info(machine["name"])["expanded_config"], {"limits.memory": "2219MiB"})
+        before = len(self.calls())
+        self.configure(memory="5GiB")
+        backend.before_resume(machine, self.ledger.config())
+        self.assertFalse([c for c in self.calls()[before:] if c[0] in ("config", "start")], "a running container is left as it is")
+        self.assertEqual(machine["limits"], {"memory": "2219MiB"})
+        # Stopped again, with no limit set: nothing is changed, only started.
+        self.assertEqual(self.incus("stop", "-q", machine["name"]).returncode, 0)
+        self.configure(memory="none")
+        before = len(self.calls())
+        backend.before_resume(machine, self.ledger.config())
+        self.assertEqual([c for c in self.calls()[before:] if c[0] in ("config", "start")], [["start", "-q", machine["name"]]])
+        # A key Incus will not take is said in its words, with the way out, and nothing is started.
+        self.assertEqual(self.incus("stop", "-q", machine["name"]).returncode, 0)
+        self.configure()
+        os.environ["FAKE_INCUS_REFUSE"] = "limits.memory=the project does not allow it"
+        before = len(self.calls())
+        with self.assertRaises(TransportError) as ctx:
+            backend.before_resume(machine, self.ledger.config())
+        self.assertIn("the project does not allow it", str(ctx.exception))
+        self.assertIn("If Incus will not take limits.memory here, " + WITHOUT_A_LIMIT, str(ctx.exception))
+        self.assertFalse([c for c in self.calls()[before:] if c[0] == "start"])
+
+    def test_org_pool_shows_the_limit_and_a_setting_it_cannot_read(self):
+        def pool():
+            p = subprocess.run([sys.executable, "-m", "org", "--home", str(self.ledger.root), "pool"], capture_output=True, text=True,
+                               cwd=str(ROOT), stdin=subprocess.DEVNULL, timeout=60)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            return p.stdout.splitlines()[0]
+        self.assertTrue(pool().endswith("containers on this machine, 2219MiB each"), pool())
+        self.configure(memory="none")
+        self.assertTrue(pool().endswith("containers on this machine, no memory limit"))
+        self.configure(memory="lots")
+        self.assertIn("(machines.incus.memory 'lots' is not auto, none or a size", pool())
+
+
 class Doctor(IncusCase):
     def rows(self):
         """`org doctor` as a person runs it: {what was checked: (ok, warn or FAIL, what was found)}."""
         p = subprocess.run([sys.executable, "-m", "org", "--home", str(self.ledger.root), "doctor"], capture_output=True, text=True,
                            cwd=str(ROOT), stdin=subprocess.DEVNULL, timeout=60)
         rows = {m.group(2): (m.group(1), m.group(3)) for m in re.finditer(r"^(ok|warn|FAIL) +(.+?) {2,}(.*)$", p.stdout, re.M)}
+        self.out = p.stdout
         self.assertIn("default machine", rows, p.stdout + p.stderr)
         return rows
 
@@ -728,6 +869,34 @@ class Doctor(IncusCase):
         shutil.rmtree(self.box(TEMPLATE))
         self.assertEqual(self.rows()[template], ("FAIL", "missing"))
         self.assertFalse([c for c in self.calls() if c[0] != "list"], "doctor only looks")
+
+
+    def test_doctor_says_how_much_memory_each_engineer_has_and_warns_when_it_is_none_too_much_or_too_little(self):
+        row = "memory per engineer"
+        self.assertEqual(self.rows()[row], ("ok", "2219MiB each for 4 at once; 3072 MiB kept for the machine, which has 11951 MiB "
+                                                  "(machines.incus.memory auto)"))
+        for incus, found, fix in (
+                ({"memory": "none"}, "no limit for 4 at once; 3072 MiB kept for the machine, which has 11951 MiB (machines.incus.memory none)",
+                 "`org config set machines.incus.memory auto`"),
+                ({"slots": None}, "no limit for any number at once; 3072 MiB kept for the machine, which has 11951 MiB "
+                                  "(machines.incus.memory auto)", "set machines.incus.slots, or machines.incus.memory to a size"),
+                ({"memory": "4GiB"}, "4GiB each for 4 at once; 3072 MiB kept for the machine, which has 11951 MiB (machines.incus.memory 4GiB)",
+                 "4 engineers at 4GiB each can take more than the 8879 MiB left after the reserve: lower machines.incus.memory or "
+                 "machines.incus.slots"),
+                ({"slots": 8}, "1109MiB each for 8 at once; 3072 MiB kept for the machine, which has 11951 MiB (machines.incus.memory auto)",
+                 "under 2GiB is too little for Claude Code and a build: lower machines.incus.slots or machines.incus.memory_reserve"),
+                ({"memory": "1GiB"}, "1GiB each for 4 at once", "under 2GiB is too little for Claude Code and a build: set "
+                                                                  "machines.incus.memory to 2GiB or more"),
+                ({"memory": "lots"}, "machines.incus.memory 'lots' is not auto, none or a size", "correct it with `org config set`"),
+                ({"memory": "2GiB", "memory_reserve": "lots"}, "machines.incus.memory_reserve 'lots' is not a size",
+                 "correct it with `org config set`")):
+            self.configure(**incus)
+            level, said = self.rows()[row]
+            self.assertEqual(level, "warn", incus)
+            self.assertTrue(said.startswith(found), (incus, said))
+            self.assertIn(fix, self.out, incus)
+        self.configure(memory="2GiB")
+        self.assertEqual(self.rows()[row][0], "ok", "2GiB is enough, and four of them fit")
 
 
 class TheSimulatedIncus(IncusCase):

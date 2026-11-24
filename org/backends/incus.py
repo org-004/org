@@ -160,9 +160,27 @@ class IncusBackend(Backend):
     def provision(self, machine: dict, run_id: str, cfg: dict) -> Transport:
         name = self._own(cfg, machine["name"])
         base = machine.get("base") or self._settings(cfg)["base"]
+        # Asked before anything is made: a setting that is wrong fails the dispatch, not the copy.
+        limit = memory_limit(cfg)
         if Incus.info(base) is None:
             raise TransportError("the template container %s does not exist: `org up` makes it" % base)
-        return Incus.create(base, name)
+        if limit is None:
+            # The record says what the container was given, and it was given no limit.
+            limits = machine.pop("limits", None) or {}
+            limits.pop("memory", None)
+            if limits:
+                machine["limits"] = limits
+            return Incus.create(base, name)
+        machine["limits"] = dict(machine.get("limits") or {}, memory=limit)
+        try:
+            return Incus.create(base, name, {"limits.memory": limit})
+        except TransportError as e:
+            # Only the copy is given the key. A container that started and got no address failed
+            # for another reason, and the pointer would send the owner the wrong way.
+            if not str(e).startswith("incus copy "):
+                raise
+            raise TransportError("%s. The copy was asked for limits.memory=%s; if Incus will not take that key here, %s."
+                                 % (str(e).rstrip("."), limit, WITHOUT_A_LIMIT))
 
     def vet(self, machine: dict, facts: dict, cfg: dict) -> None:
         info = Incus.info(self._own(cfg, machine["name"]))
@@ -173,6 +191,23 @@ class IncusBackend(Backend):
             raise BackendError("%s is not a box for an engineer, which runs with every permission bypassed: %s. "
                                "`org up` makes a template that is; machines.incus.allow_open overrides this."
                                % (machine["name"], "; ".join(found)))
+        # What was asked of the copy is read back from Incus, as the rest is, and allow_open does
+        # not excuse it: a limit the owner set is not one to lose quietly.
+        asked = (machine.get("limits") or {}).get("memory")
+        if asked:
+            config = info.get("expanded_config") or {}
+            got = config.get("limits.memory")
+            if got != asked:
+                raise BackendError("%s was asked for limits.memory=%s and Incus describes it with %s, so its memory is not "
+                                   "limited as asked. If Incus will not keep that key here, %s."
+                                   % (machine["name"], asked, "no limits.memory" if got is None else "limits.memory=%s" % got,
+                                      WITHOUT_A_LIMIT))
+            if str(config.get("limits.memory.enforce", "")).lower() == "soft":
+                raise BackendError("%s was asked for a hard limits.memory=%s and Incus describes it with limits.memory.enforce=soft, "
+                                   "so the limit is not hard. Remove limits.memory.enforce where it is set (a profile, most "
+                                   "likely), or %s." % (machine["name"], asked, WITHOUT_A_LIMIT))
+            # This is what the engineer is told, and only a limit Incus confirmed is told.
+            facts["memory_limit"] = asked
 
     def transport(self, machine: dict, cfg: dict) -> Transport:
         return Incus(self._own(cfg, machine["name"]))
@@ -186,7 +221,17 @@ class IncusBackend(Backend):
 
     def before_resume(self, machine: dict, cfg: dict) -> None:
         # After this machine restarts, a run's container is stopped and its memory is empty.
-        Incus.start(self._own(cfg, machine["name"]))
+        name = self._own(cfg, machine["name"])
+        info = Incus.info(name)
+        limit = memory_limit(cfg) if info is not None and info.get("status") != "Running" else None
+        if limit is not None:
+            # A stopped container takes a new limit when it starts; a running one is left as it is.
+            try:
+                Incus.set_config(name, "limits.memory", limit)
+            except TransportError as e:
+                raise TransportError("%s. If Incus will not take limits.memory here, %s." % (str(e).rstrip("."), WITHOUT_A_LIMIT))
+            machine["limits"] = dict(machine.get("limits") or {}, memory=limit)
+        Incus.start(name)
 
     def build_cache(self, tr: Transport, cfg: dict, log, again: bool = False) -> Optional[dict]:
         # The cache is a container `org up` made, outside the prefix: this backend only reads
@@ -211,6 +256,30 @@ class IncusBackend(Backend):
                     "; ".join(found) if found else "%s, isolated" % (info.get("status") or "?").lower(), "org up --rebuild-template")
             cache.doctor(cfg, add)
         add(True, "engineers at once", ("%d" % int(s["slots"])) if s.get("slots") else "no limit set (machines.incus.slots)")
+        try:
+            limit, reserve = memory_limit(cfg), memory_reserve_mib(cfg)
+        except BackendError as e:
+            add(False, "memory per engineer", str(e), "correct it with `org config set`, as it says", soft=True)
+            return
+        total, slots, want = machine_memory_mib(), slot_count(cfg), s.get("memory")
+        found = "%s for %s at once; %d MiB kept for the machine, which has %s (machines.incus.memory %s)" % (
+            "%s each" % limit if limit else "no limit", slots or "any number", reserve,
+            "an amount nothing says" if total is None else "%d MiB" % total, "auto" if want is None else want)
+        each = size_mib(limit) if limit else None
+        if each is None:
+            fix = ("nothing stops one engineer's build from taking the memory the others and the machine need: "
+                   "`org config set machines.incus.memory auto`, or a size such as 4GiB" if want == "none" else
+                   "the automatic limit has nothing to divide: set machines.incus.slots, or machines.incus.memory to a size such as 4GiB")
+        elif slots and total is not None and each * slots > total - reserve:
+            fix = ("%d engineers at %s each can take more than the %d MiB left after the reserve: lower machines.incus.memory "
+                   "or machines.incus.slots, or set machines.incus.memory to auto" % (slots, limit, total - reserve))
+        elif each < 2048:
+            fix = "under 2GiB is too little for Claude Code and a build: " + (
+                "lower machines.incus.slots or machines.incus.memory_reserve, or set machines.incus.memory to a size such as 4GiB"
+                if want in (None, "auto") else "set machines.incus.memory to 2GiB or more")
+        else:
+            fix = ""
+        add(not fix, "memory per engineer", found, fix, soft=True)
 
 
 BACKEND = IncusBackend()
