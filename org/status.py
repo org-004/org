@@ -8,7 +8,7 @@ from __future__ import annotations
 import shutil
 from typing import List, Optional
 
-from . import budget, dispatch, spec
+from . import budget, dispatch, graph, spec
 from .ledger import Ledger
 from .runner import TERMINAL_STATES
 from .sync import sync_all
@@ -57,7 +57,7 @@ def run_view(ledger: Ledger, run_id: str, rate: Optional[float]) -> dict:
     usd = cost.get("usd")
     machine = rec.get("machine") or {}
     activity = st.get("activity") or {}
-    return {
+    view = {
         "run_id": run_id,
         "spec_id": rec.get("spec_id"),
         "spec_version": rec.get("spec_version"),
@@ -105,6 +105,9 @@ def run_view(ledger: Ledger, run_id: str, rate: Optional[float]) -> dict:
         "has_plan": (ledger.mirror_dir(run_id) / "plan.md").exists(),
         "has_report": (ledger.mirror_dir(run_id) / "report.md").exists(),
     }
+    # For a run of a plan: why it is held or what it paused, as sentences in `warnings` too, so
+    # that `org status` and the dashboard draw them as they draw any other warning.
+    return graph.annotate(ledger, rec, view)
 
 
 def collect(ledger: Ledger, do_sync: bool = False) -> dict:

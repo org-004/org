@@ -166,7 +166,9 @@ def changes(old: str, new: str) -> str:
     lines = ["commits:", _git(["log", "--oneline", "--no-decorate", "%s..%s" % (base, new)]) or "  (none: this goes back)",
              "", "files:", _git(["diff", "--stat", base, new]) or "  (no change)"]
     touchy = _git(["diff", "--name-only", base, new, "--", "incus", "bin", "org/secrets.py", "org/dispatch.py", "org/manager.py",
-                   "org/backends", "org/admin.py", "org/sync.py"])
+                   "org/backends", "org/admin.py", "org/sync.py",
+                   # What acts without the person in a plan, starts the review's session, and sends a POST.
+                   "org/graph.py", "org/review.py", "org/notify.py"])
     if touchy:
         lines += ["", "among them, the files that hold the walls and the tokens:", "\n".join("  " + f for f in touchy.splitlines())]
     lines += ["", "the whole diff:  git -C %s diff %s %s" % (SOURCE, base[:12], new[:12])]

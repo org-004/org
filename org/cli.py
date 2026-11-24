@@ -248,6 +248,11 @@ def cmd_review(args) -> int:
     run_id = need_run(ledger, args.run)
     sync.sync_run(ledger, run_id)
     print(status.scorecard(ledger, run_id))
+    from . import graph
+
+    said = graph.review_text(ledger, run_id)  # the review between specs of a plan, if this run had one
+    if said:
+        print("\n" + said)
     return 0
 
 
@@ -783,6 +788,42 @@ def cmd_pump(args) -> int:
     return 0
 
 
+def cmd_release(args) -> int:
+    """Lift the hold on a run of a plan. The person's command: the manager chat must ask."""
+    from . import graph
+
+    ledger = Ledger(args.home)
+    run_id = need_run(ledger, args.run)
+    try:
+        print(graph.release(ledger, run_id))
+    except graph.GraphError as e:
+        die(e)
+    return 0
+
+
+def cmd_notify(args) -> int:
+    from . import notify
+
+    code, line = notify.test(Ledger(args.home))
+    print(line)
+    return code
+
+
+def cmd_graph(args) -> int:
+    from . import graph
+
+    print(graph.render(Ledger(args.home)))
+    return 0
+
+
+def cmd_review_run(args) -> int:
+    """The review of one finished run, as a process of its own. Started by org/graph.py only."""
+    from . import review
+
+    ledger = Ledger(args.home)
+    return review.run(ledger, need_run(ledger, args.run), args.attempt)
+
+
 def cmd_login(args) -> int:
     from . import login
 
@@ -992,6 +1033,18 @@ def build_parser() -> argparse.ArgumentParser:
     ss.add_parser("rm").add_argument("name")
     s.set_defaults(fn=cmd_node)
     sub.add_parser("pump", help="start queued runs that can now be placed").set_defaults(fn=cmd_pump)
+
+    s = sub.add_parser("release", help="start a held run of a plan whatever it waited for")
+    s.add_argument("run", help="a run, or a spec (its latest run)")
+    s.set_defaults(fn=cmd_release)
+    s = sub.add_parser("notify", help="where pauses of a plan are told to you")
+    s.add_subparsers(dest="action", required=True).add_parser("test", help="send one test message to notify.url")
+    s.set_defaults(fn=cmd_notify)
+    sub.add_parser("graph", help="every plan: its specs in order, their runs, what waits and why").set_defaults(fn=cmd_graph)
+    s = sub.add_parser("review-run", help=argparse.SUPPRESS)
+    s.add_argument("run")
+    s.add_argument("--attempt", type=int, default=1)
+    s.set_defaults(fn=cmd_review_run)
 
     s = sub.add_parser("drain", help="let running engineers finish and start nothing new")
     s.add_argument("--wait", action="store_true", help="return when no run holds a machine")

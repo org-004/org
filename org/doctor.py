@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import List, Tuple
 
-from . import backends, budget, login, secrets
+from . import backends, budget, login, notify, secrets
 from .ledger import Ledger
 from .manager import launch_env
 from .util import fmt_usd
@@ -93,6 +93,7 @@ def checks(ledger: Ledger) -> List[Tuple[str, str, str, str]]:
     found = "not seen yet" if not week else "%d%% used" % round((week.get("utilization") or 0) * 100)
     found += "; 1%% ≈ %s (%s)" % (fmt_usd(rate["value"]), rate["source"]) if rate["value"] else "; dollars per 1% not known yet"
     rows.append(("ok", "weekly limit", found, ""))
+    add(*notify.doctor_row(cfg), soft=True)
     return rows
 
 

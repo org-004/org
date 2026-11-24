@@ -64,12 +64,14 @@ None
 """
 
 # Header keys and how each is read.
-LIST_KEYS = {"repos"}
+# `after` names the specs this one comes after: ids or numbers, checked against the ledger by
+# org/graph.py. Its run waits in the queue until each of them has finished well.
+LIST_KEYS = {"repos", "after"}
 NUMBER_KEYS = {"max_cost_usd", "max_weekly_pct", "max_hours"}
 # No `pr`: pull requests are not used. An engineer lands its own work (`merge`), or pushes a
 # branch and stops (`branch`) when the person wants to look before anything reaches main.
 ENUMS = {"delivery": {"branch", "merge", "none"}, "effort": {"low", "medium", "high", "xhigh", "max"}}
-KNOWN_KEYS = {"title", "project", "repos", "delivery", "machine", "model", "effort"} | NUMBER_KEYS
+KNOWN_KEYS = {"title", "project", "repos", "delivery", "machine", "model", "effort", "after"} | NUMBER_KEYS
 
 REQUIRED_SECTIONS = ["Intent", "Requirements", "Acceptance criteria"]
 ADVISED_SECTIONS = ["Context", "Out of scope", "Constraints", "Alternatives considered"]
@@ -218,8 +220,11 @@ def default_machine(ledger: Ledger) -> str:
     return str((ledger.config().get("machines") or {}).get("default") or "incus")
 
 
-def check_text(ledger: Ledger, text: str) -> Tuple[List[str], List[str]]:
-    """check(), and whether this ledger could give the spec the machine it asks for."""
+def check_text(ledger: Ledger, text: str, spec_id: Optional[str] = None) -> Tuple[List[str], List[str]]:
+    """check(), and whether this ledger could give the spec the machine it asks for.
+
+    `spec_id` is whose text this is, when it is a spec of this ledger: a spec that names others in
+    `after` is checked against them, and it must not name itself."""
     from . import backends  # here, not at the top: the engineer's side parses specs and starts no machines
 
     errors, warnings = check(text, default_machine(ledger), str((ledger.config().get("github") or {}).get("owner") or ""))
@@ -230,11 +235,16 @@ def check_text(ledger: Ledger, text: str) -> Tuple[List[str], List[str]]:
             backends.resolve(cfg, want).choose(cfg, want, "check")
         except backends.BackendError as e:
             errors.append("header: machine %s: %s" % (want, e))
+    after = parse(text)[0].get("after")
+    if after:
+        from . import graph  # here for the same reason, and only for a spec that names another
+
+        errors.extend(graph.check_after(ledger, spec_id, after))
     return errors, warnings
 
 
 def check_draft(ledger: Ledger, spec_id: str) -> Tuple[List[str], List[str]]:
-    return check_text(ledger, read_text(ledger.draft_path(spec_id)) or "")
+    return check_text(ledger, read_text(ledger.draft_path(spec_id)) or "", spec_id)
 
 
 def new_draft(ledger: Ledger, title: str, project: str = "") -> str:
@@ -270,7 +280,7 @@ def approve(ledger: Ledger, spec_id: str, sha_prefix: str, by: Optional[str] = N
         raise ApprovalError(
             "sha mismatch: the draft is now %s, not %s. It changed since it was reviewed." % (sha[:12], sha_prefix)
         )
-    errors, _ = check_text(ledger, text)
+    errors, _ = check_text(ledger, text, spec_id)
     if errors:
         raise ApprovalError("the draft does not pass its checks:\n  - " + "\n  - ".join(errors))
 

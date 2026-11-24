@@ -36,14 +36,17 @@ PROMPTS = Path(__file__).parent / "prompts"
 BIN = Path(__file__).resolve().parent.parent / "bin"
 
 READ_COMMANDS = ["status", "peek", "logs", "plan", "report", "review", "sync", "spec ls", "spec show", "spec check",
-                 "machine ls", "project ls", "ls", "cat", "diff", "pool", "doctor", "config get", "node ls", "repos"]
+                 "machine ls", "project ls", "ls", "cat", "diff", "pool", "doctor", "config get", "node ls", "repos", "graph"]
 # What a conversation may do by itself: drafts, the list of projects, a scratch copy of a repository.
 DRAFT_COMMANDS = ["spec new", "spec revise", "project add", "clone", "init"]
 # Decisions that are the person's. `exec` is among them: it runs anything on an engineer's machine.
 # So are the commands that change where engineers run or how many, and the installation itself.
 # `drain`, `undrain` and `upgrade` decide when work runs and which code runs it.
 HUMAN_COMMANDS = ["approve", "dispatch", "stop", "resume", "machine rm", "exec", "pump", "login",
-                  "config set", "node add", "node rm", "up", "down", "drain", "undrain", "upgrade", "view"]
+                  "config set", "node add", "node rm", "up", "down", "drain", "undrain", "upgrade", "view",
+                  # `release` starts a held run of a plan whatever it waited for. `notify` sends a
+                  # message out, and `review-run` is the review's own process, which only org starts.
+                  "release", "notify", "review-run"]
 
 # Commands that change state outside this machine. Bash deny rules match the form a model
 # normally writes; they are a guard against an overeager manager, not a wall against a hostile

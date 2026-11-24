@@ -28,7 +28,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from . import backends, budget, secrets
+from . import backends, budget, graph, secrets
 from .backends import BackendError, for_machine
 from .ledger import Ledger
 from .runner import TERMINAL_STATES
@@ -177,6 +177,9 @@ def build_bundle(ledger: Ledger, meta: dict, job: dict) -> bytes:
         brief = read_text(ledger.briefs / ((job.get("project") or "") + ".md")) if job.get("project") else None
         if brief:
             add(tar, "project.md", brief.encode())
+        # For a run of a plan: what the specs it comes after really left (org/graph.py).
+        for name, data in graph.bundle_files(ledger, job.get("run_id") or ""):
+            add(tar, name, data)
     return buf.getvalue()
 
 
@@ -266,8 +269,11 @@ def push_logins(tr: Transport, machine: dict, blank: bool, log) -> None:
 # ---------------------------------------------------------------- dispatch, the queue
 
 
-def dispatch(ledger: Ledger, spec_id: str, machine_override: Optional[str] = None, log=print) -> Tuple[str, dict]:
-    """Create a run of an approved spec and start it if a machine is free. Returns (run_id, record)."""
+def dispatch(ledger: Ledger, spec_id: str, machine_override: Optional[str] = None, log=print,
+             plan: Optional[dict] = None) -> Tuple[str, dict]:
+    """Create a run of an approved spec and start it if a machine is free. Returns (run_id, record).
+
+    `plan` is given only by org/graph.py, for a run it dispatches again: which run it replaces."""
     meta = ledger.spec_meta(spec_id)
     if not meta:
         raise DispatchError("%s is not approved" % spec_id)
@@ -287,6 +293,8 @@ def dispatch(ledger: Ledger, spec_id: str, machine_override: Optional[str] = Non
         "state": "queued",
         "events_offset": 0,
     }
+    # Nothing for a spec that names no other: `after`, and what a run dispatched again replaces.
+    record.update(graph.record_fields(ledger, meta, plan))
     ledger.run_dir(run_id).mkdir(parents=True, exist_ok=True)
     ledger.save_run(run_id, record)
     return run_id, start(ledger, run_id, log)
@@ -306,6 +314,13 @@ def start(ledger: Ledger, run_id: str, log=print) -> dict:
                 time.strftime("%a %H:%M", time.localtime(held.get("since") or now())), (": " + held["reason"]) if held.get("reason") else "")
             ledger.save_run(run_id, record)
             log("queued: %s" % record["queue_reason"])
+            return record
+        # A run of a plan waits for the specs it comes after, and a held one for the person.
+        waits = graph.blocked(ledger, record)
+        if waits:
+            record["queue_reason"] = waits
+            ledger.save_run(run_id, record)
+            log("queued: %s" % waits)
             return record
         machine = record["machine"]
         try:
@@ -468,6 +483,7 @@ def pump(ledger: Ledger, log=lambda message: None) -> List[str]:
     """
     started = []
     reap(ledger, log)
+    graph.tick(ledger, log)  # returns at once in a ledger that has no plan
     queued = [r for r in ledger.run_ids() if ledger.run(r).get("state") == "queued"]
     queued.sort(key=lambda r: ledger.run(r).get("created_at") or 0)
     for run_id in queued:
