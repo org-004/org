@@ -18,6 +18,7 @@ the host's in it); the container is the inner one, and this module is what check
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from typing import Dict, List, Optional
@@ -27,6 +28,79 @@ from ..transport import Incus, Transport, TransportError
 from . import Backend, BackendError, machine_name
 
 DEFAULTS = {"base": "org-base", "prefix": "org-eng-", "slots": 4, "push_token": True}
+
+# What the machine keeps for everything outside the engineers' containers (its own services,
+# Incus's daemon, the manager chat) when machines.incus.memory_reserve does not say.
+RESERVE = "3GiB"
+SIZE = re.compile(r"([1-9][0-9]*)(MiB|GiB)")
+WITHOUT_A_LIMIT = "`org config set machines.incus.memory none` dispatches without a limit"
+
+
+def size_mib(text) -> Optional[int]:
+    """A size as the settings write one, in MiB: a positive whole number followed by MiB or GiB."""
+    found = SIZE.fullmatch(text) if isinstance(text, str) else None
+    return int(found.group(1)) * (1024 if found.group(2) == "GiB" else 1) if found else None
+
+
+def machine_memory_mib() -> Optional[int]:
+    """This machine's memory in whole MiB, or None where nothing says: only Linux has the file."""
+    try:
+        # $ORG_MEMINFO is for the tests, whose arithmetic must not depend on where they run.
+        with open(os.environ.get("ORG_MEMINFO") or "/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def memory_reserve_mib(cfg: dict) -> int:
+    """machines.incus.memory_reserve in MiB: what the automatic limit leaves to the machine itself."""
+    raw = ((cfg.get("machines") or {}).get("incus") or {}).get("memory_reserve")
+    reserve = size_mib(RESERVE if raw is None else raw)
+    if reserve is None:
+        raise BackendError("machines.incus.memory_reserve %r is not a size: write a whole number followed by MiB or GiB, "
+                           "such as 3GiB" % (raw,))
+    return reserve
+
+
+def slot_count(cfg: dict) -> Optional[int]:
+    """How many engineers may run at once, or None when machines.incus.slots sets no usable number."""
+    slots = dict(DEFAULTS, **((cfg.get("machines") or {}).get("incus") or {})).get("slots")
+    try:
+        return int(slots) if slots and not isinstance(slots, bool) and int(slots) > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def memory_limit(cfg: dict, mem_total_mib: Optional[int] = None) -> Optional[str]:
+    """The hard memory limit an engineer's container gets, as Incus writes one, or None for no limit.
+
+    machines.incus.memory decides. Absent or "auto" is the arithmetic that makes the containers
+    fit in the machine together: (the machine's memory - the reserve) / slots, in whole MiB. A
+    size is taken as given, for an owner who accepts overcommitting, and "none" is no limit.
+    Anything else is refused here, before a container is made: a limit that was mistyped must
+    not quietly become no limit.
+    """
+    want = ((cfg.get("machines") or {}).get("incus") or {}).get("memory")
+    if want is None or want == "auto":
+        reserve, slots = memory_reserve_mib(cfg), slot_count(cfg)
+        total = machine_memory_mib() if mem_total_mib is None else mem_total_mib
+        if not slots or total is None:
+            return None  # nothing to divide, or nothing to divide by: `org doctor` says so
+        each = (int(total) - reserve) // slots
+        if each < 1:
+            raise BackendError("machines.incus.memory is automatic and comes to nothing: this machine has %d MiB and "
+                               "machines.incus.memory_reserve keeps %d MiB of it. Lower the reserve, or set "
+                               "machines.incus.memory to a size or to none." % (int(total), reserve))
+        return "%dMiB" % each
+    if want == "none":
+        return None
+    if size_mib(want) is None:
+        raise BackendError("machines.incus.memory %r is not auto, none or a size: write a whole number followed by MiB "
+                           "or GiB, such as 4GiB" % (want,))
+    return want
 
 
 def problems(info: dict) -> List[str]:
@@ -86,9 +160,27 @@ class IncusBackend(Backend):
     def provision(self, machine: dict, run_id: str, cfg: dict) -> Transport:
         name = self._own(cfg, machine["name"])
         base = machine.get("base") or self._settings(cfg)["base"]
+        # Asked before anything is made: a setting that is wrong fails the dispatch, not the copy.
+        limit = memory_limit(cfg)
         if Incus.info(base) is None:
             raise TransportError("the template container %s does not exist: `org up` makes it" % base)
-        return Incus.create(base, name)
+        if limit is None:
+            # The record says what the container was given, and it was given no limit.
+            limits = machine.pop("limits", None) or {}
+            limits.pop("memory", None)
+            if limits:
+                machine["limits"] = limits
+            return Incus.create(base, name)
+        machine["limits"] = dict(machine.get("limits") or {}, memory=limit)
+        try:
+            return Incus.create(base, name, {"limits.memory": limit})
+        except TransportError as e:
+            # Only the copy is given the key. A container that started and got no address failed
+            # for another reason, and the pointer would send the owner the wrong way.
+            if not str(e).startswith("incus copy "):
+                raise
+            raise TransportError("%s. The copy was asked for limits.memory=%s; if Incus will not take that key here, %s."
+                                 % (str(e).rstrip("."), limit, WITHOUT_A_LIMIT))
 
     def vet(self, machine: dict, facts: dict, cfg: dict) -> None:
         info = Incus.info(self._own(cfg, machine["name"]))
@@ -99,6 +191,23 @@ class IncusBackend(Backend):
             raise BackendError("%s is not a box for an engineer, which runs with every permission bypassed: %s. "
                                "`org up` makes a template that is; machines.incus.allow_open overrides this."
                                % (machine["name"], "; ".join(found)))
+        # What was asked of the copy is read back from Incus, as the rest is, and allow_open does
+        # not excuse it: a limit the owner set is not one to lose quietly.
+        asked = (machine.get("limits") or {}).get("memory")
+        if asked:
+            config = info.get("expanded_config") or {}
+            got = config.get("limits.memory")
+            if got != asked:
+                raise BackendError("%s was asked for limits.memory=%s and Incus describes it with %s, so its memory is not "
+                                   "limited as asked. If Incus will not keep that key here, %s."
+                                   % (machine["name"], asked, "no limits.memory" if got is None else "limits.memory=%s" % got,
+                                      WITHOUT_A_LIMIT))
+            if str(config.get("limits.memory.enforce", "")).lower() == "soft":
+                raise BackendError("%s was asked for a hard limits.memory=%s and Incus describes it with limits.memory.enforce=soft, "
+                                   "so the limit is not hard. Remove limits.memory.enforce where it is set (a profile, most "
+                                   "likely), or %s." % (machine["name"], asked, WITHOUT_A_LIMIT))
+            # This is what the engineer is told, and only a limit Incus confirmed is told.
+            facts["memory_limit"] = asked
 
     def transport(self, machine: dict, cfg: dict) -> Transport:
         return Incus(self._own(cfg, machine["name"]))
@@ -112,7 +221,29 @@ class IncusBackend(Backend):
 
     def before_resume(self, machine: dict, cfg: dict) -> None:
         # After this machine restarts, a run's container is stopped and its memory is empty.
-        Incus.start(self._own(cfg, machine["name"]))
+        name = self._own(cfg, machine["name"])
+        info = Incus.info(name)
+        limit = memory_limit(cfg) if info is not None and info.get("status") != "Running" else None
+        if limit is not None:
+            # A stopped container takes a new limit when it starts; a running one is left as it is.
+            try:
+                Incus.set_config(name, "limits.memory", limit)
+            except TransportError as e:
+                raise TransportError("%s. If Incus will not take limits.memory here, %s." % (str(e).rstrip("."), WITHOUT_A_LIMIT))
+            # Read back before the start, as `vet` reads a new container's: what the record and the
+            # engineer are told is what Incus says, not what it was asked.
+            got = ((Incus.info(name) or {}).get("expanded_config") or {}).get("limits.memory")
+            if got != limit:
+                raise BackendError("%s was asked for limits.memory=%s and Incus describes it with %s, so its memory is not "
+                                   "limited as asked. If Incus will not keep that key here, %s."
+                                   % (name, limit, "no limits.memory" if got is None else "limits.memory=%s" % got, WITHOUT_A_LIMIT))
+            machine["limits"] = dict(machine.get("limits") or {}, memory=limit)
+        Incus.start(name)
+
+    def resume_facts(self, machine: dict, cfg: dict) -> dict:
+        # The limit on record is one Incus confirmed, at dispatch or just now in `before_resume`.
+        limit = (machine.get("limits") or {}).get("memory")
+        return {"memory_limit": limit} if limit else {}
 
     def build_cache(self, tr: Transport, cfg: dict, log, again: bool = False) -> Optional[dict]:
         # The cache is a container `org up` made, outside the prefix: this backend only reads
@@ -137,6 +268,30 @@ class IncusBackend(Backend):
                     "; ".join(found) if found else "%s, isolated" % (info.get("status") or "?").lower(), "org up --rebuild-template")
             cache.doctor(cfg, add)
         add(True, "engineers at once", ("%d" % int(s["slots"])) if s.get("slots") else "no limit set (machines.incus.slots)")
+        try:
+            limit, reserve = memory_limit(cfg), memory_reserve_mib(cfg)
+        except BackendError as e:
+            add(False, "memory per engineer", str(e), "correct it with `org config set`, as it says", soft=True)
+            return
+        total, slots, want = machine_memory_mib(), slot_count(cfg), s.get("memory")
+        found = "%s for %s at once; %d MiB kept for the machine, which has %s (machines.incus.memory %s)" % (
+            "%s each" % limit if limit else "no limit", slots or "any number", reserve,
+            "an amount nothing says" if total is None else "%d MiB" % total, "auto" if want is None else want)
+        each = size_mib(limit) if limit else None
+        if each is None:
+            fix = ("nothing stops one engineer's build from taking the memory the others and the machine need: "
+                   "`org config set machines.incus.memory auto`, or a size such as 4GiB" if want == "none" else
+                   "the automatic limit has nothing to divide: set machines.incus.slots, or machines.incus.memory to a size such as 4GiB")
+        elif slots and total is not None and each * slots > total - reserve:
+            fix = ("%d engineers at %s each can take more than the %d MiB left after the reserve: lower machines.incus.memory "
+                   "or machines.incus.slots, or set machines.incus.memory to auto" % (slots, limit, total - reserve))
+        elif each < 2048:
+            fix = "under 2GiB is too little for Claude Code and a build: " + (
+                "lower machines.incus.slots or machines.incus.memory_reserve, or set machines.incus.memory to a size such as 4GiB"
+                if want in (None, "auto") else "set machines.incus.memory to 2GiB or more")
+        else:
+            fix = ""
+        add(not fix, "memory per engineer", found, fix, soft=True)
 
 
 BACKEND = IncusBackend()

@@ -67,6 +67,10 @@ class Backend:
     def before_resume(self, machine: dict, cfg: dict) -> None:
         """Anything a machine needs before its runner is restarted."""
 
+    def resume_facts(self, machine: dict, cfg: dict) -> dict:
+        """What `before_resume` may have changed about the machine, as the facts an engineer is told."""
+        return {}
+
     def build_cache(self, tr: Transport, cfg: dict, log, again: bool = False) -> Optional[dict]:
         """Tell a machine that passed `vet` about a build cache beside it, if this kind of machine
         has one. Returns what the run's record keeps, or None. It never fails a run."""

@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from . import dispatch
+from .backends import BackendError
+from .backends.incus import WITHOUT_A_LIMIT, memory_limit
 from .ledger import Ledger
 from .transport import Incus, TransportError
 from .util import now
@@ -171,7 +173,7 @@ def changes(old: str, new: str) -> str:
     return "\n".join(lines)
 
 
-def test_commit(sha: str, base: str, log=print) -> None:
+def test_commit(sha: str, base: str, log=print, limit: Optional[str] = None) -> None:
     """Run the commit's unit suite in a throwaway copy of the template: no token is in it, and
     it is not this user, so code nobody has run yet does not run beside the ledger."""
     name = "org-test-%s" % sha[:12]
@@ -182,7 +184,14 @@ def test_commit(sha: str, base: str, log=print) -> None:
         raise AdminError("git archive %s failed" % sha[:12])
     log("testing %s in a container with no tokens (%s)" % (sha[:12], name))
     try:
-        tr = Incus.create(base, name)
+        # The same limit an engineer's container gets: a suite that needs more fails here, not there.
+        try:
+            tr = Incus.create(base, name, {"limits.memory": limit} if limit else None)
+        except TransportError as e:
+            if not limit:
+                raise
+            raise AdminError("%s. The copy was asked for limits.memory=%s; if Incus will not take that key here, %s."
+                             % (str(e).rstrip("."), limit, WITHOUT_A_LIMIT))
         tr.run("mkdir -p /root/t && tar -xf - -C /root/t", input=tar.stdout, timeout=120)
         p = tr.run("cd /root/t && python3 -m unittest discover -s tests 2>&1 | tail -25", timeout=1800, check=False)
         out = p.stdout.decode("utf-8", "replace").strip()
@@ -221,7 +230,11 @@ def upgrade(ledger: Ledger, ref: str, yes: bool = False, skip_tests: bool = Fals
     cfg = ledger.config()
     base = ((cfg.get("machines") or {}).get("incus") or {}).get("base") or "org-base"
     if not skip_tests:
-        test_commit(sha, base, log)
+        try:
+            limit = memory_limit(cfg)
+        except BackendError as e:
+            raise AdminError(str(e))
+        test_commit(sha, base, log, limit)
     ours = dispatch.draining(ledger) is None
     dispatch.drain(ledger, "upgrading to %s" % sha[:12])
     try:

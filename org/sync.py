@@ -25,6 +25,12 @@ def _count(value, default: int = 0) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else default
 
 
+def _kills(value, before):
+    """A snapshot's count of memory kills beside the one on record: the larger, or None when neither is a count."""
+    value, before = _count(value, None), _count(before, None)
+    return value if before is None else (before if value is None else max(value, before))
+
+
 def sync_run(ledger: Ledger, run_id: str, timeout: float = 45, slices: int = 6) -> dict:
     """Pull one run. If another process is already pulling it, return what the ledger has.
 
@@ -106,6 +112,10 @@ def _sync_locked(ledger: Ledger, run_id: str, rec: dict, timeout: float, slices:
         heartbeat_age_s=max(0.0, remote_now - beat),
         clock_skew_s=round(now() - remote_now, 1),
         state=state or rec.get("state"),
+        # Kept only as a whole number: an older bundle sends none, and this one is input from outside.
+        # A container that was stopped and started counts from zero again, so the count never
+        # goes down here: that processes were killed in this run stays on record.
+        oom_kill=_kills(snap.get("oom_kill"), rec.get("oom_kill")),
     )
     if state in TERMINAL_STATES and events["offset"] >= events["size"]:
         rec["final"] = True  # finished and fully copied: no reason to ask again

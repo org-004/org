@@ -96,7 +96,8 @@ def main():
         f.write(json.dumps({"label": label, "attempt": attempt, "opts": {k: v for k, v in opts.items() if k != "--append-system-prompt"},
                             "flags": sorted(flags), "prompt": prompt, "cwd": os.getcwd(),
                             "system_prompt": opts.get("--append-system-prompt", "")[:200],
-                            "env": {k: os.environ.get(k) for k in ("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "IS_SANDBOX", "ORG_RUN_DIR")}}) + "\n")
+                            "env": {k: os.environ.get(k) for k in ("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "IS_SANDBOX", "ORG_RUN_DIR",
+                                                                 "CLAUDE_CODE_SHELL_PREFIX")}}) + "\n")
 
     resume = opts.get("--resume")
     sid = resume or opts.get("--session-id") or str(uuid.uuid4())

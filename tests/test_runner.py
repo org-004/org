@@ -18,6 +18,12 @@ sys.path.insert(0, str(ROOT))
 from org import runner, schemas  # noqa: E402
 from org.util import read_json, sha256_bytes  # noqa: E402
 
+# The kernel's count of memory kills is read from $ORG_CGROUP_DIR: this machine's own count may be above zero, and no test may depend on it.
+os.environ["ORG_CGROUP_DIR"] = os.path.join(tempfile.gettempdir(), "org-tests-no-cgroup")
+# An engineer that runs this suite has a CLAUDE_CODE_SHELL_PREFIX of its own, from its runner, and a
+# runner keeps one it finds: the tests of the wrapper start without one.
+os.environ.pop("CLAUDE_CODE_SHELL_PREFIX", None)
+
 FAKE = ROOT / "tests" / "fake_claude.py"
 SPEC = "---\ntitle: Test spec\n---\n\n## Intent\n\nProve the runner.\n"
 
@@ -87,6 +93,44 @@ class RunnerCase(unittest.TestCase):
         self.addCleanup(lambda: (r._events.close(), r._log.close()))
         self.assertIn("Docker works here", r.system_prompt)
         self.assertNotIn("{{", r.system_prompt)
+
+    def test_with_a_memory_limit_the_sessions_shell_commands_run_through_a_wrapper_that_marks_them(self):
+        self.job({"plan": PLAN_TURN}, facts={"docker": "yes", "cores": "4", "memory_limit": "2219MiB"})
+        r = runner.Runner(self.run_dir)
+        r.prepare()
+        self.addCleanup(lambda: (r._events.close(), r._log.close()))
+        wrapper = self.run_dir.resolve() / ".org" / "shell-prefix"
+        self.assertEqual(r._env()["CLAUDE_CODE_SHELL_PREFIX"], str(wrapper))
+        self.assertEqual(wrapper.read_text(), runner.SHELL_PREFIX)
+        self.assertTrue(os.access(wrapper, os.X_OK))
+        # Claude Code runs `<the prefix> '<the command line>'`: one argument, which a shell must read.
+        p = subprocess.run([str(wrapper), 'read -r line; echo "$line to $WHO"; echo "$#" >&2; cat /proc/self/oom_score_adj 2>/dev/null; exit 7'],
+                           input="said", capture_output=True, text=True, env=dict(os.environ, WHO="the command"), timeout=30)
+        self.assertEqual((p.returncode, p.stderr, p.stdout.splitlines()[0]), (7, "0\n", "said to the command"),
+                         "the command line, its input, its environment and its exit status pass through untouched")
+        mine = Path("/proc/self/oom_score_adj")
+        if mine.exists():
+            self.assertEqual(p.stdout.splitlines()[1:], [str(max(500, int(mine.read_text())))], "what it runs is killed first")
+            # A command that is already marked higher is left as it is: the wrapper only ever raises.
+            higher = str(min(1000, max(500, int(mine.read_text())) + 100))
+            p = subprocess.run(["sh", "-c", 'echo "$1" > /proc/self/oom_score_adj && exec "$0" "cat /proc/self/oom_score_adj"', str(wrapper), higher],
+                               capture_output=True, text=True, timeout=30)
+            self.assertEqual(p.stdout.strip(), higher)
+        # A user who chose a prefix of their own keeps it.
+        os.environ["CLAUDE_CODE_SHELL_PREFIX"] = "/somebody/elses"
+        self.addCleanup(os.environ.pop, "CLAUDE_CODE_SHELL_PREFIX", None)
+        self.assertEqual(r._env()["CLAUDE_CODE_SHELL_PREFIX"], "/somebody/elses")
+
+    def test_without_a_memory_limit_the_session_gets_no_wrapper(self):
+        self.job({"plan": PLAN_TURN, "milestone:M1": DONE("M1"), "milestone:M2": DONE("M2"), "report": REPORT}, facts={"docker": "yes", "cores": "4"})
+        self.assertEqual(self.go(), 0)
+        self.assertEqual({c["env"]["CLAUDE_CODE_SHELL_PREFIX"] for c in self.calls()}, {None})
+        self.assertFalse((self.run_dir / ".org" / "shell-prefix").exists())
+
+    def test_the_session_is_started_with_the_wrapper_when_the_machine_has_a_limit(self):
+        self.job({"plan": PLAN_TURN, "milestone:M1": DONE("M1"), "milestone:M2": DONE("M2"), "report": REPORT}, facts={"memory_limit": "5GiB"})
+        self.assertEqual(self.go(), 0)
+        self.assertEqual({c["env"]["CLAUDE_CODE_SHELL_PREFIX"] for c in self.calls()}, {str(self.run_dir.resolve() / ".org" / "shell-prefix")})
 
     # ------------------------------------------------------------ the normal path
     def test_plan_execute_report(self):
@@ -337,6 +381,38 @@ class RunnerCase(unittest.TestCase):
         self.assertEqual(self.status()["state"], "done")
         self.assertEqual([c["label"] for c in self.calls()], ["plan", "milestone:M1", "milestone:M2", "report"])
         self.assertAlmostEqual(self.status()["cost"]["confirmed_usd"], 0.25 + 0.3 + 0.3 + 0.1, places=6)
+
+    def test_the_engineer_is_told_how_much_memory_it_has_and_what_a_kill_looks_like(self):
+        text = runner.machine_facts({"docker": "yes", "cores": "4", "memory_limit": "2219MiB"})
+        for phrase in ("2219MiB of memory", "hard limit", "killed by the kernel", "`Killed`", "`terminated`",
+                       "lower its parallelism", "not to run it again unchanged", "/sys/fs/cgroup/memory.events", "`oom_kill`"):
+            self.assertIn(phrase, text)
+        self.assertLess(text.index("CPU cores"), text.index("2219MiB"))
+        self.assertLess(text.index("oom_kill"), text.index("Docker works here"))
+        self.assertIn("5GiB of memory", runner.machine_facts({"memory_limit": "5GiB"}))
+
+    def test_without_a_valid_memory_limit_the_engineer_is_told_exactly_what_it_was_before(self):
+        base = {"docker": "yes", "cores": "4"}
+        expected = runner.machine_facts(base)
+        self.assertTrue(expected.startswith("It has 4 CPU cores. Docker works here"))
+        for bad in (None, "", "lots", "12", "12MB", "-5GiB", "5 GiB", "5GiB\n", 2219, ["5GiB"]):
+            self.assertEqual(runner.machine_facts(dict(base, memory_limit=bad)), expected, bad)
+
+    def test_snapshot_carries_the_kernels_count_of_memory_kills(self):
+        self.job({"plan": PLAN_TURN, "milestone:M1": DONE("M1"), "milestone:M2": DONE("M2"), "report": REPORT})
+        self.go()
+        self.assertIsNone(runner.snapshot(self.run_dir)["oom_kill"], "no memory.events, no count")
+        cgroup = Path(tempfile.mkdtemp(prefix="org-cgroup-"))
+        self.addCleanup(shutil.rmtree, cgroup, ignore_errors=True)
+        self.addCleanup(os.environ.__setitem__, "ORG_CGROUP_DIR", os.environ["ORG_CGROUP_DIR"])
+        os.environ["ORG_CGROUP_DIR"] = str(cgroup)
+        for text, want in (("low 0\nhigh 0\nmax 3\noom 4\noom_kill 2\noom_group_kill 0\n", 2), ("oom_kill 0\n", 0),
+                           ("low 0\noom 1\n", None), ("oom_kill many\n", None), ("", None)):
+            (cgroup / "memory.events").write_text(text)
+            self.assertEqual(runner.snapshot(self.run_dir)["oom_kill"], want, text)
+        (cgroup / "memory.events").unlink()
+        (cgroup / "memory.events").mkdir()  # unreadable as a file
+        self.assertIsNone(runner.snapshot(self.run_dir)["oom_kill"])
 
     def test_snapshot_is_incremental(self):
         self.job({"plan": PLAN_TURN, "milestone:M1": DONE("M1"), "milestone:M2": DONE("M2"), "report": REPORT})

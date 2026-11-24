@@ -22,6 +22,12 @@ from org.util import read_json, write_json  # noqa: E402
 # test may meet the real ones (/run/org where org is installed): until a test names a directory
 # of its own, the tokens are nowhere.
 os.environ["ORG_SECRETS_DIR"] = os.path.join(tempfile.gettempdir(), "org-tests-no-secrets")
+# The same for the kernel's count of memory kills, which a run's snapshot reads from
+# $ORG_CGROUP_DIR: the machine the tests run on may have had some, and no test may depend on it.
+os.environ["ORG_CGROUP_DIR"] = os.path.join(tempfile.gettempdir(), "org-tests-no-cgroup")
+# And for this machine's memory, which sizes an engineer's container: the tests' machine has
+# 11951 MiB wherever they run, so four at once get 2219MiB each.
+os.environ["ORG_MEMINFO"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "meminfo")
 
 GOOD = """---
 title: CSV export

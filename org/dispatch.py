@@ -504,6 +504,12 @@ def stop(ledger: Ledger, run_id: str) -> str:
     return tr.run(script, timeout=60).stdout.decode().strip()
 
 
+# Lays facts, read as JSON from stdin, over those in a run's job.json. Written whole or not at all.
+_NEW_FACTS = ('python3 -c \'import json, os, sys\np = sys.argv[1]\njob = json.load(open(p))\n'
+              'job["facts"] = dict(job.get("facts") or {}, **json.load(sys.stdin))\n'
+              'open(p + ".new", "w").write(json.dumps(job, indent=2))\nos.replace(p + ".new", p)\' "%s/job.json"')
+
+
 def resume(ledger: Ledger, run_id: str, log=lambda message: None) -> str:
     """Restart the runner for a run whose process died. It continues from its saved state."""
     rec = ledger.run(run_id)
@@ -511,6 +517,12 @@ def resume(ledger: Ledger, run_id: str, log=lambda message: None) -> str:
     backend = backends.get(cfg, machine["kind"])
     backend.before_resume(machine, cfg)
     tr = for_machine(machine, cfg)
+    # What `before_resume` changed about the machine is told to the engineer as dispatch would
+    # have told it: the runner that is about to start reads its facts from job.json.
+    news = {k: v for k, v in backend.resume_facts(machine, cfg).items() if (rec.get("facts") or {}).get(k) != v}
+    if news:
+        rec["facts"] = dict(rec.get("facts") or {}, **news)
+        tr.run(_NEW_FACTS % rec["remote_dir"], input=json.dumps(news).encode(), timeout=30)
     # The build cache may have another address by now, or be gone: ask again.
     offered = backend.build_cache(tr, cfg, log, again=True)
     if offered:

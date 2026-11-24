@@ -335,6 +335,8 @@ def cmd_peek(args) -> int:
             print("           subagent running: %s" % a)
     for w in v["warnings"]:
         print("warning:   %s" % w)
+    if status.oom_line(v):
+        print("warning:   %s" % status.oom_line(v))
     if v["health"] != "ok":
         print("health:    %s%s" % (v["health"], (" — " + str(rec.get("last_error"))) if rec.get("last_error") else ""))
     if args.lines:
@@ -596,6 +598,16 @@ def cmd_pool(args) -> int:
     nodes = dispatch.pool(ledger)
     for p in nodes:
         where = p["host"] or {"incus": "containers on this machine", "docker": "this Docker daemon"}.get(p["kind"], "")
+        if p["kind"] == "incus":
+            from .backends import BackendError
+            from .backends.incus import memory_limit
+
+            # A setting that cannot be read is said here as `org doctor` says it, not raised.
+            try:
+                limit = memory_limit(ledger.config())
+                where += ", %s each" % limit if limit else ", no memory limit"
+            except BackendError as e:
+                where += " (%s)" % e
         print("%-20s %d of %d slot(s) in use   %s" % (p["kind"] + ":" + p["node"], p["used"], p["slots"], where))
     if not nodes:
         print("no limit is set on how many engineers run at once (machines.incus.slots in config.json sets one)")
