@@ -112,6 +112,32 @@ RESULT = {
     },
 }
 
+# What the review between two specs of a plan must answer (org/review.py, org/prompts/review.md).
+# The lengths and the one-note-per-waiting-spec rule are checked in code, by review.check: this
+# validator and the CLI's agree on types, enums and required keys only.
+REVIEW = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["verdict", "reason"],
+    "properties": {
+        "verdict": {"type": "string", "enum": ["continue", "retry", "pause"]},
+        "reason": {"type": "string", "description": "Why, in at most 300 characters; the person may read it on a phone"},
+        "notes": {
+            "type": "array",
+            "description": "For `continue`: one entry for each waiting spec",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["spec", "note"],
+                "properties": {
+                    "spec": {"type": "string", "description": "The waiting spec's id"},
+                    "note": {"type": "string", "description": "What that spec's engineer should know, at most 600 characters"},
+                },
+            },
+        },
+    },
+}
+
 
 def problems(obj, schema, path="") -> list:
     """A small validator for the subset of JSON Schema used above.

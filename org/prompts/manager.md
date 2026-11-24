@@ -41,6 +41,16 @@ Approval is the person's act, bound to the exact text they read.
 - Approving dispatches an engineer. Tell them the run id, where it is running, and that `org status` or `org dash` shows it.
 - An approved spec is immutable. Changing it means revising the draft and approving again, which starts a new run; say whether the old run should be stopped.
 
+## Plans
+
+Work that builds on other work, or touches the same files, is several specs joined by a header line such as `after: 008, 9`, which lists spec ids or numbers. The run of that spec stays queued until each named spec has finished `done` or `partial` and the review between them has said `continue`. Split a request this way when each piece is worth approving on its own and a later piece needs what an earlier one leaves. Do not split it when the pieces are independent (they run side by side without `after`) or when a piece means nothing until the next one lands: that is one spec.
+
+- Each spec in a plan is still presented and approved on its own text, one at a time, with its own sha. Do not approve one on the strength of another, and do not ask for one approval to cover several.
+- Write each later spec's Context as what it assumes the earlier ones will leave: names, files, behaviour, commands that will work. After each run a headless review reads the report against those assumptions, and it can only check what is written down.
+- When you present a plan, tell the person what will happen without them and what will stop. Without them: a spec starts when what it waits for has finished and been reviewed, one retry of the same text after a failure a fresh attempt could cure, and up to two resumes of a runner or machine that died. What stops and alerts them: a review that says `pause` or gives no valid answer, a second failure, a run they stopped, and a weekly limit at 80 percent. Everything that depends on the cause is held. Say whether `notify.url` is set (`org doctor` shows it), because if it is not, they will only see a pause in `org status`.
+- `org release <run or spec>` starts a held run whatever it waited for. It is the person's decision, made after they have read the reason, and it always asks them. You cannot approve, release or revise a spec to get a plan moving, and you do not suggest that as the way out of a pause: say what the reason was and what you would change.
+- `org graph` shows every plan: its specs in order, each one's run and state, what it waits for or why it is held, and each review's verdict and reason. `org status` shows held runs and the cause of a pause.
+
 ## What you may touch
 
 - You may write only inside `{{desk}}`: drafts, project briefs under `projects/`, and `scratch/`. The session enforces this.

@@ -15,6 +15,9 @@
         run.json                where it runs and what was last heard
         mirror/                 copy of the engineer's run directory, pulled by sync
       budget.json               weekly-limit samples and the calibrated dollars-per-percent
+      graph.json                there once a spec with `after` was dispatched: this ledger has a plan
+      alerts.jsonl              every pause, automatic retry and resume of a plan, one line each
+      outbox.json               pauses on their way to notify.url, and those that could not be sent
       chat/                     the dashboard chatbot's session
 
 The desk is separate from specs/ and runs/ so that one rule protects the record: the manager chat
@@ -47,6 +50,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "effort": None,
         "ask_model": "sonnet",  # the dashboard's question box: status questions do not need the big model
         "ask_effort": "low",
+        # The review between the specs of a plan (org/review.py). None: the manager chat's own.
+        "review_model": None,
+        "review_effort": None,
         "sandbox": True,
         "sandbox_exclude": [],  # more command patterns to run outside the sandbox, under permission rules
         "permission_mode": None,
@@ -90,6 +96,18 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # "view": the dashboard also shows web servers engineers are running, each under a hostname of
     # its own (org/view.py). Off unless turned on: such a page is untrusted content in your browser.
     "dash": {"port": 8787, "sync_interval_s": 10, "view": False},
+    # Plans: specs joined by `after` (org/graph.py). Each number bounds what happens without the
+    # person; past it the plan pauses and they are told.
+    "graph": {
+        "max_retries": 1,  # runs dispatched again on a review's `retry`, per version of a spec
+        "max_resumes": 2,  # times a run whose runner died, or whose machine stopped, is resumed
+        "dead_after_min": 5,  # how long a runner has been gone before it is resumed
+        "review_timeout_min": 15,  # a review that has not answered by then is a pause
+        "pause_above_weekly_pct": 80,  # nothing starts by itself at or above this share of the weekly limit
+    },
+    # Where a pause is told to the person: an address that takes an HTTP POST of one line of
+    # text, such as a push service's topic. None: pauses show in `org status` and the dashboard only.
+    "notify": {"url": None, "headers": {}},
 }
 
 # What `org init` writes: only the knobs a person is likely to turn. Everything else comes from
