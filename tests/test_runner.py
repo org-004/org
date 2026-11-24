@@ -91,6 +91,43 @@ class RunnerCase(unittest.TestCase):
         self.assertIn("Docker works here", r.system_prompt)
         self.assertNotIn("{{", r.system_prompt)
 
+    def test_with_a_memory_limit_the_sessions_shell_commands_run_through_a_wrapper_that_marks_them(self):
+        self.job({"plan": PLAN_TURN}, facts={"docker": "yes", "cores": "4", "memory_limit": "2219MiB"})
+        r = runner.Runner(self.run_dir)
+        r.prepare()
+        self.addCleanup(lambda: (r._events.close(), r._log.close()))
+        wrapper = self.run_dir.resolve() / ".org" / "shell-prefix"
+        self.assertEqual(r._env()["CLAUDE_CODE_SHELL_PREFIX"], str(wrapper))
+        self.assertEqual(wrapper.read_text(), runner.SHELL_PREFIX)
+        self.assertTrue(os.access(wrapper, os.X_OK))
+        # Claude Code runs `<the prefix> '<the command line>'`: one argument, which a shell must read.
+        p = subprocess.run([str(wrapper), 'read -r line; echo "$line to $WHO"; echo "$#" >&2; cat /proc/self/oom_score_adj 2>/dev/null; exit 7'],
+                           input="said", capture_output=True, text=True, env=dict(os.environ, WHO="the command"), timeout=30)
+        self.assertEqual((p.returncode, p.stderr, p.stdout.splitlines()[0]), (7, "0\n", "said to the command"),
+                         "the command line, its input, its environment and its exit status pass through untouched")
+        mine = Path("/proc/self/oom_score_adj")
+        if mine.exists():
+            self.assertEqual(p.stdout.splitlines()[1:], [str(max(500, int(mine.read_text())))], "what it runs is killed first")
+            # A command that is already marked higher is left as it is: the wrapper only ever raises.
+            p = subprocess.run(["sh", "-c", 'echo 800 > /proc/self/oom_score_adj && exec "$0" "cat /proc/self/oom_score_adj"', str(wrapper)],
+                               capture_output=True, text=True, timeout=30)
+            self.assertEqual(p.stdout.strip(), "800")
+        # A user who chose a prefix of their own keeps it.
+        os.environ["CLAUDE_CODE_SHELL_PREFIX"] = "/somebody/elses"
+        self.addCleanup(os.environ.pop, "CLAUDE_CODE_SHELL_PREFIX", None)
+        self.assertEqual(r._env()["CLAUDE_CODE_SHELL_PREFIX"], "/somebody/elses")
+
+    def test_without_a_memory_limit_the_session_gets_no_wrapper(self):
+        self.job({"plan": PLAN_TURN, "milestone:M1": DONE("M1"), "milestone:M2": DONE("M2"), "report": REPORT}, facts={"docker": "yes", "cores": "4"})
+        self.assertEqual(self.go(), 0)
+        self.assertEqual({c["env"]["CLAUDE_CODE_SHELL_PREFIX"] for c in self.calls()}, {None})
+        self.assertFalse((self.run_dir / ".org" / "shell-prefix").exists())
+
+    def test_the_session_is_started_with_the_wrapper_when_the_machine_has_a_limit(self):
+        self.job({"plan": PLAN_TURN, "milestone:M1": DONE("M1"), "milestone:M2": DONE("M2"), "report": REPORT}, facts={"memory_limit": "5GiB"})
+        self.assertEqual(self.go(), 0)
+        self.assertEqual({c["env"]["CLAUDE_CODE_SHELL_PREFIX"] for c in self.calls()}, {str(self.run_dir.resolve() / ".org" / "shell-prefix")})
+
     # ------------------------------------------------------------ the normal path
     def test_plan_execute_report(self):
         self.job({"plan": PLAN_TURN, "milestone:M1": dict(DONE("M1"), subagents=2), "milestone:M2": DONE("M2"), "report": REPORT})

@@ -353,7 +353,28 @@ class Runner:
         # No claude.ai connectors, whatever the account has attached to it.
         env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
         env["ORG_RUN_DIR"] = str(self.dir)
+        prefix = self._shell_prefix()
+        if prefix:
+            env.setdefault("CLAUDE_CODE_SHELL_PREFIX", prefix)
         return env
+
+    def _shell_prefix(self) -> Optional[str]:
+        """The wrapper every shell command of the session runs through, where the machine has a
+        hard memory limit; None anywhere else, so that nothing changes there.
+
+        Claude Code runs `<CLAUDE_CODE_SHELL_PREFIX> '<the command line>'` and splits a prefix
+        at " -", so a path that holds one cannot be given to it.
+        """
+        path = self.dir / ".org" / "shell-prefix"
+        if not (self.job.get("facts") or {}).get("memory_limit") or " -" in str(path) or not os.access("/bin/bash", os.X_OK):
+            return None
+        try:
+            if read_text(path) != SHELL_PREFIX or not os.access(str(path), os.X_OK):
+                write_text(path, SHELL_PREFIX, 0o755)
+        except OSError as e:
+            self.warn("the shell commands of this run are not marked to be killed for memory before its session: %s" % e)
+            return None
+        return str(path)
 
     # ------------------------------------------------------------ one CLI invocation
     def invoke(self, label: str, prompt: str, schema: dict, budget_usd: Optional[float]) -> dict:
@@ -1028,6 +1049,29 @@ class Runner:
 
 
 # ---------------------------------------------------------------- what the manager's side pulls
+
+
+# What CLAUDE_CODE_SHELL_PREFIX names in a machine with a hard memory limit. When the limit is
+# reached the kernel kills the process with the highest score there: mostly the largest, and a
+# session of several hundred MiB can be larger than any one compiler. A session that is killed
+# takes the turn with it; a build step that is killed is something the engineer reads and acts
+# on. So what the session's shell tool runs, and everything that starts, scores higher: 500
+# adds half the machine's memory to a process's size, in the kernel's arithmetic. A process may
+# always raise its own score, so this gives nobody anything, and an adjustment that is already
+# higher is left alone. Claude Code hands the whole command line over as one argument and
+# documents `exec bash -c "$1"` as what a wrapper does with it.
+SHELL_PREFIX = """#!/bin/bash
+# Written by org's runner. This machine has a hard memory limit, and Claude Code runs every
+# shell command of the session through this file so that, when the limit is reached, the kernel
+# kills a command before it kills the session that ran it. Only /proc/<pid>/oom_score_adj differs.
+adj=
+{ read -r adj < /proc/self/oom_score_adj; } 2>/dev/null
+case "$adj" in
+  ''|*[!0-9-]*) ;;
+  *) [ "$adj" -lt 500 ] && { echo 500 > /proc/self/oom_score_adj; } 2>/dev/null ;;
+esac
+exec "$BASH" -c "$1"
+"""
 
 
 def machine_facts(facts: dict) -> str:
