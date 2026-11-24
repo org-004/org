@@ -1,6 +1,6 @@
 #!/bin/sh
-# cache.sh: the build cache's container. `org up` runs this once, as root, inside the cache
-# container (org-cache), and again whenever it runs; a second run changes nothing it need not.
+# cache.sh: what the build cache's container runs. `org up` runs this once, as root, inside the
+# cache container (org-cache) when it makes it. Run a second time, it changes nothing it need not.
 #
 # It installs bazel-remote 2.6.4, pinned by its SHA-256, and runs it as a service of its own user
 # that serves Bazel's remote cache over gRPC on one port.

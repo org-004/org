@@ -107,14 +107,15 @@ def bazelrc(address: str, port: int) -> str:
     """Bazel's system-wide settings for an engineer's container that reached the cache.
 
     Only what the cache needs: where it is, that what is built here is uploaded, and the two
-    options that together make Bazel 9 build locally, with a warning, when the cache stops
-    answering part-way (without the second, the first applies to remote execution only and the
-    build fails). No disk cache, no limit on cores, nothing about any project."""
+    options that together make Bazel 9 build locally when the cache stops answering part-way
+    (without the second, the first applies to remote execution only and the build fails).
+    Bazel 9.3.0 was seen to do that without an error and without a warning either: the only
+    sign is a wait of some seconds. No disk cache, no limit on cores, nothing about any project."""
     return "\n".join([
         MARK + ", in this engineer's container only, after it reached the build cache.",
         "# The cache is a container on the same machine that every engineer reads and writes, so a",
-        "# first build downloads what an earlier engineer built. If it stops answering, Bazel warns",
-        "# and builds locally. A project without Bazel never reads this file.",
+        "# first build downloads what an earlier engineer built. If it stops answering, Bazel builds",
+        "# locally instead and the build still succeeds. A project without Bazel never reads this file.",
         "build --remote_cache=grpc://%s:%d" % (address, port),
         "build --remote_upload_local_results=true",
         "build --remote_local_fallback",
