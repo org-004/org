@@ -11,7 +11,7 @@ import json
 import os
 import shlex
 import subprocess
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 class TransportError(Exception):
@@ -293,9 +293,16 @@ class Incus(Transport):
         return None
 
     @classmethod
-    def create(cls, base: str, container: str) -> "Incus":
-        """Copy the template and start the copy. On a copy-on-write pool the copy is instant."""
-        cls.ok(["copy", "-q", base, container], "incus copy %s %s" % (base, container))
+    def create(cls, base: str, container: str, config: Optional[Dict[str, str]] = None) -> "Incus":
+        """Copy the template and start the copy. On a copy-on-write pool the copy is instant.
+
+        `config` is given to the command that makes the copy, so the copy never exists without
+        it and is never started without it; a key Incus refuses leaves no copy behind.
+        """
+        args = ["copy", "-q", base, container]
+        for key in sorted(config or {}):
+            args += ["-c", "%s=%s" % (key, config[key])]
+        cls.ok(args, "incus copy %s %s" % (base, container))
         try:
             return cls.start(container)
         except TransportError:
@@ -315,6 +322,11 @@ class Incus(Transport):
         if tr.run(ready, timeout=90, check=False).returncode != 0:
             raise TransportError("%s started but got no network address within 30s" % container)
         return tr
+
+    @classmethod
+    def set_config(cls, container: str, key: str, value: str) -> None:
+        """Set one key on a container that exists, as `incus config set` does."""
+        cls.ok(["config", "set", container, key, value], "incus config set %s %s %s" % (container, key, value), 60)
 
     @classmethod
     def delete(cls, container: str) -> None:

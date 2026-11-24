@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from org import backends, dispatch, spec, status, sync  # noqa: E402
 from org.backends import BackendError  # noqa: E402
-from org.backends.incus import IncusBackend, problems  # noqa: E402
+from org.backends.incus import IncusBackend, machine_memory_mib, memory_limit, memory_reserve_mib, problems, size_mib  # noqa: E402
 from org.ledger import Ledger  # noqa: E402
 from org.transport import Incus, TransportError  # noqa: E402
 from org.util import read_json, write_json  # noqa: E402
@@ -590,6 +590,119 @@ class Names(unittest.TestCase):
             backends.load(self.ledger.config())
 
 
+class TheMemoryLimit(unittest.TestCase):
+    """machines.incus.memory, and the arithmetic that sizes a container to the machine."""
+    VM = 11951  # MiB: the machine this was written for
+
+    @staticmethod
+    def cfg(**incus):
+        return {"machines": {"incus": incus}}
+
+    def test_the_automatic_limit_is_what_is_left_after_the_reserve_shared_among_the_slots(self):
+        self.assertEqual(memory_limit(self.cfg(slots=2), self.VM), "4439MiB")
+        self.assertEqual(memory_limit(self.cfg(slots=4), self.VM), "2219MiB")
+        self.assertEqual(memory_limit(self.cfg(), self.VM), "2219MiB", "four slots when the ledger names none")
+        self.assertEqual(memory_limit({}, self.VM), "2219MiB")
+        self.assertEqual(memory_limit(self.cfg(memory="auto", slots=2), self.VM), "4439MiB")
+        self.assertEqual(memory_limit(self.cfg(memory=None, slots=2), self.VM), "4439MiB")
+        self.assertEqual(memory_limit(self.cfg(slots=3), 16384), "4437MiB", "a part of a MiB is dropped, never added")
+
+    def test_the_reserve_is_three_gib_unless_the_ledger_says(self):
+        self.assertEqual(memory_reserve_mib(self.cfg()), 3072)
+        self.assertEqual(memory_limit(self.cfg(slots=2, memory_reserve="2GiB"), self.VM), "4951MiB")
+        self.assertEqual(memory_limit(self.cfg(slots=1, memory_reserve="951MiB"), self.VM), "11000MiB")
+
+    def test_a_size_is_returned_as_it_was_written(self):
+        self.assertEqual(memory_limit(self.cfg(memory="5GiB"), self.VM), "5GiB")
+        self.assertEqual(memory_limit(self.cfg(memory="5120MiB", slots=2), self.VM), "5120MiB")
+        self.assertEqual(memory_limit(self.cfg(memory="64GiB"), self.VM), "64GiB", "more than the machine has is the owner's to choose")
+        self.assertEqual(memory_limit(self.cfg(memory="5GiB", slots=None), None), "5GiB", "a size needs no arithmetic")
+        self.assertEqual((size_mib("5GiB"), size_mib("2219MiB")), (5120, 2219))
+
+    def test_none_is_no_limit(self):
+        self.assertIsNone(memory_limit(self.cfg(memory="none"), self.VM))
+        self.assertIsNone(memory_limit(self.cfg(memory="none", memory_reserve="64GiB", slots=None), self.VM))
+
+    def test_without_slots_or_without_the_machines_memory_there_is_nothing_to_divide(self):
+        for slots in (None, 0, "", "many", -2, False):
+            self.assertIsNone(memory_limit(self.cfg(slots=slots), self.VM), slots)
+        old = os.environ.get("ORG_MEMINFO")
+        self.addCleanup(lambda: os.environ.pop("ORG_MEMINFO", None) if old is None else os.environ.update(ORG_MEMINFO=old))
+        os.environ["ORG_MEMINFO"] = os.path.join(tempfile.gettempdir(), "org-tests-no-such-meminfo")
+        self.assertIsNone(machine_memory_mib())
+        self.assertIsNone(memory_limit(self.cfg(slots=2)))
+        self.assertEqual(memory_limit(self.cfg(slots=2), self.VM), "4439MiB", "a figure that was given is used")
+
+    def test_the_machines_memory_is_read_from_meminfo_when_none_is_given(self):
+        tmp = Path(tempfile.mkdtemp(prefix="org-meminfo-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        old = os.environ.get("ORG_MEMINFO")
+        self.addCleanup(lambda: os.environ.pop("ORG_MEMINFO", None) if old is None else os.environ.update(ORG_MEMINFO=old))
+        os.environ["ORG_MEMINFO"] = str(tmp / "meminfo")
+        (tmp / "meminfo").write_text("MemTotal:       12238404 kB\nMemFree:         3594000 kB\n")
+        self.assertEqual(machine_memory_mib(), 11951)
+        self.assertEqual(memory_limit(self.cfg(slots=2)), "4439MiB")
+        (tmp / "meminfo").write_text("MemFree:         3594000 kB\n")
+        self.assertIsNone(memory_limit(self.cfg(slots=2)), "a file that does not say is a machine that does not say")
+
+    def test_anything_else_is_refused_with_a_sentence_naming_the_setting(self):
+        for value in ("lots", "", "5", "5GB", "5 GiB", "5gib", "0GiB", "0MiB", "05GiB", "-1GiB", "1.5GiB", "5GiB ", "NONE", "Auto", 5, 5.0, True,
+                      ["5GiB"], {"size": "5GiB"}):
+            with self.assertRaises(BackendError, msg=repr(value)) as refused:
+                memory_limit(self.cfg(memory=value), self.VM)
+            self.assertRegex(str(refused.exception), r"^machines\.incus\.memory .* is not auto, none or a size")
+        for value in ("lots", "", "none", "auto", "0GiB", 3, "3GB"):
+            with self.assertRaises(BackendError, msg=repr(value)) as refused:
+                memory_limit(self.cfg(memory_reserve=value), self.VM)
+            self.assertRegex(str(refused.exception), r"^machines\.incus\.memory_reserve .* is not a size")
+        self.assertEqual(memory_limit(self.cfg(memory="5GiB", memory_reserve="lots"), self.VM), "5GiB",
+                         "a size takes no reserve, so a bad one is `org doctor`'s to report")
+
+    def test_an_automatic_limit_under_one_mib_is_refused(self):
+        for total, reserve, slots in ((3072, "3GiB", 4), (2000, "3GiB", 1), (3075, "3GiB", 4), (0, "3GiB", 2)):
+            with self.assertRaises(BackendError, msg=str((total, reserve, slots))) as refused:
+                memory_limit(self.cfg(memory_reserve=reserve, slots=slots), total)
+            self.assertIn("machines.incus.memory is automatic and comes to nothing", str(refused.exception))
+            self.assertIn("machines.incus.memory_reserve", str(refused.exception))
+        self.assertEqual(memory_limit(self.cfg(slots=4), 3076), "1MiB")
+
+
+class TheCopy(IncusCase):
+    """`Incus.create`, which is where a container is given what it must never be without."""
+
+    def test_what_a_copy_is_given_is_on_the_command_that_makes_it_before_any_start(self):
+        tr = Incus.create(TEMPLATE, "org-eng-a", {"limits.memory": "2219MiB", "boot.autostart": "false"})
+        self.assertEqual(tr.name, "org-eng-a")
+        said = [c for c in self.calls() if c[0] in ("copy", "start", "config")]
+        self.assertEqual(said, [["copy", "-q", TEMPLATE, "org-eng-a", "-c", "boot.autostart=false", "-c", "limits.memory=2219MiB"],
+                                ["start", "-q", "org-eng-a"]])
+        self.assertEqual(Incus.info("org-eng-a")["expanded_config"], {"boot.autostart": "false", "limits.memory": "2219MiB"})
+
+    def test_a_copy_that_is_given_nothing_is_made_as_before(self):
+        Incus.create(TEMPLATE, "org-eng-a")
+        Incus.create(TEMPLATE, "org-eng-b", {})
+        self.assertEqual([c for c in self.calls() if c[0] == "copy"],
+                         [["copy", "-q", TEMPLATE, "org-eng-a"], ["copy", "-q", TEMPLATE, "org-eng-b"]])
+
+    def test_a_key_incus_refuses_fails_the_copy_in_its_own_words_and_nothing_is_started(self):
+        os.environ["FAKE_INCUS_REFUSE"] = "limits.memory=the project does not allow it"
+        with self.assertRaises(TransportError) as failed:
+            Incus.create(TEMPLATE, "org-eng-a", {"limits.memory": "2219MiB"})
+        self.assertEqual(str(failed.exception),
+                         "incus copy org-base org-eng-a failed: Error: Failed creating instance record: the project does not allow it")
+        self.assertIsNone(Incus.info("org-eng-a"))
+        self.assertFalse([c for c in self.calls() if c[0] == "start"])
+
+    def test_a_key_is_set_on_a_container_that_exists(self):
+        self.container("org-eng-a")
+        Incus.set_config("org-eng-a", "limits.memory", "2219MiB")
+        self.assertEqual(self.calls(), [["config", "set", "org-eng-a", "limits.memory", "2219MiB"]])
+        self.assertEqual(Incus.info("org-eng-a")["expanded_config"], {"limits.memory": "2219MiB"})
+        with self.assertRaises(TransportError) as failed:
+            Incus.set_config("org-eng-a", "limits.memory", "lots")
+        self.assertIn("Invalid value: lots", str(failed.exception))
+
+
 class Doctor(IncusCase):
     def rows(self):
         """`org doctor` as a person runs it: {what was checked: (ok, warn or FAIL, what was found)}."""
@@ -649,9 +762,55 @@ class TheSimulatedIncus(IncusCase):
         self.assertEqual(self.incus("list", "-f", "csv", "-c", "n", "org-eng-").stdout.split(), ["org-eng-copy"])
         self.assertEqual([i["name"] for i in json.loads(self.incus("list", "--format", "json").stdout)], ["org-base", "org-eng-copy", "org-new"])
         info = json.loads(self.incus("query", "/1.0/instances/org-new").stdout)
-        self.assertEqual((info["status"], info["expanded_config"], sorted(info["expanded_devices"])), ("Stopped", {}, ["eth0", "root"]))
+        self.assertEqual((info["status"], info["expanded_config"], sorted(info["expanded_devices"])),
+                         ("Stopped", {"boot.autostart": "false"}, ["eth0", "root"]))
         self.assertEqual(info["expanded_devices"]["root"], {"type": "disk", "path": "/", "pool": "default"})
         self.assertEqual(problems(info), [])
+
+    def test_a_key_given_to_a_copy_or_set_afterwards_is_in_the_description(self):
+        self.assertEqual(self.incus("copy", "-q", TEMPLATE, "org-eng-a", "-c", "limits.memory=2219MiB").returncode, 0)
+        self.assertEqual(Incus.info("org-eng-a")["expanded_config"], {"limits.memory": "2219MiB"})
+        self.assertEqual(self.state("org-eng-a"), "stopped", "a copy is not started by being made")
+        self.assertEqual(Incus.info(TEMPLATE)["expanded_config"], {}, "the template is not what was given the key")
+        self.assertEqual(self.incus("config", "set", "org-eng-a", "limits.memory", "5GiB").returncode, 0)
+        self.assertEqual(Incus.info("org-eng-a")["expanded_config"], {"limits.memory": "5GiB"})
+        self.assertEqual(self.incus("config", "set", "org-eng-a", "limits.memory=4GiB").returncode, 0)
+        self.assertEqual(Incus.info("org-eng-a")["expanded_config"], {"limits.memory": "4GiB"})
+        # A copy carries what its source was given, as a real copy does.
+        self.assertEqual(self.incus("copy", "-q", "org-eng-a", "org-eng-b").returncode, 0)
+        self.assertEqual(Incus.info("org-eng-b")["expanded_config"], {"limits.memory": "4GiB"})
+
+    def test_a_memory_limit_it_cannot_take_is_refused_in_the_real_ones_words_and_leaves_no_copy(self):
+        for value, said in (("lots", "Invalid value: lots"), ("0MiB", "Memory limit can't be 0")):
+            p = self.incus("copy", "-q", TEMPLATE, "org-eng-a", "-c", "limits.memory=" + value)
+            self.assertEqual((p.returncode, p.stderr), (1, "Error: Failed creating instance record: %s\n" % said))
+            self.assertFalse(self.box("org-eng-a").exists())
+        self.container("org-eng-b")
+        p = self.incus("config", "set", "org-eng-b", "limits.memory", "lots")
+        self.assertEqual((p.returncode, p.stderr), (1, "Error: Invalid config: Invalid value: lots\n"))
+        self.assertEqual(Incus.info("org-eng-b")["expanded_config"], {})
+
+    def test_a_test_can_make_it_refuse_a_key_or_lose_one(self):
+        # What a project that forbids the key would do: no test can make such a project, so it says so.
+        os.environ["FAKE_INCUS_REFUSE"] = "limits.memory=the project does not allow it"
+        p = self.incus("copy", "-q", TEMPLATE, "org-eng-a", "-c", "limits.memory=2219MiB")
+        self.assertEqual((p.returncode, p.stderr), (1, "Error: Failed creating instance record: the project does not allow it\n"))
+        self.assertFalse(self.box("org-eng-a").exists())
+        self.assertEqual(self.incus("copy", "-q", TEMPLATE, "org-eng-a").returncode, 0, "only the key is refused")
+        self.assertEqual(self.incus("config", "set", "org-eng-a", "limits.memory", "2219MiB").returncode, 1)
+        del os.environ["FAKE_INCUS_REFUSE"]
+        # An Incus that takes the key and does not keep it, or keeps another: what dispatch must notice.
+        os.environ["FAKE_INCUS_LOSES"] = "limits.memory"
+        self.assertEqual(self.incus("copy", "-q", TEMPLATE, "org-eng-b", "-c", "limits.memory=2219MiB").returncode, 0)
+        self.assertEqual(Incus.info("org-eng-b")["expanded_config"], {})
+        os.environ["FAKE_INCUS_LOSES"] = "limits.memory=1GiB"
+        self.assertEqual(self.incus("copy", "-q", TEMPLATE, "org-eng-c", "-c", "limits.memory=2219MiB").returncode, 0)
+        self.assertEqual(Incus.info("org-eng-c")["expanded_config"], {"limits.memory": "1GiB"})
+
+    def test_a_container_has_a_cgroup_directory_of_its_own_and_nothing_in_it(self):
+        self.container("org-eng-a", running=True)
+        said = self.incus("exec", "org-eng-a", "-T", "--", "sh", "-c", 'echo "$ORG_CGROUP_DIR"; ls "$ORG_CGROUP_DIR" 2>/dev/null | wc -l')
+        self.assertEqual(said.stdout.split(), [str(self.box("org-eng-a") / "home" / ".cgroup"), "0"])
 
     def test_what_it_refuses_as_the_real_one_does(self):
         self.container("org-eng-up", running=True)

@@ -7,11 +7,12 @@ and from other containers. That is enough to exercise provisioning, the vetting 
 from Incus's description of it, the token copy, the bundle transfer, the detached start and sync.
 
     incus query /1.0/instances/<name>       the container as JSON: status, expanded_config, expanded_devices
-    incus copy [-q] <base> <name>           incus init [flags] <image> <name>
+    incus copy [-q] <base> <name> [-c key=value]...     incus init [flags] <image> <name>
+    incus config set <name> <key> <value>   laid over what `query` and `list` say of the container
     incus start|stop [-q] <name>            incus delete [-q] [-f] <name>
     incus list [-f csv|json] [-c ns] [prefix]
     incus exec <name> [-T|-t] [--env K=V] -- <argv...>
-    incus config … | network … | profile … | storage … | admin …      accepted, recorded, nothing done
+    incus config … (the rest) | network … | profile … | storage … | admin …      accepted, recorded, nothing done
 
 Every call is appended to calls.log (its first four words) and calls.jsonl (all of it), so a test
 can assert on exactly what would have been sent to Incus.
@@ -22,12 +23,23 @@ key, and a null removes a key. A test writes that file to make a container privi
 host path, or take the isolation off its network card. A copy carries its source's override, as
 a real copy carries its source's configuration.
 
+A key given to `copy -c` or to `config set` is in the description afterwards, under
+expanded_config. `limits.memory` is refused when it is not a size or is zero, in the real
+client's words. Two variables let a test make this Incus behave as one it cannot make:
+    FAKE_INCUS_REFUSE="limits.memory=<what Incus says>"   the key is refused with those words, as a
+                                                          project that forbids it would refuse it
+    FAKE_INCUS_LOSES="limits.memory"                      the key is accepted and the description
+                                                          does not carry it; "limits.memory=1GiB"
+                                                          makes the description carry that instead
+
 A copy also carries its source's home, but not its tokens: those are in memory in a real
 container ($ORG_SECRETS_DIR here), so a copy starts with none and stopping a container loses
 them. A container is stopped or running, a copy starts stopped, and a command in a stopped
 container fails, as the real one does.
 A container's /etc/bazel.bazelrc is <container>/home/etc-bazel.bazelrc ($ORG_BAZELRC), and its
 address is what override.json says under "state", as `incus list --format json` reports it.
+A container's /sys/fs/cgroup is <container>/home/.cgroup ($ORG_CGROUP_DIR): it does not exist, so
+the container exposes no count of memory kills, until a test writes memory.events there.
 The template named by $FAKE_INCUS_BASE (default `base`) exists, stopped and empty, without the
 test having to make it; any other name the test did not make is not found.
 """
@@ -40,10 +52,14 @@ from pathlib import Path
 
 SECRETS = ".run-org"  # under a container's home: what /run/org is in a real one
 BAZELRC = "etc-bazel.bazelrc"  # under a container's home: what /etc/bazel.bazelrc is in a real one
+CGROUP = ".cgroup"  # under a container's home: what /sys/fs/cgroup is in a real one
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
 NOTHING_DONE = ("config", "network", "profile", "storage", "admin")
 INIT_FLAGS_WITH_VALUE = ("-c", "--config", "-d", "--device", "-p", "--profile", "-s", "--storage", "-n", "--network",
                          "-t", "--type", "--target", "--description")
+COPY_FLAGS_WITH_VALUE = ("-c", "--config", "-d", "--device", "-p", "--profile", "-s", "--storage", "-n", "--network",
+                         "--target", "--target-project", "--mode")
+MEMORY_RE = re.compile(r"([0-9]+)(%|B|kB|MB|GB|TB|PB|EB|KiB|MiB|GiB|TiB|PiB|EiB)?")
 EXEC_FLAGS_WITH_VALUE = ("--env", "--cwd", "--user", "--group", "--mode")
 ISOLATED = {
     "root": {"type": "disk", "path": "/", "pool": "default"},
@@ -125,7 +141,48 @@ def main(argv):
                 info[key] = value
         return info
 
+    def refusal(key, value):
+        """Why this Incus will not take a key, or None. The words for a bad size are the real client's."""
+        forbidden = os.environ.get("FAKE_INCUS_REFUSE", "")
+        if forbidden and forbidden.split("=", 1)[0] == key:
+            return forbidden.split("=", 1)[1] if "=" in forbidden else "%s is forbidden" % key
+        if key == "limits.memory":
+            size = MEMORY_RE.fullmatch(value)
+            if not size:
+                return "Invalid value: %s" % value
+            if int(size.group(1)) == 0:
+                return "Memory limit can't be 0"
+        return None
+
+    def lay(name, key, value):
+        """Put a key into what `query` and `list` say of a container, unless a test said it gets lost."""
+        lost = os.environ.get("FAKE_INCUS_LOSES", "")
+        if lost and lost.split("=", 1)[0] == key:
+            if "=" not in lost:
+                return
+            value = lost.split("=", 1)[1]
+        path = root / name / "override.json"
+        try:
+            override = json.loads(path.read_text())
+        except (OSError, ValueError):
+            override = {}
+        if not isinstance(override.get("expanded_config"), dict):
+            override["expanded_config"] = {}
+        override["expanded_config"][key] = value
+        path.write_text(json.dumps(override))
+
     cmd, args = argv[0], argv[1:]
+
+    if cmd == "config" and args[:1] == ["set"]:
+        plain, _ = words(args[1:])
+        pair = plain[1:] if len(plain) == 3 else (plain[1].split("=", 1) if len(plain) == 2 and "=" in plain[1] else [])
+        # Only a key on a container that exists is kept; anything else is recorded and nothing is done.
+        if len(pair) == 2 and box(plain[0]):
+            why = refusal(pair[0], pair[1])
+            if why:
+                return fail("Invalid config: %s" % why)
+            lay(plain[0], pair[0], pair[1])
+        return 0
 
     if cmd in NOTHING_DONE:
         return 0
@@ -189,9 +246,13 @@ def main(argv):
         return 0
 
     if cmd == "copy":
-        plain, _ = words(args)
+        plain, flags = words(args, COPY_FLAGS_WITH_VALUE)
         if len(plain) != 2:
             return fail("usage: incus copy [flags] <source> <destination>", 2)
+        given = [flags[i + 1] for i, flag in enumerate(flags) if flag in ("-c", "--config") and i + 1 < len(flags)]
+        given += [flag.split("=", 1)[1] for flag in flags if flag.startswith("--config=")]
+        if any("=" not in pair for pair in given):
+            return fail("Bad key=value pair: %s" % [pair for pair in given if "=" not in pair][0])
         base, name = plain
         source = box(base)
         if not source:
@@ -200,13 +261,19 @@ def main(argv):
             return fail("Invalid instance name: %s" % name)
         if (root / name).exists():
             return fail('Instance "%s" already exists' % name)
+        for pair in given:  # a key that is refused leaves no copy, as with the real one
+            why = refusal(*pair.split("=", 1))
+            if why:
+                return fail("Failed creating instance record: %s" % why)
         (root / name).mkdir(parents=True)
         home = source / "home"
         shutil.copytree(home, root / name / "home", symlinks=True,
-                        ignore=lambda directory, entries: [SECRETS] if Path(directory) == home else [])
+                        ignore=lambda directory, entries: [SECRETS, CGROUP] if Path(directory) == home else [])
         for extra in ("override.json", "created.json"):
             if (source / extra).exists():
                 shutil.copy(source / extra, root / name / extra)
+        for pair in given:
+            lay(name, *pair.split("=", 1))
         state(name, "stopped")
         return 0
 
@@ -253,6 +320,7 @@ def main(argv):
         env.pop("FAKE_GH_TOKEN", None)  # no login of this side's,
         env["ORG_SECRETS_DIR"] = str(home / SECRETS)  # and its own memory for the tokens it is handed
         env["ORG_BAZELRC"] = str(home / BAZELRC)      # and its own /etc/bazel.bazelrc, never this machine's
+        env["ORG_CGROUP_DIR"] = str(home / CGROUP)    # and its own count of memory kills, if a test wrote one
         for i, flag in enumerate(flags):
             pair = flags[i + 1] if flag == "--env" and i + 1 < len(flags) else (flag[6:] if flag.startswith("--env=") else "")
             if "=" in pair:

@@ -18,6 +18,7 @@ the host's in it); the container is the inner one, and this module is what check
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from typing import Dict, List, Optional
@@ -27,6 +28,79 @@ from ..transport import Incus, Transport, TransportError
 from . import Backend, BackendError, machine_name
 
 DEFAULTS = {"base": "org-base", "prefix": "org-eng-", "slots": 4, "push_token": True}
+
+# What the machine keeps for everything outside the engineers' containers (its own services,
+# Incus's daemon, the manager chat) when machines.incus.memory_reserve does not say.
+RESERVE = "3GiB"
+SIZE = re.compile(r"([1-9][0-9]*)(MiB|GiB)")
+WITHOUT_A_LIMIT = "`org config set machines.incus.memory none` dispatches without a limit"
+
+
+def size_mib(text) -> Optional[int]:
+    """A size as the settings write one, in MiB: a positive whole number followed by MiB or GiB."""
+    found = SIZE.fullmatch(text) if isinstance(text, str) else None
+    return int(found.group(1)) * (1024 if found.group(2) == "GiB" else 1) if found else None
+
+
+def machine_memory_mib() -> Optional[int]:
+    """This machine's memory in whole MiB, or None where nothing says: only Linux has the file."""
+    try:
+        # $ORG_MEMINFO is for the tests, whose arithmetic must not depend on where they run.
+        with open(os.environ.get("ORG_MEMINFO") or "/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def memory_reserve_mib(cfg: dict) -> int:
+    """machines.incus.memory_reserve in MiB: what the automatic limit leaves to the machine itself."""
+    raw = ((cfg.get("machines") or {}).get("incus") or {}).get("memory_reserve")
+    reserve = size_mib(RESERVE if raw is None else raw)
+    if reserve is None:
+        raise BackendError("machines.incus.memory_reserve %r is not a size: write a whole number followed by MiB or GiB, "
+                           "such as 3GiB" % (raw,))
+    return reserve
+
+
+def slot_count(cfg: dict) -> Optional[int]:
+    """How many engineers may run at once, or None when machines.incus.slots sets no usable number."""
+    slots = dict(DEFAULTS, **((cfg.get("machines") or {}).get("incus") or {})).get("slots")
+    try:
+        return int(slots) if slots and not isinstance(slots, bool) and int(slots) > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def memory_limit(cfg: dict, mem_total_mib: Optional[int] = None) -> Optional[str]:
+    """The hard memory limit an engineer's container gets, as Incus writes one, or None for no limit.
+
+    machines.incus.memory decides. Absent or "auto" is the arithmetic that makes the containers
+    fit in the machine together: (the machine's memory - the reserve) / slots, in whole MiB. A
+    size is taken as given, for an owner who accepts overcommitting, and "none" is no limit.
+    Anything else is refused here, before a container is made: a limit that was mistyped must
+    not quietly become no limit.
+    """
+    want = ((cfg.get("machines") or {}).get("incus") or {}).get("memory")
+    if want is None or want == "auto":
+        reserve, slots = memory_reserve_mib(cfg), slot_count(cfg)
+        total = machine_memory_mib() if mem_total_mib is None else mem_total_mib
+        if not slots or total is None:
+            return None  # nothing to divide, or nothing to divide by: `org doctor` says so
+        each = (int(total) - reserve) // slots
+        if each < 1:
+            raise BackendError("machines.incus.memory is automatic and comes to nothing: this machine has %d MiB and "
+                               "machines.incus.memory_reserve keeps %d MiB of it. Lower the reserve, or set "
+                               "machines.incus.memory to a size or to none." % (int(total), reserve))
+        return "%dMiB" % each
+    if want == "none":
+        return None
+    if size_mib(want) is None:
+        raise BackendError("machines.incus.memory %r is not auto, none or a size: write a whole number followed by MiB "
+                           "or GiB, such as 4GiB" % (want,))
+    return want
 
 
 def problems(info: dict) -> List[str]:
