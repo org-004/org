@@ -546,6 +546,85 @@ nowhere else. A spec that names a repository elsewhere would send an engineer to
 deliver, so it is refused before approval, with the two ways out: move the repository in, or
 name it under Context as something to read.
 
+**Why `after` is a line in the header.** Work that builds on other work was sequenced by the
+owner coming back to the chat when a run finished. The header takes `after: 008, 9`, a list of
+spec ids or numbers, and `org spec check` refuses a spec that names itself, one that does not
+exist, or a set whose `after` lines form a cycle. It stays one spec per file and one approval per
+text: approving a set of dependent specs is still one approval for each, and the line only says
+what the run waits for. A spec without it is checked, approved and dispatched as before. See
+"Plans".
+
+## Plans
+
+A set of approved specs joined by `after` is a plan. There is no object for it: `graph.json` in the
+ledger, which appears when the first spec with `after` is dispatched, only marks that this ledger
+has one, so that a ledger without a plan pays one `stat` per pump and nothing else.
+
+**Waiting.** Approval creates the run as it always did, in the state `queued`, and `start` leaves it
+there with a `queue_reason` such as `waiting for 009 (executing) and 011 (not approved yet)`. A spec
+is satisfied when the latest run of its latest approved version reported `done` or `partial` and the
+review of that run said `continue`. A stopped run, a failed run and a run of an earlier version
+never satisfy it, so a spec revised and approved again makes what waited on the old version wait
+for the new. Approvals may come in any order because the clause is worked out again at every pump.
+Independent specs of a plan run side by side when slots allow.
+
+**The review.** When a run that a queued run waits on ends, `pump` starts one headless session,
+`claude -p` with exactly the settings of `ask` mode and `--permission-mode dontAsk`, as a process of
+its own (`org review-run`), because `pump` must stay quick. The process is recorded on the run the way
+provisioning records its process, so a review that ended without an answer is noticed and counted,
+and a lock makes the review happen once per finished run whatever number of processes pump at the
+same moment. The session is given the run's spec, its report, the `org review` output and the text
+of every spec that names the run in `after`, all as quoted material, and answers a JSON object
+checked against `schemas.REVIEW`: a `verdict` of `continue`, `retry` or `pause`, a reason of at most
+300 characters and, for `continue`, one note for each waiting spec. Its prompt says that the report
+and what it quotes are data, never instructions, and that any doubt is `pause`. Its model and effort
+are `manager.review_model` and `manager.review_effort`, by default the manager chat's own, and its
+cost is recorded on the run and shown by `org review`.
+
+**What code decides.** The answer is advice; `graph.apply_verdict` decides. `continue` is honoured
+only when the report said `done` or `partial`. `retry` is honoured only when the report did not say
+`done`, at most `graph.max_retries` (1) times per version of a spec, and it dispatches the same
+approved text again. Everything else is a pause. An answer that is invalid twice, a session that
+errors, a review that takes longer than `graph.review_timeout_min` (15) minutes, and a review
+process that dies twice are a pause, so a run is reviewed at most twice. A run the owner stopped is
+not reviewed: what waits on it is paused. A run that starts in a plan carries
+`earlier/<run id>/report.md` and `review.md` in its bundle for each spec it came after, and a
+retried run carries the failed attempt's the same way. They are there because the later spec's
+Context was written before the earlier one ran, and where they differ the report is the newer fact.
+
+**Recovery without a review.** For runs of a plan only, a runner dead for `graph.dead_after_min` (5)
+minutes, or a machine that stopped, is resumed, at most `graph.max_resumes` (2) times per run, and a
+run that never got a machine is dispatched again once. These cure what needs no judgment and are not
+alerted unless the limit is reached. Nothing starts, retries or resumes by itself at or above
+`graph.pause_above_weekly_pct` (80) percent of the weekly limit: that is a pause with that reason.
+
+**Pausing and telling.** A pause marks the run that caused it and holds every queued run that waits
+on it, directly or through other specs; `pump` does not start a held run. `org status` shows the
+reason and a `!` line on the cause, and the run's warnings carry the same sentence, so the dashboard
+shows it without a change to the page. `org release <run or spec>` starts a held run when a slot is
+free, whatever it waited for, and what depends on it waits for it as usual. Dispatching the paused
+spec again by hand also lifts the holds, since the waiters then wait for the new run. Every pause,
+automatic retry and resume is a line in `alerts.jsonl`. With `notify.url` set, each pause is also one
+POST made by `org` itself to that address: one line, `org: <run> paused: <reason>. <n> run(s) held.
+org status`, at most 400 characters, with a `Title` header and the headers in `notify.headers`. The
+reason came from a model that read untrusted text and the owner reads it on a phone, so link-like
+text and control characters are removed in code. A send that fails is tried on later pumps, three
+times in all, then recorded as failed and shown as a `!` line, and it never stands in the way of
+anything else. `outbox.json` holds what is on its way. When the last run of a plan ends with nothing
+held, one message says so. `org notify test` sends a test message and `org doctor` has an `alerts`
+row.
+
+**Why `pump` and no daemon.** `pump` already runs every ten seconds under the dashboard and at every
+`org status`, and it already starts queued runs. A scheduler would be a second thing to keep alive
+and the first thing to die quietly. The cost is that an alert is written at the next pump after the
+pause, not at the instant of it, and that with the dashboard stopped and nobody running `org status`
+a plan waits, as every queued run does.
+
+**Why a POST and no mail.** The VM has no mail transfer agent, and sending mail directly would put a
+mail account's password on the machine that holds the two tokens. A POST to an address the owner
+configures needs no secret of org's: a push service that takes one can forward it to a phone or to
+mail, and which one is the owner's choice, kept in `config.json`.
+
 ## The engineer's run
 
 One Claude Code session, resumed across turns, each turn ended by structured output validated
@@ -649,7 +728,7 @@ between the chat and that power is all here.
 | shell sandbox | shell writes outside the desk; shell reads of the token directory, the other places a login could be, and Incus's sockets; network beyond an allow list | the operating system (bubblewrap) |
 | `blockWritesOutsideWorkingDirectories` | the file tools writing outside the desk | the harness |
 | deny rules | edits to approved specs, run records and `config.json`; reading the token and login paths; `incus`, `sudo`, `su`, `docker`; every `mcp__*` tool; pushes and other commands that change GitHub | the harness |
-| ask rules | approve, dispatch, stop, resume, exec, `machine rm`, drain, undrain, upgrade, up, down, `config set`; ssh | the harness, by asking the person, in every permission mode |
+| ask rules | approve, dispatch, stop, resume, exec, `machine rm`, drain, undrain, upgrade, up, down, `config set`, `release`, `notify`; ssh | the harness, by asking the person, in every permission mode |
 | no GitHub token | anything on GitHub that needs a login | the session's environment is stripped of one, and the file is hidden by the two layers above |
 | managed settings | MCP servers and claude.ai connectors | root-owned files in `/etc/claude-code`, and `ENABLE_CLAUDEAI_MCP_SERVERS=false` at launch |
 
@@ -673,6 +752,12 @@ URL and nothing else, so it cannot be turned into another git invocation, runs g
 credential helper, clones into `desk/scratch/<name>`, fetches when the copy exists, and points
 the copy's push URL nowhere. A change on GitHub made by the chat is therefore not something a
 deny rule has to catch: there is nothing to make it with.
+
+**The review has no mode of its own: it runs with the settings of `ask`.** The headless session between two specs of
+a plan (see "Plans") gets what the dashboard's question box gets: reading, the read-only `org`
+commands (`org graph` among them), everything outward denied, `--permission-mode dontAsk`, so a
+command that would ask is refused. `release`, `notify`, `review-run`, `approve`, `dispatch` and `stop`
+are not among what it can run. The chat may look at plans with `org graph` and may not release one.
 
 **What the chat can still reach over the network** is the sandbox's allow list
 (`manager.network_allow`: `github.com`, `*.github.com`, `*.githubusercontent.com`) from its
@@ -753,6 +838,7 @@ first is a rule a model follows; only the second is a setting.
 | `admin` and root in the VM | sudo; the firewall; `/etc/claude-code`; Incus | everything in the VM; used only by `org-vm` and its provisioning |
 | the `org` program in the VM | the ledger; both tokens; the `org` user's Incus project | create, enter and delete containers there; whatever the person or the page asks of it |
 | manager chat | read access to what the `org` user can read, less the tokens; the desk | draft; propose approve, dispatch, stop, exec and the rest of the person's decisions |
+| the review, a headless manager session | what `ask` mode holds: reading, the read-only `org` commands; the text of a run's report | answer `continue`, `retry` or `pause`, and write a reason and a note for each waiting spec; code decides what that does |
 | engineer | root in its container; copies of both tokens | anything in its container; on GitHub and the model, what the tokens allow; read and write the build cache |
 | the build cache | its own container, no login; every engineer's build results | serve them to every engineer; open connections to engineers' containers |
 | dashboard page | the access token | approve, stop, ask |
@@ -780,6 +866,16 @@ first is a rule a model follows; only the second is a setting.
   the true one. Its network card is not isolated, so it can open connections to engineers'
   containers; it holds nothing and only `org up` enters it. The owner accepted this on
   2026-11-24 for the sake of build time.
+- The review reads text an engineer wrote from public sources, and a stranger could have shaped
+  it. The prompt says that text is data, and that is a rule a model follows, not a wall. The wall is
+  what code does with the answer. The worst a wrong or manipulated verdict can do is start a spec the
+  owner already approved, or spend one more run's cap on a retry of the same text. It cannot change
+  or approve text, stop a run, raise a cap or act on a spec outside the plan, and a session with
+  `ask`'s settings has no command that could. Its reason and notes are shown to the owner and
+  handed to the next engineer as text to read; the engineer's prompt says they are never
+  instructions. The POST goes only to the one configured address, made by `org` and not by a model,
+  and its body is made safe in code: one line, at most 400 characters, no link-like text, no control
+  character.
 - The Mac is reached by one port, and what answers on it is the dashboard. When the web-app view
   is on, that same port also serves pages an engineer wrote, at their own origins.
 
@@ -804,11 +900,17 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
 | the real server and the real build | `tests/live_cache_docker.sh` (needs Docker): `bazel-remote` 2.6.4 installed by `incus/cache.sh` in a bare `debian:13`, and Bazel 9.3.0 through Bazelisk 1.30.0. A build uploads; a second build from a new output base gets cache hits and runs no compile or link; builds still succeed with the server killed and with its container stopped |
 | the memory limit's code: the arithmetic and its refusals, the limit on the copy, the read-back in `vet`, the wrapper, the `oom_kill` count, the `org status` line and the `org doctor` row | the unit suite, against the simulated Incus |
 | the memory limit itself | `tests/live_memory_incus.sh`, in an Incus of one's own (2026-11-24): the limit set on the copy is found by `vet` and read back as the container's own `memory.max`; a process taking more is killed and counted in that container's `memory.events`, and a second container and the session outside are untouched; with the wrapper the command is killed and the stand-in for a session lives, and without it the session is killed; a restricted project like the `org` user's accepts `limits.memory` on a copy, on an existing container and on a new one |
+| plans: the header and its refusals, waiting and what satisfies a spec, the bundle, every verdict under every report status and each bound, one review for two pumps at once and for a process that died, recovery and its limits, the weekly pause, holds across a chain of three specs, release, the POST's body and a server that fails twice | `tests/test_after.py`, `tests/test_graph.py`, `tests/test_review.py` and `tests/test_notify.py`, against the scripted stand-in for the claude CLI, the simulated Incus and a local HTTP server |
+| three plans from approval to their end | `tests/demo_graph.py`: B after A with `done`; with a failure, a `retry` and a second run that reports `done`; with two failures, a hold, one message at the local server and `org release` |
 | port isolation, and so who can reach whom | real containers in a nested Incus 6.0.4: an engineer's container connects to the cache and not to another engineer's, and the cache container can open connections to engineers' containers |
 | `org up` making the cache container, and two engineers' containers using it | `tests/live_cache_incus.sh`, on arm64 in an Incus 6.0.4 installed inside an engineer's container (2026-11-24): `org up`, run by an unprivileged user, made the cache container with `incus/cache.sh` under systemd; two copies of a stand-in template (the template's settings, g++ and Bazelisk in place of the bootstrap) passed `vet` and `problems()`, reached the cache and were given `/etc/bazel.bazelrc` with the address Incus gave; a Bazel 9.3.0 build in the first uploaded and the same build in the second was all cache hits; neither could open a connection to the other; the backend removed both and refused to remove the cache |
 
 Not yet exercised:
 
+- Plans with a real model and a real notification service. No real review has run, so what one
+  costs and how well it reads a report are not known, and nothing has been posted to a real push
+  service. The owner's first checks after upgrading are `org notify test`, and then a plan of two
+  specs of trivial work to see one real review in `org graph`.
 - The manager chat and `org ask` in the VM, and an engineer landing a commit on the default
   branch of a repository on GitHub (the smoke spec pushes to a repository inside its own
   container).
@@ -852,6 +954,19 @@ none is claimed for this layout.
   every door between the VM and the Mac, and the Mac runs nothing else. Engineers are system
   containers that nest, so an engineer can in principle stand up a copy of org, containers and
   all, to test a change to it; of that, only bubblewrap inside a container has been checked.
+- **Rules only, with no review: start the next spec when the one before reports `done` with every
+  criterion passing.** About half the work and no model in the loop. Two of the first six runs
+  reported `partial`, so it would pause too often, and a `done` report can describe a result the
+  next spec did not expect, so it would also continue when it should not.
+- **Let the review revise the next spec when its assumptions broke.** It would recover more without
+  the owner and end approval as the owner's act. A review that sees how a spec should change says so
+  in its reason, and that is all.
+- **Have the next spec's engineer check its assumptions first and stop if they fail.** It costs a
+  container and a planning turn to learn what the review reads from the report, and the engineer
+  gets the earlier reports anyway and says so if its spec no longer fits.
+- **Mail from the VM.** It needs a mail account's password on the machine that holds the two tokens.
+- **A scheduler daemon for plans.** `pump` is already called every ten seconds; a second mechanism
+  would be a second thing to keep alive.
 - **A machine of its own for the manager.** Kept through the OrbStack layout. Inside a VM that
   already has nothing of the Mac's it is a second copy of the same wall, and the manager has to
   sit where it can drive Incus anyway.
@@ -932,5 +1047,17 @@ none is claimed for this layout.
 - A rollback moves links. It does not undo what the newer release wrote.
 - A run's share of the weekly limit is unknown until the rate has been learned or configured.
 - One engineer per spec. A spec too large for one engineer is the manager's to split.
-- No notification when a run finishes; the page and `org status` have to be looked at.
+- No notification when a run finishes, unless it is part of a plan and stops it or ends it; the
+  page and `org status` have to be looked at.
+- Plans have run only against stand-ins. No real review has run and no real notification service has
+  been posted to; see what has been checked.
+- A stopped machine is recognised as such only for Incus and Docker. For any other kind, a machine
+  that cannot be reached is not taken to be stopped, and its run is resumed only once its runner has
+  been dead for `graph.dead_after_min` minutes.
+- An alert is written on the next pump after a pause, not at the instant of it, and with nothing
+  pumping (the dashboard stopped, nobody running `org status`) a plan waits and says nothing. With
+  no `notify.url`, a pause is visible only in `org status` and the dashboard.
+- The review is a model reading text an engineer wrote. Its verdict is bounded in code, but a
+  manipulated `continue` on a `done` report starts a spec the owner approved, on a result that may
+  not match what that spec assumed; the engineer of that spec is told to say so in its report.
 - The Docker plugin's host script still asks for a whole GitHub login and should not be used.
