@@ -67,6 +67,11 @@ class Backend:
     def before_resume(self, machine: dict, cfg: dict) -> None:
         """Anything a machine needs before its runner is restarted."""
 
+    def build_cache(self, tr: Transport, cfg: dict, log, again: bool = False) -> Optional[dict]:
+        """Tell a machine that passed `vet` about a build cache beside it, if this kind of machine
+        has one. Returns what the run's record keeps, or None. It never fails a run."""
+        return None
+
     def doctor(self, ledger, cfg: dict, add) -> None:
         """Append readiness checks with add(ok, name, found, fix="", soft=False)."""
 

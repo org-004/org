@@ -599,6 +599,13 @@ def cmd_pool(args) -> int:
         print("%-20s %d of %d slot(s) in use   %s" % (p["kind"] + ":" + p["node"], p["used"], p["slots"], where))
     if not nodes:
         print("no limit is set on how many engineers run at once (machines.incus.slots in config.json sets one)")
+    cfg = ledger.config()
+    if ((cfg.get("machines") or {}).get("default") or "incus").split(":")[0] == "incus":
+        from . import cache
+
+        line = cache.pool_line(cfg)
+        if line:
+            print(line)
     queued = [r for r in ledger.run_ids() if ledger.run(r).get("state") == "queued"]
     for run_id in queued:
         print("queued: %s  (%s)" % (run_id, ledger.run(run_id).get("queue_reason") or "waiting"))
