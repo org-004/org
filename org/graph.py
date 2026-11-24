@@ -1119,7 +1119,9 @@ def plans(ledger: Ledger) -> List[List[str]]:
 
 def render(ledger: Ledger) -> str:
     """`org graph`: for each plan, its specs in order, each with its current run, that run's
-    state, what it waits for or why it is held, and its review's verdict and reason."""
+    state, what it waits for or why it is held, and its review's verdict and reason. The runs
+    that the current one replaced are listed under it with theirs: a `retry` is the verdict on
+    the run that failed, and would otherwise be nowhere on the page."""
     if not has_plan(ledger):
         return "No plans: no spec that names another in `after` has been dispatched."
     found = plans(ledger)
@@ -1148,6 +1150,15 @@ def render(ledger: Ledger) -> str:
             if rec.get("released_at"):
                 what += " (released)"
             lines.append("%s: %s %s" % (head, run_id, what))
+            replaced, old = [], rec.get("retry_of") or rec.get("redispatch_of")
+            while old and old not in replaced:
+                replaced.append(old)
+                old = ledger.run(old).get("retry_of") or ledger.run(old).get("redispatch_of")
+            for old in reversed(replaced):
+                was = ledger.run(old)
+                said = was.get("review") or {}
+                lines.append("    before it: %s %s%s" % (old, was.get("state") or "?",
+                                                         ("; review: %s: %s" % (said["verdict"], said.get("reason") or "")) if said.get("verdict") else ""))
             rv = rec.get("review") or {}
             if rv.get("state") == "running":
                 lines.append("    review: running (attempt %s)" % rv.get("attempts", 1))

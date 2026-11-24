@@ -127,7 +127,11 @@ def check(answer, waiting: List[str]) -> List[str]:
 def session(ledger: Ledger, text: str, timeout_s: float) -> dict:
     """Run one headless manager session on `text` and return
     {"answer": the `structured_output` of its result or None, "error": str or None,
-     "timed_out": bool, "cost_usd": dollars}.
+     "timed_out": bool, "cost_usd": dollars, "unanswered": bool}.
+
+    `unanswered` is for a session that ended well and said something that is not the object it
+    was asked for, prose for example: that is an answer that fails validation, which gets a second
+    attempt, and not a session that failed.
 
     The command is `manager.ask`'s with three differences: `--json-schema` with `schemas.REVIEW`
     and no partial messages; a session of its own each time, never the chat's; and `--model` and
@@ -136,7 +140,7 @@ def session(ledger: Ledger, text: str, timeout_s: float) -> dict:
     are exactly `manager.settings(ledger, "ask")`, the environment `manager.launch_env`. A session
     still running after `timeout_s` is killed and reported as timed out. Never raises.
     """
-    result = {"answer": None, "error": None, "timed_out": False, "cost_usd": 0.0}
+    result = {"answer": None, "error": None, "timed_out": False, "cost_usd": 0.0, "unanswered": False}
     try:
         claude = manager._claude(ledger)
         if not claude:
@@ -183,10 +187,10 @@ def session(ledger: Ledger, text: str, timeout_s: float) -> dict:
             result["error"] = tail or "the review session ended without a result (exit status %s)" % proc.returncode
         elif final.get("is_error"):
             result["error"] = str(final.get("result") or tail or "the review session reported an error")[:400]
-        elif not isinstance(final.get("structured_output"), dict):
-            result["error"] = "the review session gave no structured answer"
         elif proc.returncode != 0:
             result["error"] = tail or "the review session failed (exit status %s)" % proc.returncode
+        elif not isinstance(final.get("structured_output"), dict):
+            result["error"], result["unanswered"] = "the review session gave no structured answer", True
         else:
             result["answer"] = final["structured_output"]
     except Exception as e:  # never raises: a review that cannot run is an error outcome
@@ -205,8 +209,9 @@ def _kill(proc) -> None:
 def run(ledger: Ledger, run_id: str, attempt: int = 1) -> int:
     """The review process: one session for one finished run, then its outcome written whole to
     `outcome_path` (the shape `outcome` returns). The timeout is `graph.review_timeout_min`.
-    Kind `answer` when `check` passes, `invalid` when it does not, `error` when the session
-    failed or gave no structured answer, `timeout` when it was killed. Returns 0 when it wrote an
+    Kind `answer` when `check` passes, `invalid` when it does not or when the session ended well
+    without the object it was asked for, `error` when the session failed, `timeout` when it was
+    killed. Returns 0 when it wrote an
     outcome of any kind. It never writes run.json: org/graph.py does, under its own lock."""
     graph_cfg = ledger.config().get("graph") or {}
     minutes = graph_cfg.get("review_timeout_min")
@@ -219,6 +224,8 @@ def run(ledger: Ledger, run_id: str, attempt: int = 1) -> int:
     problems, answer = [], None
     if got["timed_out"]:
         kind = "timeout"
+    elif got["answer"] is None and got.get("unanswered"):
+        kind, problems = "invalid", [got["error"]]
     elif got["answer"] is None:
         kind = "error"
     else:

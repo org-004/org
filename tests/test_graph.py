@@ -795,6 +795,15 @@ class Showing(GraphCase):
         self.assertIn("  003-third (after 002): %s queued, held: the review said pause: the schema changed" % run_c, lines)
         self.assertNotIn("004", out, "a spec in no plan is in no plan")
 
+    def test_org_graph_lists_the_run_a_retry_replaced_with_the_verdict_that_replaced_it(self):
+        a, b, run_b = self.pair()
+        first = self.reviewed(self.made(a, "failed"), verdict="retry", reason="the network dropped")
+        second = self.reviewed(self.made(a, "done", plan={"retry_of": first}))
+        lines = self.org("graph")[1].splitlines()
+        at = lines.index("  001-first: %s done" % second)
+        self.assertEqual(lines[at + 1:at + 3], ["    before it: %s failed; review: retry: the network dropped" % first,
+                                                "    review: continue: the next spec still fits"])
+
     def test_plans_are_ordered_and_a_waiting_run_says_what_it_waits_for(self):
         a = self.spec("First")
         b = self.spec("Second")

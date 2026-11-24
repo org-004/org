@@ -140,11 +140,12 @@ class TheSession(ReviewCase):
         self.assertEqual((got["answer"], got["timed_out"]), (None, False))
         self.assertIn("simulated crash", got["error"])
 
-    def test_prose_without_a_structured_answer_is_an_error(self):
+    def test_prose_without_a_structured_answer_is_no_answer_from_a_session_that_did_not_fail(self):
         self.script({"prose": "I think it is fine."})
         got = review.session(self.ledger, "Review the finished run `x`", 30)
         self.assertIsNone(got["answer"])
         self.assertIn("no structured answer", got["error"])
+        self.assertTrue(got["unanswered"], "prose is an answer that fails validation, which gets a second attempt")
 
     def test_a_result_that_is_an_error_is_an_error(self):
         self.script({"budget": True})
@@ -276,11 +277,13 @@ class TheOutcome(ReviewCase):
         self.assertEqual((wrote["kind"], wrote["answer"]), ("error", None))
         self.assertIn("crash", wrote["error"])
 
-    def test_prose_with_no_structured_answer_is_an_error_outcome(self):
+    def test_prose_with_no_structured_answer_is_an_invalid_outcome(self):
         run_id = self.finish()
         self.script({"prose": "Looks fine to me."})
         review.run(self.ledger, run_id, 1)
-        self.assertEqual(self.written(run_id)["kind"], "error")
+        written = self.written(run_id)
+        self.assertEqual((written["kind"], written["answer"]), ("invalid", None))
+        self.assertEqual(written["problems"], ["the review session gave no structured answer"])
 
     def test_a_session_past_its_time_is_a_timeout_outcome(self):
         run_id = self.finish()
