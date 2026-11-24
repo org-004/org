@@ -180,7 +180,84 @@ the other containers) or without `security.ipv4_filtering` (it could take anothe
 `machines.incus.allow_open` overrides the refusal. This is the check an engineer's container
 passes; the build cache's container is deliberately not held to the isolation part of it (see
 "The build cache"). The check runs at dispatch and nothing re-checks a container later. An
-engineer cannot change those settings from inside its container; the `org` user could.
+engineer cannot change those settings from inside its container; the `org` user could. `vet`
+also reads the container's memory limit back, as the next paragraphs describe.
+
+**The memory limit.** On 2026-11-24 the VM (11951 MiB, no swap) ran out of memory while three
+engineers were building. The kernel killed a test run in one container and five processes
+outside the containers, among them things the VM needs. Nothing bounded what a container could
+take, so the walls above kept engineers from each other's files and addresses and not from each
+other's memory. A hard limit per container moves a build that is too large to fail where it was
+started, with the kernel killing a process in that container, and makes the sum of the
+containers' memory something that can be arranged to fit.
+
+The limit is `machines.incus.memory`. Absent or `"auto"`, each container gets
+`floor((MemTotal - reserve) / slots)` in whole MiB. The division by slots is what makes the
+containers fit together: the pool already says how many run at once, so the share is what is
+left of the machine for each. `MemTotal` is the machine's, from `/proc/meminfo`, not a figure
+written down, so a bigger VM gives bigger shares. The reserve, `machines.incus.memory_reserve`
+(default `3GiB`), is the part kept for what the limit does not cover: the machine's services,
+Incus's daemon, the manager chat and the dashboard, which run beside the containers and which
+nothing limits. On the VM, 3072 MiB reserved: 4 slots give `2219MiB` each, 2 slots `4439MiB`.
+`none` is no limit. A size (a positive whole number followed by `MiB` or `GiB`) is taken as
+given, for an owner who accepts overcommitting; `org doctor` still warns when the limit times
+the slots exceeds `MemTotal` minus the reserve. Anything else is refused with a sentence naming
+the setting, because a typo that silently meant "no limit" would restore the failure it is there
+to prevent. With `auto`, and no slot count or no readable `MemTotal`, there is nothing to divide
+and so no limit, and `org doctor` says so. `org up --memory` sets the first setting as `--slots`
+sets the slots.
+
+A ledger with no `machines.incus.memory` gets the automatic limit after `org upgrade`; that was
+chosen over leaving old installations unlimited, because they are the ones that failed. On a
+small machine it is noticeable: 4 GiB and 4 slots give (4096 - 3072) / 4 = 256 MiB each, and
+`org doctor` warns that is too little (it warns under 2 GiB). The owner lowers the slots or the
+reserve, or sets a size. It applies to containers made after the upgrade; one already running
+is left alone, since a limit that arrived under a build in progress could kill it, and a stopped
+one gets the limit when `org resume` starts it.
+
+The limit rides on the copy command itself: `incus copy` is given `-c limits.memory=<n>MiB`, so
+the copy never exists, and never starts, without it. Setting it afterwards would leave a window
+in which a container is unbounded, and a failure to set it would leave a container that looks
+like any other. Incus's own default is a hard limit. Then, in the order "Before an engineer
+starts" gives, `vet` reads Incus's description of the container, and refuses the run if
+`expanded_config` (the container's settings with its profiles') does not carry exactly the limit
+asked for, or carries `limits.memory.enforce=soft`, before any token is copied in. That reading
+is of Incus's description, as the rest of `vet` is, and not of anything inside the container.
+The refusal, and a refused copy, name `org config set machines.incus.memory none` as the way to
+dispatch without a limit, so a project or profile that will not take the key does not leave the
+owner stuck. The limit is stored in the run's machine record. `org upgrade`'s throwaway test
+container gets the same limit, since a suite that needs more should fail there and not in an
+engineer's container; the template and the build cache's container get none, because the
+template runs only while it is built and the cache's memory is the reserve's to cover.
+
+**What is killed first.** A hard limit alone chooses its victim by the kernel's score, and the
+session (Claude Code) and the runner hold memory for the whole run, so a large build could cost
+the run its session instead of its own compiler. With a limit in force the runner gives Claude
+Code a wrapper through `CLAUDE_CODE_SHELL_PREFIX`, which Claude Code documents as running every
+shell command as `<wrapper> '<command line>'`. The wrapper raises its own `oom_score_adj` to 500
+and then runs the command, so the commands the session runs, and what they start, score higher
+than the session and the runner, and the kernel kills a build step before the session. Raising
+one's own adjustment needs no privilege; nothing is given to anybody, and the wrapper is not a
+way to lower anyone's score. What it does not reach: containers the engineer starts through a
+Docker daemon are that daemon's children, not the shell's. The engineer's prompt says how much
+memory it has, that the limit is hard, that a compiler or test ending with `Killed` or
+`terminated` is a reason to lower parallelism and not to run it again unchanged, and that
+`/sys/fs/cgroup/memory.events` counts the kills.
+
+**What the owner sees.** Every sync's snapshot carries the container's `oom_kill` count, read
+from `/sys/fs/cgroup/memory.events`. `org status` prints a `!` line under the table
+(`! <run>: 2 processes were killed for memory in its container (limit 2219MiB)`), `org peek`
+shows the same and `org status --json` carries `oom_kill`. The count includes kills in
+containers the engineer runs inside its own, as the kernel counts a cgroup with everything under
+it, so it can say more than the engineer's own shell did. `org doctor` has a row `memory per
+engineer` (limit, slots, reserve, machine memory) and warns when there is no limit, when the
+limit times the slots exceeds `MemTotal` minus the reserve, and when the limit is under 2 GiB.
+`org pool` shows the limit on the Incus line.
+
+**What the limit does not cover.** Everything outside the engineers' containers: the machine's
+services, Incus's daemon, the manager chat, the dashboard and the build cache's container. The
+reserve is the margin for them and nothing limits them. There is no swap, CPU, disk or
+process-count limit.
 
 **The network.** An engineer reaches the internet, to clone, install and call the model. It
 cannot reach the Mac, the LAN, the VM itself or another engineer's container, and of the VM it
@@ -720,6 +797,8 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
 | no MCP servers in the VM | `claude mcp list` there, with the Claude token: none |
 | the build cache's code: the container's description, the probe, the settings file, the `org doctor` row and the `org pool` line, switched on and off | `tests/test_cache.py`, against the simulated Incus |
 | the real server and the real build | `tests/live_cache_docker.sh` (needs Docker): `bazel-remote` 2.6.4 installed by `incus/cache.sh` in a bare `debian:13`, and Bazel 9.3.0 through Bazelisk 1.30.0. A build uploads; a second build from a new output base gets cache hits and runs no compile or link; builds still succeed with the server killed and with its container stopped |
+| the memory limit's code: the arithmetic and its refusals, the limit on the copy, the read-back in `vet`, the wrapper, the `oom_kill` count, the `org status` line and the `org doctor` row | the unit suite, against the simulated Incus |
+| the memory limit itself | `tests/live_memory_incus.sh`, in an Incus of one's own (2026-11-24): the limit set on the copy is found by `vet` and read back as the container's own `memory.max`; a process taking more is killed and counted in that container's `memory.events`, and a second container and the session outside are untouched; with the wrapper the command is killed and the stand-in for a session lives, and without it the session is killed; a restricted project like the `org` user's accepts `limits.memory` on a copy, on an existing container and on a new one |
 | port isolation, and so who can reach whom | real containers in a nested Incus 6.0.4: an engineer's container connects to the cache and not to another engineer's, and the cache container can open connections to engineers' containers |
 | `org up` making the cache container, and two engineers' containers using it | `tests/live_cache_incus.sh`, on arm64 in an Incus 6.0.4 installed inside an engineer's container (2026-11-24): `org up`, run by an unprivileged user, made the cache container with `incus/cache.sh` under systemd; two copies of a stand-in template (the template's settings, g++ and Bazelisk in place of the bootstrap) passed `vet` and `problems()`, reached the cache and were given `/etc/bazel.bazelrc` with the address Incus gave; a Bazel 9.3.0 build in the first uploaded and the same build in the second was all cache hits; neither could open a connection to the other; the backend removed both and refused to remove the cache |
 
@@ -741,6 +820,10 @@ Not yet exercised:
 - Anything of the build cache on x86-64: the pinned x86-64 hashes were checked, and nothing was
   run.
 - The build cache under the real template, or under a real project's build.
+- That the VM's own restricted Incus project (`user-2000`) accepts `limits.memory`. The engineer
+  who wrote the limit proved it only in a restricted project of an Incus of its own. It is the
+  owner's first check after upgrading: if the project refuses the key, dispatch refuses the run
+  with Incus's own words and names `machines.incus.memory none`.
 
 `org-host`'s README lists what was checked of the VM's own walls. The layouts before this one
 (Docker containers, then OrbStack machines) had their own live checks, among them a real
@@ -828,6 +911,15 @@ none is claimed for this layout.
 - The firewall fences the containers, not the `org` user's own processes. The manager's shell is
   held by the sandbox's allow list instead, and its search and fetch tools reach the web.
 - `vet` runs at dispatch and is not repeated while a run is going.
+- The memory limit bounds the engineers' containers and nothing else; the reserve is a guess at
+  what the rest needs, and a machine too small for its slots gets limits `org doctor` calls too
+  small until the owner lowers the slots or the reserve. A container started before the upgrade
+  has no limit until it is stopped and resumed.
+- The wrapper that has a build step killed before the session was tried with a stand-in for the
+  session, called as Claude Code's documentation and the text of version 2.1.330 say a shell
+  command is called. No real session has run under it yet. It reaches what the session's shell
+  tool starts; a container started through a Docker daemon is the daemon's child and scores as
+  before.
 - Nothing restarts anything after the Mac restarts. `org-vm up` and then
   `org resume --interrupted` do.
 - A finished run's container stays until `org machine rm`, and old releases and old templates

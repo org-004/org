@@ -69,6 +69,7 @@ things, keeps any that already exist, and then runs `org doctor`:
 ```sh
 org up --owner <organization>   # the GitHub organization specs may name repositories in
 org up --slots 6                # engineers that may run at once (default 4)
+org up --memory auto            # each engineer's memory: auto, none or a size such as 4GiB
 org up --rebuild-template       # build a new template and make engineers copies of it
 org up --port 9000              # the dashboard's port in the VM (default 8787)
 ```
@@ -232,7 +233,77 @@ A run takes a slot when it is dispatched. When every slot is taken it waits in t
 starts when one frees: anything that looks at the ledger (`org status`, the dashboard) moves the
 queue, so there is no scheduler to keep alive. The same pass gives back the slot of a run whose
 dispatch was cut short by a process that died, and a dispatch that fails removes the container
-it made. `org pool` also prints one line about the build cache, described below.
+it made. `org pool` also prints one line about the build cache, described below, and shows the
+memory limit on the Incus line.
+
+### The memory limit
+
+Each engineer's container has a hard memory limit. On 2026-11-24 the VM (11951 MiB, no swap)
+ran out of memory while three engineers were building, and the kernel killed a test run in one
+container and five processes outside the containers. Nothing bounded what a container could
+take. Now each one is bounded, so a build too large for its share fails in its own container,
+where the kernel kills a process, and the engineers' containers together can no longer exhaust
+the machine.
+
+With `machines.incus.memory` absent or `"auto"`, each container gets
+`floor((MemTotal - reserve) / slots)` in whole MiB. `MemTotal` is the machine's, read from
+`/proc/meminfo`; the reserve is `machines.incus.memory_reserve` (default `3GiB`) and is left to
+the machine's own services, Incus's daemon, the manager chat and the dashboard; slots is
+`machines.incus.slots` (default 4). On the VM above, with the 3GiB (3072 MiB) reserve, 4 slots
+give `2219MiB` each and 2 slots give `4439MiB` each.
+
+```sh
+org config set machines.incus.memory auto        # the default: the arithmetic above
+org config set machines.incus.memory 6GiB        # a size, taken as given
+org config set machines.incus.memory none        # no limit
+org config set machines.incus.memory_reserve 2GiB
+org up --memory auto                             # sets machines.incus.memory, as --slots sets the slots
+```
+
+A size is a positive whole number followed by `MiB` or `GiB`. A size you give is taken as given:
+it is for an owner who accepts that the containers together may promise more than the machine
+has. Anything else is refused with a sentence that names the setting. With `auto` and no slot
+count, or no readable `MemTotal`, there is no limit, and `org doctor` says so.
+
+**What changes for an installation that already exists.** A ledger with no
+`machines.incus.memory` gets the automatic limit after `org upgrade`. On a small machine this
+is the first thing you will notice: on a 4 GiB machine with 4 slots the limit is
+(4096 - 3072) / 4 = 256 MiB each, which `org doctor` warns is too little. Lower the slots or the
+reserve, or set a size. The limit applies to containers made after the upgrade. A container
+already running is left alone, and a stopped one gets the limit when `org resume` starts it.
+
+Dispatch gives the limit to Incus on the `incus copy` command itself (`-c limits.memory=<n>MiB`),
+so the copy never exists or starts without it, and Incus enforces it hard by default. Before any
+token is copied in, dispatch reads Incus's description of the container and refuses the run if
+it does not carry exactly the limit asked for, or says `limits.memory.enforce=soft`. That
+refusal, and a refused copy, point to `org config set machines.incus.memory none` as the way to
+dispatch without a limit. The limit is kept in the run's machine record. The throwaway
+container `org upgrade` tests with gets the same limit; the template and the build cache's
+container get none.
+
+The engineer is told how much memory it has, that the limit is hard, that a compiler or test
+ending with `Killed` or `terminated` is a reason to lower parallelism and not to run it again
+unchanged, and that `/sys/fs/cgroup/memory.events` counts the kills. When the kernel must
+choose, it kills a build step before the session: with a limit in force the runner gives Claude
+Code a wrapper (`CLAUDE_CODE_SHELL_PREFIX`, which Claude Code runs every shell command through)
+that raises its own `oom_score_adj` to 500 and then runs the command, so what the session runs
+scores higher than the session and the runner. Raising one's own adjustment needs no privilege,
+and nothing is given to anybody. Containers an engineer starts through a Docker daemon are that
+daemon's children, not the shell's, and are not covered.
+
+**What you see.** Each sync's snapshot carries the container's `oom_kill` count from
+`/sys/fs/cgroup/memory.events`. `org status` prints a line under the table when it is not zero,
+for example `! <run>: 2 processes were killed for memory in its container (limit 2219MiB)`;
+`org peek` shows the same, and `org status --json` carries `oom_kill`. The count includes kills
+in containers the engineer runs inside its own, because the kernel counts a cgroup together with
+everything under it. `org doctor` has a row `memory per engineer` (the limit, the slots, the
+reserve and the machine's memory), and warns when there is no limit, when the limit times the
+slots exceeds `MemTotal` minus the reserve, or when the limit is under 2 GiB.
+
+**What it does not cover.** Everything outside the engineers' containers: the machine's
+services, Incus's daemon, the manager chat, the dashboard and the build cache's container.
+That is what the reserve is for, and nothing limits them. There is no swap, CPU, disk or
+process-count limit.
 
 ## The build cache
 
@@ -473,7 +544,9 @@ Everything is optional; these are the values `org up` sets and the defaults arou
 
 `machines.incus.cache` is the build cache: `enabled` (default `true`), `name` (`org-cache`), `port`
 (`9092`) and `max_gb` (`20`). The port and size are read by `org up` when it makes the container
-and do not change an existing one.
+and do not change an existing one. The memory limit's settings, `machines.incus.memory` and
+`machines.incus.memory_reserve`, are described under [The memory limit](#the-memory-limit); both
+are absent from the file above because they have defaults.
 
 Claude Code's settings in the template are written when it is built: no attribution lines in
 commits or pull requests, no auto memory, no claude.ai connectors, and a managed file that
@@ -568,6 +641,9 @@ python3 tests/live_manager_refine.py        # a two-turn refinement of a request
 # the build cache
 sh tests/live_cache_docker.sh               # needs Docker; real bazel-remote and Bazel, a few minutes
 tests/live_cache_incus.sh                   # as root, where there is an Incus of one's own (see below)
+
+# the memory limit
+tests/live_memory_incus.sh                  # the same kind of Incus; about a minute
 ```
 
 `tests/e2e.py` approves a small spec, dispatches it, follows it to the end, and then repeats the
@@ -589,6 +665,15 @@ bootstrap), then runs the whole of `org up`, which makes the cache container. Wi
 the copies, offers them the cache, builds in the first and requires cache hits in the second,
 requires that neither engineer's container can open a connection to the other, and removes what
 it made.
+
+`tests/live_memory_incus.sh` needs the same kind of Incus and root. It copies a stand-in for the
+template with `machines.incus.memory` set to 128MiB, as dispatch does, and shows that `vet` finds
+the limit in Incus's description; that the container reads it back from its own `memory.max`;
+that a process taking more is killed and counted in the container's `memory.events` while a
+second container and the session running the script are untouched; that with the runner's
+wrapper the command is killed and the stand-in for the session lives, and without it the
+stand-in is killed; and that a restricted Incus project, like the one the `org` user is given,
+accepts `limits.memory` on a copy, on an existing container and on a new one.
 
 ## What has and has not been exercised
 
@@ -622,6 +707,8 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
     stand-in template passed `problems()`, reached the cache and were given its address, the
     second built from the first's results, and neither could open a connection to the other. In
     a separate trial there, the cache container could open connections to engineers' containers.
+  - The memory limit, apart from the VM: the unit tests, and `tests/live_memory_incus.sh` in an
+    Incus of one's own, as described under Tests.
 - **Not yet exercised:**
   - The manager chat and `org ask` in the VM, and an engineer landing a commit on the default
     branch of a repository on GitHub (the smoke spec pushes to a repository inside its own
@@ -638,6 +725,15 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
     bridge (see The build cache). Until then dispatch may say "not reachable".
   - Anything of the cache on x86-64: the pinned x86-64 hashes were checked, and nothing was run.
   - The cache under the real template or a real project's build.
+  - That the VM's own restricted Incus project (`user-2000`) accepts `limits.memory`. It is
+    the first thing to check after upgrading, as the `org` user:
+    `incus copy -q org-base memcheck -c limits.memory=2219MiB && incus delete memcheck`.
+    Silence and exit status 0 mean it does. If it does not, the copy prints Incus's `Error:`
+    and makes nothing, dispatch would refuse every run with the same words, and
+    `org config set machines.incus.memory none` dispatches without a limit.
+  - The wrapper that has a build step killed before the session, under a real Claude Code
+    session: it was tried with a stand-in that calls it as Claude Code's documentation and the
+    text of version 2.1.330 say a shell command is called.
 
 ## Limits worth knowing
 
