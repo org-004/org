@@ -14,10 +14,11 @@ by $FAKE_CLAUDE_SCENARIO:
       }
     }
 
-A turn entry may hold: structured, files, cost, sleep, die, prose, limit (seconds until reset),
+A review is the turn "review:<run id>" when the scenario has that key, else "review". A turn entry may hold: structured, files, cost, sleep, die, prose, limit (seconds until reset),
 budget, subagents, no_session. Every invocation is appended to invocations.jsonl beside the
 scenario, so tests can assert on the flags and prompts the runner used.
 """
+import fcntl
 import json
 import os
 import sys
@@ -49,10 +50,14 @@ def parse(argv):
     return opts, flags, rest
 
 
-def label_of(prompt):
+def label_of(prompt, turns=None):
     """Which turn is this? Nudges and recoveries quote the original instruction, so search, don't match the start."""
     import re
 
+    # A review is tested first: its message quotes specs and reports, which may hold any of the markers below.
+    m = re.search(r"Review the finished run `([^`]+)`", prompt)
+    if m:
+        return "review:" + m.group(1) if "review:" + m.group(1) in (turns or {}) else "review"
     m = re.search(r"Execute milestone `([^`]+)`", prompt)
     if m:
         return "milestone:" + m.group(1)
@@ -80,13 +85,16 @@ def main():
     home = scen_path.parent
     sessions = home / "sessions"
     sessions.mkdir(exist_ok=True)
-    label = label_of(prompt)
+    label = label_of(prompt, scenario.get("turns"))
 
     counts_path = home / "counts.json"
-    counts = json.loads(counts_path.read_text()) if counts_path.exists() else {}
-    attempt = counts.get(label, 0)
-    counts[label] = attempt + 1
-    counts_path.write_text(json.dumps(counts))
+    # A review may run while an engineer's turn does, so the read-modify-write is done under a lock.
+    with open(home / "counts.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        counts = json.loads(counts_path.read_text()) if counts_path.exists() else {}
+        attempt = counts.get(label, 0)
+        counts[label] = attempt + 1
+        counts_path.write_text(json.dumps(counts))
 
     entry = (scenario.get("turns") or {}).get(label, {})
     if isinstance(entry, list):
