@@ -184,6 +184,9 @@ class ARun(IncusCase):
             named.add(c[-1].strip("^$") if c[0] == "list" else c[1].rsplit("/", 1)[-1] if c[0] == "query" else c[1] if c[0] == "exec" else c[-1])
             if c[0] == "copy":
                 named.add(c[-2])
+        # The build cache is the one other name, and only in `incus list`: dispatch looks at it and never enters it.
+        self.assertEqual([c for c in calls if any("org-cache" in word for word in c)], [["list", "--format", "json", "^org-cache$"]])
+        named.discard("org-cache")
         self.assertEqual(named, {TEMPLATE, name})
 
         self.assertTrue((home / "org-runs" / run_id / ".org" / "org" / "runner.py").exists())

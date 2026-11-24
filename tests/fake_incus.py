@@ -26,6 +26,8 @@ A copy also carries its source's home, but not its tokens: those are in memory i
 container ($ORG_SECRETS_DIR here), so a copy starts with none and stopping a container loses
 them. A container is stopped or running, a copy starts stopped, and a command in a stopped
 container fails, as the real one does.
+A container's /etc/bazel.bazelrc is <container>/home/etc-bazel.bazelrc ($ORG_BAZELRC), and its
+address is what override.json says under "state", as `incus list --format json` reports it.
 The template named by $FAKE_INCUS_BASE (default `base`) exists, stopped and empty, without the
 test having to make it; any other name the test did not make is not found.
 """
@@ -37,6 +39,7 @@ import sys
 from pathlib import Path
 
 SECRETS = ".run-org"  # under a container's home: what /run/org is in a real one
+BAZELRC = "etc-bazel.bazelrc"  # under a container's home: what /etc/bazel.bazelrc is in a real one
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
 NOTHING_DONE = ("config", "network", "profile", "storage", "admin")
 INIT_FLAGS_WITH_VALUE = ("-c", "--config", "-d", "--device", "-p", "--profile", "-s", "--storage", "-n", "--network",
@@ -249,6 +252,7 @@ def main(argv):
         env.pop("ORG_HOME", None)       # a container has its own ledger, if it has one at all,
         env.pop("FAKE_GH_TOKEN", None)  # no login of this side's,
         env["ORG_SECRETS_DIR"] = str(home / SECRETS)  # and its own memory for the tokens it is handed
+        env["ORG_BAZELRC"] = str(home / BAZELRC)      # and its own /etc/bazel.bazelrc, never this machine's
         for i, flag in enumerate(flags):
             pair = flags[i + 1] if flag == "--env" and i + 1 < len(flags) else (flag[6:] if flag.startswith("--env=") else "")
             if "=" in pair:

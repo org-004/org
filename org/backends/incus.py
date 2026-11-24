@@ -10,8 +10,9 @@ the host's in it); the container is the inner one, and this module is what check
 
   - only containers whose names start with the prefix are ever created, entered or deleted
   - a container must be unprivileged, with no device but its own disk and a network card whose
-    port is isolated and whose address is pinned, so it reaches the internet and nothing beside
-    it. That is read from Incus's description of the container, not from anything inside it.
+    port is isolated and whose address is pinned, so it reaches the internet and, beside it,
+    only the one port of the build cache's container (org/cache.py), whose card is not isolated.
+    That is read from Incus's description of the container, not from anything inside it.
   - it starts blank: no login is baked into the template. Each run's tokens are copied into the
     container's memory at dispatch.
 """
@@ -21,6 +22,7 @@ import re
 import shutil
 from typing import Dict, List, Optional
 
+from .. import cache
 from ..transport import Incus, Transport, TransportError
 from . import Backend, BackendError, machine_name
 
@@ -112,6 +114,11 @@ class IncusBackend(Backend):
         # After this machine restarts, a run's container is stopped and its memory is empty.
         Incus.start(self._own(cfg, machine["name"]))
 
+    def build_cache(self, tr: Transport, cfg: dict, log, again: bool = False) -> Optional[dict]:
+        # The cache is a container `org up` made, outside the prefix: this backend only reads
+        # Incus's description of it, and what is done is done in the engineer's container.
+        return cache.offer(tr, cfg, log, again)
+
     def doctor(self, ledger, cfg: dict, add) -> None:
         s = self._settings(cfg)
         path = shutil.which("incus")
@@ -128,6 +135,7 @@ class IncusBackend(Backend):
                 found = problems(info)
                 add(not found, "template container `%s`" % s["base"],
                     "; ".join(found) if found else "%s, isolated" % (info.get("status") or "?").lower(), "org up --rebuild-template")
+            cache.doctor(cfg, add)
         add(True, "engineers at once", ("%d" % int(s["slots"])) if s.get("slots") else "no limit set (machines.incus.slots)")
 
 

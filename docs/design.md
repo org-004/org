@@ -75,6 +75,7 @@ These are the decisions the rest follows from.
 | `secrets.py` | both | the two tokens: where they are, what hides them, the environment of a process that acts as the person. The only reader |
 | `dispatch.py` | manager | choose and place a machine, tokens, bundle, start, stop, resume, the queue, draining, reaping |
 | `backends/` | manager | one kind of machine each: how to pick, create, vet, reach and remove it (`incus`, `ssh`, `local`; `docker` as a plugin) |
+| `cache.py` | manager | the build cache as dispatch sees it: look, probe from an engineer's container, write Bazel's settings, the `org doctor` row and the `org pool` line |
 | `transport.py` | manager | run a script on a machine: Incus, ssh, local, Docker |
 | `admin.py` | manager | a drain that waits, upgrade and rollback, the organization's list of repositories |
 | `sync.py` | manager | pull snapshots into `runs/<run>/mirror/` |
@@ -86,7 +87,7 @@ These are the decisions the rest follows from.
 | `runner.py` | engineer | the three phases, recovery, caps, status |
 | `stream.py` | engineer | read the CLI's event stream: spend, activity, limit state |
 | `schemas.py`, `prompts/` | engineer | what each turn must return, and the engineer's instructions |
-| `bin/org`, `incus/` | the VM | the wrapper, `org up` and `org down`, the template's setup |
+| `bin/org`, `incus/` | the VM | the wrapper, `org up` and `org down`, the template's setup and the build cache's (`cache.sh`) |
 | `docker/` | | the Docker plugin's image and host script; unmaintained |
 
 The engineer's side is the same package: dispatch copies it into the run directory, so a run
@@ -117,7 +118,10 @@ on and does not repeat it.
  │                 Claude Code, and no login. Only ever copied.                │
  │  org-eng-<run>  a copy of it, one per run, unprivileged                     │
  │    given        both tokens over stdin, into its own /run/org               │
- │    has          root, an init, a Docker daemon of its own, the internet     │
+ │    has          root, an init, a Docker daemon of its own, the internet,    │
+ │                 and one port of org-cache                                   │
+ │  org-cache       the build cache: bazel-remote, one gRPC port, no login     │
+ │                  Every engineer reads and writes it; only org up enters it  │
  └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -156,32 +160,37 @@ The template holds no login at all: a token baked into it would be in every engi
 and on the VM's disk. It is left stopped, because a copy of a stopped container is a clean copy
 and a template that never runs cannot drift; `org up` stops one it finds running.
 `org up --rebuild-template` builds a new one under a dated name and points `machines.incus.base`
-at it, leaving the old one for the runs that were promised it.
+at it, leaving the old one for the runs that were promised it. The template carries no Bazel and no
+build cache settings: see "The build cache" below for why those are written at dispatch.
 
 **The backend acts only on its own containers.** Every action of the Incus backend passes one
-check first (`_own()` in `org/backends/incus.py`): the name must start with the configured prefix
-(`org-eng-`) and be a plain container name. A template whose name starts with the prefix is
-refused, since a run could then be asked to delete it, and a run record cannot point org at
-another container. Two other parts of org name containers outside the prefix, on purpose:
-`org up` creates the template, and `org upgrade` creates and deletes a test container
-(`org-test-<commit>`). All of it happens inside the `org` user's own Incus project.
+check first (`_own()` in `org/backends/incus.py`): the name must start with the configured
+prefix (`org-eng-`) and be a plain container name. A template whose name starts with the prefix
+is refused, since a run could then be asked to delete it, and a run record cannot point org at
+another container. Three other parts of org name containers outside the prefix, on purpose: `org
+up` creates the template and the build cache, and `org upgrade` creates and deletes a test
+container (`org-test-<commit>`). A cache whose configured name starts with the prefix is
+refused, as the template's is. All of it happens inside the `org` user's own Incus project.
 
 **What makes a container a box.** Before an engineer starts, the backend's `vet` reads Incus's
 own description of the new container, not anything inside it, and refuses the run if the
 container is privileged, has any device beyond its root disk and its network card, shares a
 directory from the VM, or has a network card without `security.port_isolation` (it could reach
 the other containers) or without `security.ipv4_filtering` (it could take another address).
-`machines.incus.allow_open` overrides the refusal. The check runs at dispatch and nothing
-re-checks a container later. An engineer cannot change those settings from inside its container;
-the `org` user could.
+`machines.incus.allow_open` overrides the refusal. This is the check an engineer's container
+passes; the build cache's container is deliberately not held to the isolation part of it (see
+"The build cache"). The check runs at dispatch and nothing re-checks a container later. An
+engineer cannot change those settings from inside its container; the `org` user could.
 
 **The network.** An engineer reaches the internet, to clone, install and call the model. It
-cannot reach the Mac, the LAN or other engineers, and of the VM it can only ask for an address
-and a name. Two things hold that. The per-card settings above are Incus's, set on the template
-and inherited by every copy. A firewall in the VM, installed by `org-host` and owned by root
-there, drops what containers send to private, link-local and other non-public ranges and all of
-their IPv6. An engineer is root in its container and can change neither. The firewall's rules
-name the containers' bridges: they do not filter what the `org` user's own processes send.
+cannot reach the Mac, the LAN, the VM itself or another engineer's container, and of the VM it
+can only ask for an address and a name. The one exception is one port of the build cache's
+container, described below. Two things hold the rest. The per-card settings above are Incus's,
+set on the template and inherited by every copy; port isolation is what keeps one engineer's
+card from another's. A firewall in the VM, installed by `org-host` and owned by root there, drops
+what containers send to private, link-local and other non-public ranges and all of their IPv6.
+An engineer is root in its container and can change neither. The firewall's rules name the
+containers' bridges: they do not filter what the `org` user's own processes send.
 
 **Credentials.** Exactly two tokens enter the VM. `org-vm` keeps them in the Mac's Keychain and
 pipes them in at every start, into `/run/org`, a memory-only directory that the `org` user alone
@@ -213,7 +222,8 @@ settings but the token's scope, which is model requests.
 **Before an engineer starts**, in this order: the container is copied and started; dispatch asks
 it what it has (python3, git and Claude Code, or the run is refused; whether a Docker daemon
 answers and how many cores, which the engineer is told); `vet` reads Incus's description of it;
-only then are the tokens and the git identity copied in, the bundle unpacked and the runner
+the build cache is offered to it, if there is one; only then are the tokens and the git identity
+copied in, the bundle unpacked and the runner
 started. A dispatch that fails at any step removes the container it made, so a refused container
 is never left running and never receives a token.
 
@@ -265,7 +275,8 @@ ledger. The first install, `org-vm install <ref>`, is `org-host`'s and takes the
 and Lima forwards that one port to the Mac's `127.0.0.1`. Nothing else a process in the VM
 listens on is forwarded, so a server an engineer starts does not appear on the Mac. Containers
 cannot reach the VM's loopback, and the firewall leaves them no port of the VM but the ones
-that hand out addresses and names.
+that hand out addresses and names. The cache's port is not a port of the VM: it is the port of
+a container on the bridge.
 
 **Backends.** Where engineers run is one interface (`org/backends/`): choose a machine for a run,
 say how many may run at once, create it, vet it, reach it, remove it.
@@ -292,6 +303,137 @@ socket. The backend and its unit tests are still here (`org/backends/docker.py`)
 host-side script `docker/up.sh` has not been updated for the token changes: it still calls
 `gh auth token` and gives the manager a whole GitHub login, and `org up` no longer leads to it.
 It is recorded here as history, not as something that works.
+
+## The build cache
+
+**Why it exists.** An engineer's first Bazel build in a fresh container compiled everything from
+nothing. For `org-004/solar-bay-assembly` that was 611.7 s with an empty cache against 148.8 s
+from a filled one, measured in that project's run 004: about ten minutes of every run of a
+project that needs it. Each container is a copy of a template that cannot hold a project's build
+results, so the results have to live somewhere that outlasts a container and that every
+engineer can reach.
+
+**What it is.** A container of its own beside the engineers', `org-cache`
+(`machines.incus.cache.name`), running `bazel-remote` 2.6.4
+(https://github.com/buchgr/bazel-remote): one program that serves Bazel's remote cache over gRPC
+from one directory, `/var/lib/bazel-remote`, and keeps it under `machines.incus.cache.max_gb`
+gigabytes (default 20) by dropping what was used longest ago. It listens for gRPC on
+`machines.incus.cache.port` (default 9092, the server's own default) and binds its HTTP port to
+the container's own loopback, where no other container can reach it. It runs as a service of a
+user `bazel-remote` that is not root and starts with the container; the container has
+`boot.autostart`, so it returns when the VM restarts. It runs no container of its own, so it is
+made without nesting.
+
+**Who makes it.** `org up`, as the `org` user, when it is missing: from `images:debian/13`,
+unprivileged, with no device but its root disk and its network card. `incus/cache.sh` is run
+once inside it, as `incus/bootstrap.sh` is run inside the template. It downloads the pinned
+release from GitHub for arm64 or x86-64 and installs it only if its SHA-256 equals the one
+written in the script, so a changed download installs nothing. `org up` leaves an existing cache
+as it is and starts it if it is stopped. If the server does not come up, `org up` removes the
+container again, so that the next `org up` makes it afresh and does not take a broken one for the
+cache, and ends with an error after the rest of its work: nothing else depends on the cache, and
+engineers build without it in the meantime. `org down` leaves it running with what it holds.
+Only Incus machines are offered it.
+
+**Its network card, and why.** The card has `security.ipv4_filtering`, as an engineer's has, so
+the cache cannot take another address, and its IPv6 is treated as the template's is. It does not
+have `security.port_isolation`, on purpose. Incus's port isolation keeps a card from other cards
+that also have it set: an isolated card cannot reach another isolated card, and the engineers'
+cards are isolated. A card without it can be reached by an isolated one. That was confirmed with
+real containers in a nested Incus 6.0.4: an engineer's container connects to the cache, and does
+not connect to another engineer's. It follows, and was also observed, that the cache container
+can open connections to engineers' containers. That is why it holds no login, token or key,
+why none is ever copied into it, and why nothing but `org up` ever enters it. The server asks
+for no credential either.
+
+**What an engineer can now reach that it could not.** One port (gRPC, 9092 unless changed) of
+one container, `org-cache`, on the VM's bridge, if the VM's firewall lets it through. Nothing
+else is newly reachable: not the VM, not another engineer, not the cache's HTTP port. The server
+listens on that port over IPv6 as well as IPv4; the settings engineers are given use its IPv4
+address.
+
+**Engineers use each other's build and test results.** Every engineer writes to the cache and
+every engineer reads from it, so a result one engineer's build uploaded is used by another
+engineer's build and by its tests. The server checks a stored file against its hash (the
+content-addressed store is keyed by SHA-256) and checks that a stored action result is a
+well-formed record. It cannot check that the stored result of an action is the true one. An
+engineer that uploads a wrong output for an action poisons that action for every later build
+that has the same inputs, until the cache is emptied. There is no credential, no TLS and no rule
+about who may write: what protects the server is only that nothing but containers on the VM's
+bridge can reach it. The owner accepted this on 2026-11-24 for the sake of build time. CI does
+not use this cache, so what CI builds is not affected by it.
+
+**How an engineer's container is told.** The template cannot be told, because the cache's
+address is not known when the template is built, so dispatch does it, after `vet` has passed and
+before the tokens are copied in (a container that fails `vet` is refused first and gets no file).
+If the cache container exists and is running, dispatch reads its IPv4 address from Incus's
+description of it, and from inside the engineer's container tries to open a TCP connection to
+that address and port, giving up after 3 seconds. It prints one line either way: `build cache
+reachable at <address>:<port>`, or `build cache not reachable at <address>:<port>, so builds will
+not use it` with what may be in the way, which is the VM's firewall or port isolation on the
+cache's network card. The run's record keeps which, as `build_cache` (`state`, `address`,
+`port`). Only when the connection was made does dispatch write Bazel's system-wide settings
+file, `/etc/bazel.bazelrc`, in the engineer's container. It carries a comment saying who wrote
+it and why, and exactly four settings: `build --remote_cache=grpc://<address>:<port>`,
+`build --remote_upload_local_results=true`, `build --remote_local_fallback` and
+`build --incompatible_remote_local_fallback_for_remote_cache`. Nothing else: no disk cache, no
+limit on cores, nothing about any project, and a project without Bazel never reads the file.
+Writing only after the connection was tried is what keeps a build from waiting on a cache it
+cannot reach.
+
+The last two settings together make Bazel 9 build locally when the cache stops answering
+part-way. With the first of them alone the build fails ("Failed to query remote execution
+capabilities"), which was tried with Bazel 9.3.0. Bazel 9.3.0 then succeeds without printing a
+warning: the only sign is a wait, about 3 s when the connection is refused and about 20 s when
+the address does not answer.
+
+That last setting is also the file's weak point. It exists from Bazel 8.6.0 on: 8.5.0 and 7.7.3
+do not know it, and a Bazel that meets an option it does not know in an rc file stops
+("Unrecognized option"), whatever the command. An rc file cannot say "if this version knows
+it", and dispatch cannot know which Bazel a project will fetch. So in a container that reached
+the cache, a project pinned to a Bazel older than 8.6 fails every build until
+`/etc/bazel.bazelrc` is removed there, which the file's own comment tells the engineer to do.
+Leaving the setting out would be worse for the project this was built for: Bazel 9.3.0 without
+it fails the build whenever the cache stops answering.
+
+A stopped cache gets a line saying so; a cache container that is not what `org up` makes (it is
+privileged, or has a device beyond its disk and its card) is not used, and the line says why; a
+missing cache prints nothing and the run goes on as before. The checks on an engineer's container
+(`problems()`) are unchanged. When a stopped engineer's container is resumed the same is done
+again, so a cache whose address changed is found, and a settings file org wrote earlier is
+removed if the cache is there and no longer reachable. A failure anywhere in this never fails a
+dispatch: whatever goes wrong while the cache is looked at or offered is caught there, said in
+one line, and recorded as `error`.
+
+**The backend does not manage it.** It acts only on names with the engineers' prefix, exactly as
+before, and only reads Incus's description of the cache (`incus list`). It never creates, enters
+or deletes the cache on behalf of a run.
+
+**What is not known until the owner tries it on the VM.** The VM's firewall is made by
+`org-host`, the owner's separate repository; root owns it and nothing here can change it. It
+"drops what containers send to private, link-local and other non-public ranges". Whether it also
+drops traffic from one container to another on the same bridge, which is switched and not
+routed, could not be tried anywhere but on the VM. If it does, dispatch says "not reachable" and
+builds go on without the cache until `org-host` allows exactly this: source the engineers'
+bridge, destination the cache container's address and gRPC port, TCP, nothing wider. The first
+dispatch after `org upgrade` and `org up` shows which it is.
+
+**Seeing it.** `org doctor` has one row for the cache, from `incus list` alone: missing (fix:
+`org up`), stopped, or `running at <address>:<port>`. It fails the row if the container is
+privileged or has a device beyond its disk and its card. When the cache is switched off the row
+says `switched off (machines.incus.cache.enabled)` and is not a failure. `org pool` prints one
+line, `build cache: org-cache running at <address>:<port>` (or stopped, or missing).
+
+**Switching it off, and emptying it.** `org config set machines.incus.cache.enabled false`: `org
+up` then makes no cache, dispatch looks at none, asks Incus nothing about it and writes no
+settings, and the installation behaves as before the cache existed, but for the row in `org
+doctor` that says it is switched off. A cache container that already exists is left where it
+is, and so are the settings in engineers' containers dispatched before, which nothing reaches
+into: `incus delete -f org-cache` removes the container, and their builds then go on without
+it. To empty it,
+delete it and run `org up`, which makes a new, empty one. That is also how a changed port or size
+takes effect, since an existing container is not reconfigured. Engineers dispatched in between
+build without the cache.
 
 ## The spec
 
@@ -529,13 +671,15 @@ first is a rule a model follows; only the second is a setting.
 | `admin` and root in the VM | sudo; the firewall; `/etc/claude-code`; Incus | everything in the VM; used only by `org-vm` and its provisioning |
 | the `org` program in the VM | the ledger; both tokens; the `org` user's Incus project | create, enter and delete containers there; whatever the person or the page asks of it |
 | manager chat | read access to what the `org` user can read, less the tokens; the desk | draft; propose approve, dispatch, stop, exec and the rest of the person's decisions |
-| engineer | root in its container; copies of both tokens | anything in its container; on GitHub and the model, what the tokens allow |
+| engineer | root in its container; copies of both tokens | anything in its container; on GitHub and the model, what the tokens allow; read and write the build cache |
+| the build cache | its own container, no login; every engineer's build results | serve them to every engineer; open connections to engineers' containers |
 | dashboard page | the access token | approve, stop, ask |
 | a stranger on GitHub | a public repository to read | write text that an agent may read |
 
 - An engineer runs with permissions bypassed, so its container is the boundary: unprivileged,
   no device but its disk and an isolated network card, and behind it a VM with nothing of the
-  Mac's in it. Outside the container an engineer can do exactly what the two tokens allow, and it
+  Mac's in it. Through that card it reaches the internet and one port of the build cache's
+  container. Outside the container an engineer can do exactly what the two tokens allow, and it
   can reach the internet, so it could also send the tokens anywhere. Their scope is the limit:
   one organization's code, and model requests. The default delivery lands on the default
   branch directly.
@@ -546,9 +690,14 @@ first is a rule a model follows; only the second is a setting.
   change the firewall or Claude Code's managed settings.
 - The template is the root of what engineers start with. It holds tools and settings and no
   login, and it is only ever copied.
-- An engineer cannot reach the manager: not the dashboard, not the ledger, not another
-  engineer. What travels back is the snapshot, and sync takes only named files and known states
-  from it.
+- An engineer cannot reach the manager: not the dashboard, not the ledger, not the VM, not
+  another engineer's container. What travels back is the snapshot, and sync takes only named
+  files and known states from it.
+- The build cache is the one thing engineers share. Its contents are written by every engineer
+  and used by every engineer's builds and tests, and nothing can check that a stored result is
+  the true one. Its network card is not isolated, so it can open connections to engineers'
+  containers; it holds nothing and only `org up` enters it. The owner accepted this on
+  2026-11-24 for the sake of build time.
 - The Mac is reached by one port, and what answers on it is the dashboard. When the web-app view
   is on, that same port also serves pages an engineer wrote, at their own origins.
 
@@ -561,7 +710,7 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
 |---|---|
 | the runner, the manager's side, the Incus backend (the prefix check, `vet`, slots, draining, reaping, resuming a stopped container, tokens over stdin and never on a command line), the dashboard's API, the Docker backend | the unit suite, inside the VM under Python 3.13: a scripted stand-in for the claude CLI, and simulated incus and docker |
 | `org up` in the VM from nothing | it installed the release, installed Claude Code, built the template and started the dashboard service; `org doctor` then reported only the missing tokens and git identity |
-| what a container can reach | from a real container the internet answered; the Lima gateway (192.168.5.2), the VM's own addresses, the Mac's LAN address, the LAN router and a second container did not |
+| what a container can reach | from a real container the internet answered; the Lima gateway (192.168.5.2), the VM's own addresses, the Mac's LAN address, the LAN router and a second container did not. This was before the build cache, whose container an engineer is meant to reach |
 | Docker in an engineer's container | it installed, pulled, built and ran inside a container |
 | the sandbox's footing | bubblewrap worked for the `org` user in the VM and inside a container |
 | the cost of a copy | a copy of a container took about 0.06 s |
@@ -569,6 +718,10 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
 | a run without a working login fails with a reason | the same test with no tokens, and with a Claude token cut short when it was copied: everything up to the model call worked, and the run ended `failed` with the API's own message |
 | the GitHub token reaches one organization | from the VM, both of the organization's repositories answered and two private repositories in the owner's personal account answered 404 |
 | no MCP servers in the VM | `claude mcp list` there, with the Claude token: none |
+| the build cache's code: the container's description, the probe, the settings file, the `org doctor` row and the `org pool` line, switched on and off | `tests/test_cache.py`, against the simulated Incus |
+| the real server and the real build | `tests/live_cache_docker.sh` (needs Docker): `bazel-remote` 2.6.4 installed by `incus/cache.sh` in a bare `debian:13`, and Bazel 9.3.0 through Bazelisk 1.30.0. A build uploads; a second build from a new output base gets cache hits and runs no compile or link; builds still succeed with the server killed and with its container stopped |
+| port isolation, and so who can reach whom | real containers in a nested Incus 6.0.4: an engineer's container connects to the cache and not to another engineer's, and the cache container can open connections to engineers' containers |
+| `org up` making the cache container, and two engineers' containers using it | `tests/live_cache_incus.sh`, on arm64 in an Incus 6.0.4 installed inside an engineer's container (2026-11-24): `org up`, run by an unprivileged user, made the cache container with `incus/cache.sh` under systemd; two copies of a stand-in template (the template's settings, g++ and Bazelisk in place of the bootstrap) passed `vet` and `problems()`, reached the cache and were given `/etc/bazel.bazelrc` with the address Incus gave; a Bazel 9.3.0 build in the first uploaded and the same build in the second was all cache hits; neither could open a connection to the other; the backend removed both and refused to remove the cache |
 
 Not yet exercised:
 
@@ -583,6 +736,11 @@ Not yet exercised:
 - Nested Incus inside an engineer's container, for an engineer that works on org itself. Only
   the bubblewrap part of that was checked.
 - ssh machines beside the containers.
+- The VM's real firewall with the build cache: whether it lets one container reach another on
+  the bridge. If it does not, dispatch says "not reachable" and builds go on without the cache.
+- Anything of the build cache on x86-64: the pinned x86-64 hashes were checked, and nothing was
+  run.
+- The build cache under the real template, or under a real project's build.
 
 `org-host`'s README lists what was checked of the VM's own walls. The layouts before this one
 (Docker containers, then OrbStack machines) had their own live checks, among them a real
@@ -609,6 +767,19 @@ none is claimed for this layout.
 - **A machine of its own for the manager.** Kept through the OrbStack layout. Inside a VM that
   already has nothing of the Mac's it is a second copy of the same wall, and the manager has to
   sit where it can drive Incus anyway.
+- **A hosted cache that only CI writes.** No opening on the VM, and no engineer's results in
+  another's build. It needs an account, a third credential, and CI rebuilt to match the
+  engineers' machines. Set aside by the owner.
+- **The cache server on the VM itself.** The firewall leaves containers no port of the VM, and it
+  would run as the `org` user, beside the ledger and the tokens.
+- **A directory shared into every engineer's container.** `vet` refuses a container that shares a
+  directory, and should go on refusing.
+- **A cache baked into the template.** It ages with every landing, and engineers could not add
+  to it.
+- **Bazel's settings baked into the template.** The cache's address is not known when the
+  template is built, and writing them only after the connection was tried keeps a build from
+  waiting on a cache it cannot reach.
+- **A name instead of an address in those settings.** One more thing that can fail to resolve.
 - **Logins baked into the template.** Simpler at dispatch, since every copy would have them.
   It puts the tokens on disk and in every container whether or not a run needs them, and a
   renewed token needs a new template. The template is blank and each run is handed its tokens.
@@ -637,6 +808,16 @@ none is claimed for this layout.
 
 - Nothing in this layout has made a real model call yet; see what has been checked.
 - An engineer lands its own work on the default branch; nothing on GitHub reviews it first.
+- The build cache's settings stop a Bazel older than 8.6 with "Unrecognized option" (see "The
+  build cache"); the file has to be removed in such a project's container.
+- An `org up` that loses power between making the cache container and seeing its server up
+  leaves a container the next `org up` takes for the cache; `org doctor` then shows it running
+  and dispatch says "not reachable". `incus delete -f org-cache`, then `org up`, makes it again.
+- The build cache cannot tell a true stored result from a false one, has no credential and no
+  TLS, and is reached by every engineer; one engineer's wrong output is used by the others until
+  the cache is emptied. Its network card is not isolated, so it can open connections to
+  engineers' containers. Whether the VM's firewall lets engineers reach it is not known until it
+  is tried on the VM.
 - An engineer holds both tokens and reaches the internet. Their scope bounds what a leaked one
   can do; nothing prevents the leak.
 - All engineers and the manager share one kernel, and the `org` user holds both tokens and can

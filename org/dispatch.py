@@ -334,6 +334,10 @@ def start(ledger: Ledger, run_id: str, log=print) -> dict:
         made = True
         record["facts"] = preflight(tr)
         backend.vet(machine, record["facts"], cfg)
+        # Only a container that passed: one that was refused is told nothing and gets no file.
+        offered = backend.build_cache(tr, cfg, log)
+        if offered:
+            record["build_cache"] = offered
         push_logins(tr, machine, backend.blank, log)
         job = build_job(ledger, meta, run_id, machine, record["facts"])
         data = build_bundle(ledger, meta, job)
@@ -507,6 +511,10 @@ def resume(ledger: Ledger, run_id: str, log=lambda message: None) -> str:
     backend = backends.get(cfg, machine["kind"])
     backend.before_resume(machine, cfg)
     tr = for_machine(machine, cfg)
+    # The build cache may have another address by now, or be gone: ask again.
+    offered = backend.build_cache(tr, cfg, log, again=True)
+    if offered:
+        rec["build_cache"] = offered
     # The tokens were put in the machine's memory, and a machine that has been stopped since
     # has none: without them the runner would start an engineer that cannot make a request.
     push_logins(tr, machine, backend.blank, log)

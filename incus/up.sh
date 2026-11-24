@@ -17,6 +17,9 @@
 #                                      back is moving the link
 #   org-base                           the template container: Debian with python3, git, gh, tmux,
 #                                      Docker and Claude Code, and no login. Left stopped.
+#   org-cache                          the build cache: a container of its own that every engineer
+#                                      reads and writes, with no login. Left running.
+#                                      (machines.incus.cache.enabled false: not made, not used)
 #   org-dash.service                   the dashboard, a service of this user
 #
 # Run it again after fetching a new version; it takes a few seconds when everything exists.
@@ -39,7 +42,7 @@ while [ $# -gt 0 ]; do
     --slots) [ $# -ge 2 ] || die "--slots takes a number"; slots="$2"; shift 2 ;;
     --port) [ $# -ge 2 ] || die "--port takes a number"; port="$2"; shift 2 ;;
     --owner) [ $# -ge 2 ] || die "--owner takes a GitHub organization or user"; owner="$2"; shift 2 ;;
-    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option $1 (org up --help)" ;;
   esac
 done
@@ -107,6 +110,22 @@ case "$(get manager.model)" in ""|null) cfg manager.model '"fable"'; cfg manager
 base=$(get machines.incus.base | tr -d '"'); base=${base:-org-base}
 prefix=$(get machines.incus.prefix | tr -d '"'); prefix=${prefix:-org-eng-}
 case "$base" in "$prefix"*) die "the template \`$base\` starts with the engineers' prefix \`$prefix\`" ;; esac
+# The build cache (step 5). The prefix marks what a run may be asked to delete, and the cache is never that.
+cache_on=$(get machines.incus.cache.enabled)
+if [ "$cache_on" != false ]; then
+  # A setting that is not given, or is null, is its default, as in org/cache.py.
+  setting() { local v; v=$(get "machines.incus.cache.$1" | tr -d '"'); case "$v" in ""|null) v=$2 ;; esac; printf '%s' "$v"; }
+  cache=$(setting name org-cache)
+  cache_port=$(setting port 9092)
+  cache_gb=$(setting max_gb 20)
+  case "$cache" in [!A-Za-z]*|*[!A-Za-z0-9-]*) die "machines.incus.cache.name \`$cache\` is not a container's name" ;; esac
+  case "$cache" in "$prefix"*) die "the build cache \`$cache\` starts with the engineers' prefix \`$prefix\`" ;; esac
+  [ "$cache" != "$base" ] || die "the build cache and the template are both named \`$cache\`"
+  # 8080 is where the server's other port listens, on the container's own loopback.
+  case "$cache_port" in ""|0*|*[!0-9]*|??????*|8080) die "machines.incus.cache.port must be a port (and not 8080), not $cache_port" ;; esac
+  [ "$cache_port" -le 65535 ] || die "machines.incus.cache.port must be a port, not $cache_port"
+  case "$cache_gb" in ""|0*|*[!0-9]*|??????*) die "machines.incus.cache.max_gb must be a whole number of gigabytes, not $cache_gb" ;; esac
+fi
 
 # ---- 4. the template every engineer is a copy of
 # The status of a container by exact name, or nothing when there is none.
@@ -118,7 +137,7 @@ build_template() {
   local name="$1" facts
   say "template: building $name (a few minutes)"
   inc init -q images:debian/13 "$name" -c security.nesting=true
-  # Its network card: a port the other containers cannot reach, and an address it cannot change.
+  # Its network card: a port the other engineers' containers cannot reach, and an address it cannot change.
   inc config device override "$name" eth0 security.port_isolation=true security.ipv4_filtering=true >/dev/null
   inc start -q "$name"
   incus exec "$name" -T -- sh -c 'for i in $(seq 1 60); do ip -4 -o addr show scope global 2>/dev/null | grep -q inet && exit 0; sleep 0.5; done; exit 1' </dev/null \
@@ -143,7 +162,56 @@ else
   build_template "$base"
 fi
 
-# ---- 5. the dashboard, as a service of this user
+# ---- 5. the build cache every engineer reads and writes
+# A container of its own beside the engineers', running one program that serves Bazel's remote
+# cache on one port. It holds no login and asks for none. Engineers are told of it at dispatch,
+# and only when they can reach it. `org down` leaves it running, with what it holds.
+# A cache that could not be made is refused at the end, after the rest is in place: nothing else
+# here depends on it, and engineers build without it.
+cache_failed=""
+if [ "$cache_on" != false ]; then
+  build_cache() {
+    local name="$1" facts
+    say "build cache: making $name"
+    # Unprivileged and without nesting: it runs one server and no containers of its own. It comes
+    # back by itself when this machine restarts.
+    inc init -q images:debian/13 "$name" -c boot.autostart=true \
+      || { cache_failed="build cache: incus could not make $name. Engineers build without it; \`org up\` tries again."; return 0; }
+    # From here on there is a container: whatever stops this, it is not left half made, or the
+    # next \`org up\` would take it for the cache.
+    trap 'inc delete -q -f "$name" >/dev/null 2>&1; exit 130' INT TERM
+    # Its network card: an address it cannot change, as an engineer's card has. It is not given
+    # the port isolation an engineer's card has, and that is the point: an isolated card cannot
+    # reach another isolated card, so engineers could never reach a cache that had it.
+    { inc config device override "$name" eth0 security.ipv4_filtering=true >/dev/null && inc start -q "$name"; } \
+      || { inc delete -q -f "$name" || true; trap - INT TERM; cache_failed="build cache: $name could not be set up and started, so it was removed. Engineers build without it; \`org up\` tries again."; return 0; }
+    incus exec "$name" -T -- sh -c 'for i in $(seq 1 60); do ip -4 -o addr show scope global 2>/dev/null | grep -q inet && exit 0; sleep 0.5; done; exit 1' </dev/null \
+      || { inc delete -q -f "$name" || true; trap - INT TERM; cache_failed="build cache: $name got no network address, so it was removed. Engineers build without it; \`org up\` tries again."; return 0; }
+    # The script is its stdin. Nothing else goes in: no login, no key, nothing of this user's.
+    facts=$(incus exec "$name" -T --env "ORG_CACHE_PORT=$cache_port" --env "ORG_CACHE_MAX_GB=$cache_gb" -- sh -s < "$rel/incus/cache.sh") || true
+    if [ "$(printf '%s\n' "$facts" | sed -n 's/^server=//p')" != up ]; then
+      # Removed, so that the next `org up` makes it again and does not take a broken one for the cache.
+      inc delete -q -f "$name" || true
+      trap - INT TERM
+      cache_failed="build cache: the server did not come up in $name (sha256: $(printf '%s\n' "$facts" | sed -n 's/^sha256=//p')), so it was removed. Engineers build without it; \`org up\` tries again."
+      return 0
+    fi
+    trap - INT TERM
+    say "build cache: $name ready (bazel-remote $(printf '%s\n' "$facts" | sed -n 's/^version=//p'), port $cache_port, at most $cache_gb GB)"
+  }
+  if exists "$cache"; then
+    # An existing one is left as it is, with what it holds. To empty it: incus delete -f, then `org up`.
+    if [ "$(status_of "$cache")" = Running ] || inc start -q "$cache"; then
+      say "build cache: $cache is here"
+    else
+      cache_failed="build cache: $cache is here but did not start. Engineers build without it."
+    fi
+  else
+    build_cache "$cache"
+  fi
+fi
+
+# ---- 6. the dashboard, as a service of this user
 unit="$HOME/.config/systemd/user/org-dash.service"
 mkdir -p "$(dirname "$unit")"
 cat > "$unit" <<UNIT
@@ -168,6 +236,7 @@ else
   say "warning: no user service manager here (is lingering enabled for $(id -un)?). Start the dashboard by hand: org dash --no-open"
 fi
 
-# ---- 6. what is still missing
+# ---- 7. what is still missing
 echo
 "$org" doctor || true
+[ -z "$cache_failed" ] || die "$cache_failed"
