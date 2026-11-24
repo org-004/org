@@ -504,12 +504,11 @@ that is queued, being provisioned or failed at dispatch is not synced at all.
 **What a review of sync found.** Sync used to write any file name a snapshot returned into the
 mirror. A name such as `../../config.json` escaped the mirror and landed in the ledger, and
 `config.json` names modules that are imported. An engineer could so have put text of its
-choosing into a file the `org` program acts on, beside the tokens. Sync also copied the run's
-`state` unchecked, so a snapshot that said `queued` would have handed the run to the dispatcher
-again, and one that said `provisioning` would have held a slot for ever. Both are fixed as
-described above, and a unit test sends such a snapshot. The text an engineer writes in its
-status and report is still shown on the page and read by the manager chat; it is data there, not
-instruction.
+choosing into a file the `org` program acts on, beside the tokens. Sync also copied the run's `state` unchecked, so a snapshot
+that said `queued` would have handed the run to the dispatcher again, and one that said
+`provisioning` would have held a slot for ever. Both are fixed as described above, and a unit
+test sends such a snapshot. The text an engineer writes in its status and report is still shown
+on the page and read by the manager chat; it is data there, not instruction.
 
 `status.collect()` builds one document from the ledger and the mirrors. The terminal table, the
 page and the manager's question mode all render that document, so they cannot disagree.
@@ -709,7 +708,7 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
 | the build cache's code: the container's description, the probe, the settings file, the `org doctor` row and the `org pool` line, switched on and off | `tests/test_cache.py`, against the simulated Incus |
 | the real server and the real build | `tests/live_cache_docker.sh` (needs Docker): `bazel-remote` 2.6.4 installed by `incus/cache.sh` in a bare `debian:13`, and Bazel 9.3.0 through Bazelisk 1.30.0. A build uploads; a second build from a new output base gets cache hits and runs no compile or link; builds still succeed with the server killed and with its container stopped |
 | port isolation, and so who can reach whom | real containers in a nested Incus 6.0.4: an engineer's container connects to the cache and not to another engineer's, and the cache container can open connections to engineers' containers |
-| the cache container, two engineer containers made as the template is made, the probe, the settings file, upload and cache hits, and the engineers unable to reach each other | what `tests/live_cache_incus.sh` checks. It needs an Incus of one's own, for example one installed inside an engineer's container, and the cache container is made by `org up` run as an unprivileged user |
+| `org up` making the cache container, and two engineers' containers using it | `tests/live_cache_incus.sh`, on arm64 in an Incus 6.0.4 installed inside an engineer's container (2026-11-24): `org up`, run by an unprivileged user, made the cache container with `incus/cache.sh` under systemd; two copies of a stand-in template (the template's settings, g++ and Bazelisk in place of the bootstrap) passed `vet` and `problems()`, reached the cache and were given `/etc/bazel.bazelrc` with the address Incus gave; a Bazel 9.3.0 build in the first uploaded and the same build in the second was all cache hits; neither could open a connection to the other; the backend removed both and refused to remove the cache |
 
 Not yet exercised:
 

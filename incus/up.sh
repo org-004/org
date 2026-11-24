@@ -132,7 +132,7 @@ build_template() {
   local name="$1" facts
   say "template: building $name (a few minutes)"
   inc init -q images:debian/13 "$name" -c security.nesting=true
-  # Its network card: a port the other containers cannot reach, and an address it cannot change.
+  # Its network card: a port the other engineers' containers cannot reach, and an address it cannot change.
   inc config device override "$name" eth0 security.port_isolation=true security.ipv4_filtering=true >/dev/null
   inc start -q "$name"
   incus exec "$name" -T -- sh -c 'for i in $(seq 1 60); do ip -4 -o addr show scope global 2>/dev/null | grep -q inet && exit 0; sleep 0.5; done; exit 1' </dev/null \

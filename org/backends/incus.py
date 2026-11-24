@@ -10,8 +10,9 @@ the host's in it); the container is the inner one, and this module is what check
 
   - only containers whose names start with the prefix are ever created, entered or deleted
   - a container must be unprivileged, with no device but its own disk and a network card whose
-    port is isolated and whose address is pinned, so it reaches the internet and nothing beside
-    it. That is read from Incus's description of the container, not from anything inside it.
+    port is isolated and whose address is pinned, so it reaches the internet and, beside it,
+    only the one port of the build cache's container (org/cache.py), whose card is not isolated.
+    That is read from Incus's description of the container, not from anything inside it.
   - it starts blank: no login is baked into the template. Each run's tokens are copied into the
     container's memory at dispatch.
 """

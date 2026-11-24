@@ -395,13 +395,13 @@ effort: high
 ---
 ```
 
-and these sections: Intent, Context, Requirements (`- R1 (MUST): ...`, `- R2 (SHOULD): ...`),
-Out of scope, Acceptance criteria (`- AC1: <command> <expected observation>`), Constraints,
-Alternatives considered, Open questions (which must read `None`). `org spec check` enforces the
-parts a program can check, including that every repository is one an engineer can reach, that it
-is in the organization named by `github.owner` (the only place an engineer can push), and that
-the machine the spec names is one this installation has. Changing an approved spec means
-revising the draft and approving again, which records a new version and starts a new run.
+and these sections: Intent, Context, Requirements (`- R1 (MUST): ...`, `- R2 (SHOULD): ...`), Out of
+scope, Acceptance criteria (`- AC1: <command> <expected observation>`), Constraints, Alternatives
+considered, Open questions (which must read `None`). `org spec check` enforces the parts a program
+can check, including that every repository is one an engineer can reach, that it is in the
+organization named by `github.owner` (the only place an engineer can push), and that the machine
+the spec names is one this installation has. Changing an approved spec means revising the draft
+and approving again, which records a new version and starts a new run.
 
 ## Time, money and the weekly limit
 
@@ -560,8 +560,8 @@ python3 tests/live_manager_rules.py         # the manager's confinement (a few c
 python3 tests/live_manager_refine.py        # a two-turn refinement of a request with a false premise
 
 # the build cache
-sh tests/live_cache_docker.sh               # needs Docker; real bazel-remote and Bazel, about 4 minutes
-sh tests/live_cache_incus.sh                # needs an Incus of one's own (see below)
+sh tests/live_cache_docker.sh               # needs Docker; real bazel-remote and Bazel, a few minutes
+tests/live_cache_incus.sh                   # as root, where there is an Incus of one's own (see below)
 ```
 
 `tests/e2e.py` approves a small spec, dispatches it, follows it to the end, and then repeats the
@@ -575,10 +575,14 @@ with the rest. `tests/live_cache_docker.sh` installs the real `bazel-remote` 2.6
 9.3.0, fetched through Bazelisk 1.30.0 (the template itself carries no Bazel): a build uploads, a
 second build from a new output base gets cache hits and runs no compile or link, and builds still
 succeed with the server killed and with its container stopped. `tests/live_cache_incus.sh` needs
-an Incus of one's own, for example one installed inside an engineer's container. It makes the
-cache container as `org up` does, run as an unprivileged user, and two containers made as the
-template is made; it checks the probe, the settings file, upload and cache hits, and that the two
-engineers' containers cannot connect to each other.
+an Incus of one's own, for example one installed inside an engineer's container, and root there;
+its header says how to install one. It makes a user that is not root and, as that user, a small
+stand-in for the template (the template's settings, with g++ and Bazelisk in place of the real
+bootstrap), then runs the whole of `org up`, which makes the cache container. With the code
+`org up` installed it copies the template twice as dispatch does, has `vet` and `problems()` judge
+the copies, offers them the cache, builds in the first and requires cache hits in the second,
+requires that neither engineer's container can open a connection to the other, and removes what
+it made.
 
 ## What has and has not been exercised
 
@@ -605,11 +609,13 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
   - With the GitHub token in the VM: both of the organization's repositories answered, and two
     private repositories in the owner's personal account answered 404.
   - `claude mcp list` in the VM, with the Claude token: no MCP servers.
-  - The build cache, apart from the VM, on arm64: the unit tests, and `tests/live_cache_docker.sh`
-    with the real server and Bazel 9.3.0 as described under Tests. Port isolation was observed
-    with real containers in a nested Incus 6.0.4: an engineer's container connects to a cache
-    container whose card is not isolated, and does not connect to another engineer's container;
-    the cache container can open connections to engineers' containers.
+  - The build cache, apart from the VM, on arm64 (2026-11-24): the unit tests;
+    `tests/live_cache_docker.sh` with the real server and Bazel 9.3.0 as described under Tests;
+    and `tests/live_cache_incus.sh` in an Incus 6.0.4 installed inside an engineer's container,
+    where `org up`, run by an unprivileged user, made the cache container, two copies of a
+    stand-in template passed `problems()`, reached the cache and were given its address, the
+    second built from the first's results, and neither could open a connection to the other. In
+    a separate trial there, the cache container could open connections to engineers' containers.
 - **Not yet exercised:**
   - The manager chat and `org ask` in the VM, and an engineer landing a commit on the default
     branch of a repository on GitHub (the smoke spec pushes to a repository inside its own
