@@ -436,7 +436,15 @@ pump.
 **The lock.** The measuring and the deletion hold the run's own lock, the one sync holds, so a
 dashboard loop and an `org status` that pump at the same moment end with one record: one of them
 calls Incus, or the second finds the container gone, and neither loses the other's write. `org
-resume` and `org machine rm` take the same lock now.
+resume` and `org machine rm` take the same lock now. A final run's record has one more writer, the
+plan's tick, which writes it under its own lock (`runs/.graph.lock`) and not the run's. A deletion
+takes seconds, so what it learned is not saved onto the record as it was read before: under the
+tick's lock the record is read again and only the machine's fields are laid over it (`telemetry`,
+`oom_kill`, `machine_removed_at`, `machine_removed_by`, `machine_remove_error`). Without that, a
+review a tick had just marked started was started a second time. The tick's lock is waited for
+five seconds at most and held for that one reading and writing; when a tick holds it for longer
+(it is setting up a machine), the same is done without it. A ledger that never had a plan has no
+tick and gets no such lock file.
 
 **The walls that did not move.** Only `Backend.remove` deletes. It passes the name through `_own`,
 the check of the engineers' prefix, and answers that the machine was already gone when Incus does
@@ -463,7 +471,10 @@ each measurement and still there after the deletion: the largest peak of memory,
 seconds, kills for memory, restarts seen, the disk used where the pool reports it, how many
 measurements, and the first and last time. A cumulative counter (CPU seconds, kills for memory) that
 is lower than in the measurement before means the container restarted, as a stopped and started
-container counts from zero: the totals add the parts and the restart is counted. `org review <run>`
+container counts from zero: the totals add the parts and the restart is counted. Another start
+time in Incus's description counts as a restart too. The summary is worked out from the whole file
+each time, so a write of the record lost to another writer is made good by the next measurement.
+`org review <run>`
 prints the summary as a block, with CPU as seconds and the average number of cores they come to over
 the run's elapsed time; `org peek` as a line; `org status --json` as `telemetry` on the run; the
 dashboard's page for the run shows it. A run from before this has no measurements and says so in one

@@ -153,8 +153,12 @@ def writing(ledger: Ledger, wait: float = 5.0):
     what a tick had just put there (a review marked started, which would then be started twice).
     It is held only for the reading and the writing of one record, never for a call to a machine.
     A tick in another process that finds it taken leaves its work to the next pump, as it does
-    when another tick holds it.
+    when another tick holds it. In a ledger that has no plan no tick writes anything, so there is
+    nothing to wait for and no lock file is made: such a ledger keeps no trace of plans.
     """
+    if not has_plan(ledger):
+        yield False
+        return
     try:
         ledger.runs.mkdir(parents=True, exist_ok=True)
         lock = open(ledger.runs / ".graph.lock", "w")

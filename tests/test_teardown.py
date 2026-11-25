@@ -245,6 +245,7 @@ class WhatATickWroteMeanwhile(TeardownCase):
 
     def test_a_tick_that_holds_its_lock_for_long_does_not_hold_the_deletion_back_for_ever(self):
         name = self.finished("905-waited-r1")
+        dispatch.graph._marker(self.ledger).write_text("{}\n")  # a plan was dispatched here once
         real, asked = dispatch.graph.writing, []
 
         def impatient(ledger):
@@ -258,6 +259,13 @@ class WhatATickWroteMeanwhile(TeardownCase):
         self.assertEqual(len(asked), 1)
         self.assertFalse(self.box(name).exists())
         self.assertTrue(self.ledger.run("905-waited-r1").get("machine_removed_at"))
+
+
+    def test_a_ledger_without_a_plan_gets_no_lock_file_of_plans_from_a_deletion(self):
+        name = self.finished("906-alone-r1")
+        self.assertEqual(dispatch.teardown(self.ledger), ["906-alone-r1"])
+        self.assertFalse(self.box(name).exists())
+        self.assertFalse((self.ledger.runs / ".graph.lock").exists())
 
 
 class FailedDeletions(TeardownCase):
