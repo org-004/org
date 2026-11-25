@@ -481,7 +481,7 @@ class RunnerCase(unittest.TestCase):
             git("checkout", "-b", "b%02d" % i, "main")
             (repo / ("c%02d.txt" % i)).write_text("x\n")
             git("add", ".")
-            git("commit", "-m", ("long " * 60 if i == 24 else "commit %02d" % i))
+            git("commit", "-m", "long %02d " % i + "x" * 250)
         for i in range(60):
             (repo / ("u%02d.txt" % i)).write_text("x\n")
         (repo / ("d" * 100)).mkdir()
