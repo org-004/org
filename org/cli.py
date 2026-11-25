@@ -306,6 +306,7 @@ def cmd_peek(args) -> int:
     print("%s — %s" % (run_id, status.state_label(v)))
     print("spec:      %s v%s  %s" % (v["spec_id"], v["spec_version"], clip(v["title"] or "", 70)))
     print("machine:   %s %s%s" % (v["machine"]["kind"], v["machine"]["name"], ("   " + v["attach"]) if v.get("attach") else ""))
+    print("measured:  %s" % status.machine_line(v))
     print("elapsed:   %s   started %s" % (fmt_dur(v["elapsed_s"]), fmt_clock(v["started_at"])))
     est = v.get("estimate") or {}
     if est:
@@ -392,7 +393,7 @@ def cmd_resume(args) -> int:
     run_id = need_run(ledger, args.run)
     try:
         print("restarted the runner for %s (%s)" % (run_id, dispatch.resume(ledger, run_id)))
-    except (TransportError, BackendError) as e:
+    except (TransportError, BackendError, dispatch.DispatchError) as e:
         die(e)
     return 0
 

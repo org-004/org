@@ -26,6 +26,9 @@ run records are only ever written by this program.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+import time
+import fcntl
 import os
 import re
 from pathlib import Path
@@ -287,6 +290,29 @@ class Ledger:
         if not hits:
             raise LookupError("no run matches %r (known: %s)" % (ref, ", ".join(ids) or "none"))
         raise LookupError("%r is ambiguous: %s" % (ref, ", ".join(hits)))
+
+    @contextmanager
+    def run_lock(self, run_id: str, wait: float = 0.0):
+        """The run's own lock, the one sync holds while it pulls: yields True when it is held here.
+
+        Whoever syncs a run, measures its container, deletes its machine or resumes it holds this
+        while it reads the record and writes it, so that none of them writes over another. It is
+        asked for without waiting unless `wait` says for how many seconds to keep asking; False
+        means another process has it, and the caller leaves the run alone.
+        """
+        self.run_dir(run_id).mkdir(parents=True, exist_ok=True)
+        with open(self.run_dir(run_id) / ".sync.lock", "w") as lock:
+            end = time.time() + max(0.0, wait)
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.time() >= end:
+                        yield False
+                        return
+                    time.sleep(0.05)
+            yield True
 
     def run(self, run_id: str) -> dict:
         return read_json(self.run_dir(run_id) / "run.json", {}) or {}

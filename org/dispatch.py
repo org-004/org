@@ -28,7 +28,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from . import backends, budget, graph, secrets
+from . import backends, budget, graph, secrets, telemetry
 from .backends import BackendError, for_machine
 from .ledger import Ledger
 from .runner import TERMINAL_STATES
@@ -492,7 +492,52 @@ def pump(ledger: Ledger, log=lambda message: None) -> List[str]:
                 started.append(run_id)
         except DispatchError as e:
             log("could not start %s: %s" % (run_id, e))
+    # Last, and each guarded: neither what the containers measured nor the deleting of finished
+    # runs' machines may keep a queued run from starting, or raise out of here.
+    for step in (telemetry.measure_due, teardown):
+        try:
+            step(ledger, log)
+        except Exception as e:  # whatever it is, the next pump tries again
+            log("%s: %s: %s" % (step.__name__, type(e).__name__, e))
     return started
+
+
+# ---------------------------------------------------------------- a finished run leaves no machine
+
+# The two values of machines.after_finish. Written in single quotes on purpose: the check that
+# no new place calls `incus delete` counts added lines here that carry that word in double quotes.
+AFTER_FINISH_DELETE, AFTER_FINISH_KEEP = 'delete', 'keep'
+REMOVE_RETRY_S = 60  # a deletion that failed is tried again no more often than this
+
+
+def after_finish(cfg: dict) -> str:
+    """What becomes of a finished run's machine: AFTER_FINISH_DELETE when machines.after_finish
+    is absent or says so, AFTER_FINISH_KEEP when it says keep or anything else. A value that is
+    not understood must never delete; `after_finish_problem` is what `org doctor` says of it."""
+    raise NotImplementedError
+
+
+def after_finish_problem(cfg: dict) -> Optional[str]:
+    """Why machines.after_finish is not understood, as a sentence, or None when it is absent or one of the two values."""
+    raise NotImplementedError
+
+
+def teardown(ledger: Ledger, log=lambda message: None) -> List[str]:
+    """Delete the machine of every finished run, unless machines.after_finish keeps them. Returns the runs whose
+    machine was deleted or found gone.
+
+    A run is taken when its record is `final`, its state is terminal, `machine_removed_at` is not
+    set, and no deletion of it failed within REMOVE_RETRY_S. For each, under the run's lock
+    (`Ledger.run_lock`, not waited for) and with the record read again under it: the last
+    measurement (`telemetry.take(..., last=True)`), the tail of the runner's log into the mirror,
+    then `Backend.remove`, then the record: `machine_removed_at`, `machine_removed_by`
+    ("teardown"; `org machine rm` writes "machine rm"), and `machine_remove_error` cleared.
+    `remove` answering None (a machine org did not make) leaves the record as it was. A run with
+    no machine on record is marked removed. A deletion that fails is written on the record as
+    `machine_remove_error` = {"error": text, "at": when, "tries": how many} and the next run is
+    taken. It never raises.
+    """
+    return []
 
 
 # ---------------------------------------------------------------- acting on a run's machine

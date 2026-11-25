@@ -27,6 +27,26 @@ def oom_line(v: dict) -> Optional[str]:
     return "%d process%s killed for memory in its container%s" % (n, " was" if n == 1 else "es were", limit)
 
 
+def telemetry_view(rec: dict) -> dict:
+    """What a run's view carries as `telemetry`: the record's summary (org/telemetry.py) with `measured` true, or,
+    where there is none, {"measured": False, "why": a sentence}: machines of that kind are not
+    measured, or the run has no measurements (it ended before org measured containers)."""
+    raise NotImplementedError
+
+
+def machine_block(v: dict) -> List[str]:
+    """The lines of `org review` about what a run's machine measured, from the run's view: peak memory beside the
+    limit, CPU seconds and the average number of cores they come to over the run's elapsed time,
+    kills for memory, restarts, disk, and when the container was deleted. One line when there is
+    nothing measured, saying why."""
+    raise NotImplementedError
+
+
+def machine_line(v: dict) -> str:
+    """The same in one line, for `org peek`."""
+    raise NotImplementedError
+
+
 def run_view(ledger: Ledger, run_id: str, rate: Optional[float]) -> dict:
     rec = ledger.run(run_id)
     st = read_json(ledger.mirror_dir(run_id) / "status.json") or {}
