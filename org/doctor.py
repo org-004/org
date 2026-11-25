@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import List, Tuple
 
-from . import backends, budget, login, notify, secrets
+from . import backends, budget, dispatch, login, notify, secrets
 from .ledger import Ledger
 from .manager import launch_env
 from .util import fmt_usd
@@ -59,6 +59,17 @@ def checks(ledger: Ledger) -> List[Tuple[str, str, str, str]]:
         plugin = type(backend).__module__ not in backends.BUILTIN
         if kind == default.split(":")[0] or plugin or (kind == "ssh" and machines.get("ssh")):
             backend.doctor(ledger, cfg, add)
+    # What becomes of a finished run's machine (machines.after_finish). A value that is not
+    # understood is a warning, not a failure: it keeps the machines, so nothing is lost by it.
+    problem = dispatch.after_finish_problem(cfg)
+    if problem:
+        add(False, "finished runs' machines", problem,
+            "org config set machines.after_finish %s, or `%s` to delete them when the run ends"
+            % (dispatch.AFTER_FINISH_KEEP, dispatch.AFTER_FINISH_DELETE), soft=True)
+    elif dispatch.after_finish(cfg) == dispatch.AFTER_FINISH_DELETE:
+        add(True, "finished runs' machines", "deleted when the run ends (machines.after_finish)")
+    else:
+        add(True, "finished runs' machines", "kept until `org machine rm` (machines.after_finish %s)" % dispatch.AFTER_FINISH_KEEP)
 
     # What engineers are handed, and that it is the narrow pair and nothing wider.
     have = login.status()
