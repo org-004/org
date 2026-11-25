@@ -421,7 +421,7 @@ def cmd_machine(args) -> int:
             + "\npass --force to delete the machine anyway")
     try:
         print(dispatch.remove_machine(ledger, run_id))
-    except (TransportError, BackendError) as e:
+    except (TransportError, BackendError, dispatch.DispatchError) as e:
         die(e)
     return 0
 
