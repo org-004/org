@@ -628,7 +628,7 @@ def teardown_run(ledger: Ledger, run_id: str, cfg: dict, log=lambda message: Non
             return False
         if said is None:
             if json.dumps(rec, sort_keys=True, default=str) != before:
-                ledger.save_run(run_id, rec)
+                _save_machine(ledger, run_id, rec)
             return False
         _mark_removed(ledger, run_id, rec, "teardown")
         log("%s: %s" % (run_id, said))
@@ -657,10 +657,37 @@ def _keep_runner_log(ledger: Ledger, run_id: str, rec: dict, cfg: dict) -> None:
         pass
 
 
+# What the deleting of a machine writes on a run's record, and nothing else there is its to write.
+_MACHINE_FIELDS = ("telemetry", "oom_kill", "machine_removed_at", "machine_removed_by", "machine_remove_error")
+
+
+def _save_machine(ledger: Ledger, run_id: str, rec: dict) -> None:
+    """Write what was learned about a run's machine onto the record as it is now, not as it was read.
+
+    The record was read before a measurement, a copy of a log and a deletion, each a call that
+    may take many seconds, and a final run's record is also written by the plan's tick, under
+    its own lock (org/graph.py, `_save`). Saved as it was read, it would undo what a tick wrote
+    in between: a review marked started would be started again. So the record is read again
+    under the tick's lock and only the fields of `_MACHINE_FIELDS` are laid over it. When that
+    lock cannot be had within a few seconds (a tick is setting up a machine), the same is done
+    without it: the reading and the writing are then a moment apart instead of none.
+    """
+    with graph.writing(ledger):
+        fresh = ledger.run(run_id) or dict(rec)
+        for key in _MACHINE_FIELDS:
+            if key in rec:
+                fresh[key] = rec[key]
+            else:
+                fresh.pop(key, None)
+        ledger.save_run(run_id, fresh)
+    rec.clear()
+    rec.update(fresh)
+
+
 def _mark_removed(ledger: Ledger, run_id: str, rec: dict, by: str) -> None:
     rec.update(machine_removed_at=now(), machine_removed_by=by)
     rec.pop("machine_remove_error", None)
-    ledger.save_run(run_id, rec)
+    _save_machine(ledger, run_id, rec)
 
 
 def _remove_failed(ledger: Ledger, run_id: str, rec: dict, e: BaseException, log) -> None:
@@ -672,7 +699,7 @@ def _remove_failed(ledger: Ledger, run_id: str, rec: dict, e: BaseException, log
     except (TypeError, ValueError):
         tries = 0
     rec["machine_remove_error"] = {"error": str(e)[:400], "at": now(), "tries": tries + 1}
-    ledger.save_run(run_id, rec)
+    _save_machine(ledger, run_id, rec)
     log("%s: its machine could not be deleted (try %d): %s" % (run_id, tries + 1, str(e)[:400]))
 
 
@@ -773,7 +800,7 @@ def remove_machine(ledger: Ledger, run_id: str) -> str:
             except Exception:
                 pass
             # Saved now, so that what was measured is kept even when the deletion below fails.
-            ledger.save_run(run_id, rec)
+            _save_machine(ledger, run_id, rec)
         said = backend.remove(machine, cfg)
         if said is None:
             return "nothing to delete: %s machines are not created by org" % machine.get("kind")

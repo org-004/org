@@ -80,7 +80,9 @@ def machine_block(v: dict) -> List[str]:
         return lines + ["  measured  " + (t.get("why") or "no measurement was taken")]
     cpu, elapsed = t.get("cpu_s"), v.get("elapsed_s")
     cpu_text = "not read" if not _num(cpu) else "%d s" % round(cpu)
-    if _num(cpu) and _num(elapsed) and elapsed > 0:
+    # Not over less than a minute: the container's CPU time also counts its start, and over a
+    # few seconds the quotient says more cores than the machine has.
+    if _num(cpu) and _num(elapsed) and elapsed >= 60:
         cpu_text += ", %.2f cores on average over %s" % (cpu / elapsed, fmt_dur(elapsed))
     disk = t.get("disk_bytes")
     if not _num(disk):

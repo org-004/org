@@ -155,8 +155,8 @@ class Block(Case):
                      "not reported by the storage pool"):
             self.assertIn(word, b)
 
-    def test_the_average_is_left_out_when_the_elapsed_time_is_missing_or_zero(self):
-        for elapsed in (None, 0):
+    def test_the_average_is_left_out_when_the_elapsed_time_is_missing_or_under_a_minute(self):
+        for elapsed in (None, 0, 0.04, 59):
             v = self.run_with(self.removed(), {"elapsed_s": elapsed})
             self.assertNotIn("cores", "\n".join(status.machine_block(v)))
 

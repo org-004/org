@@ -126,7 +126,9 @@ class PlanCase(AfterCase):
 
 class WhatTheEngineerIsGiven(PlanCase):
     def test_a_retried_run_and_a_waiting_run_each_start_with_the_earlier_report_and_the_reviews_words(self):
-        self.extra_config(manager={"review_model": "haiku", "review_effort": "low"})
+        # The bundles are read below in the containers, after the runs ended: so the containers are kept.
+        self.extra_config(manager={"review_model": "haiku", "review_effort": "low"},
+                          machines=dict(read_json(self.ledger.config_path)["machines"], after_finish="keep"))
         a, b = self.plan([FAIL, DONE, DONE], [answer("retry", "The build broke for no reason the spec explains."),
                                               answer("continue", "The second attempt left the endpoint.", "002-spec-b")])
         first = self.runs(a)[0]

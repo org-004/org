@@ -205,6 +205,61 @@ class TheOrder(TeardownCase):
                          "a record with no remote_dir is not asked for a log")
 
 
+class WhatATickWroteMeanwhile(TeardownCase):
+    """A final run's record is also written by the plan's tick, under its own lock. The deletion
+    takes seconds, so it writes its own fields over the record as it is afterwards."""
+
+    def test_what_the_plans_tick_wrote_during_the_deletion_is_kept(self):
+        name = self.finished("903-reviewed-r1")
+
+        def tick_meanwhile(ledger, run_id, rec, last=False):
+            # While the container is being measured, a tick in another process marks a review started.
+            there = self.ledger.run(run_id)
+            there["review"] = {"state": "running", "attempts": 1}
+            self.ledger.save_run(run_id, there)
+            rec["telemetry"] = {"samples": 1}
+            return None
+
+        with mock.patch.object(dispatch.telemetry, "take", tick_meanwhile):
+            self.assertEqual(dispatch.teardown(self.ledger), ["903-reviewed-r1"])
+        rec = self.ledger.run("903-reviewed-r1")
+        self.assertFalse(self.box(name).exists())
+        self.assertEqual((rec.get("review"), rec.get("telemetry"), rec.get("machine_removed_by"), bool(rec.get("machine_removed_at"))),
+                         ({"state": "running", "attempts": 1}, {"samples": 1}, "teardown", True))
+
+    def test_what_the_plans_tick_wrote_during_a_deletion_that_failed_is_kept(self):
+        name = self.finished("904-reviewed-r1")
+        (self.box(name) / "refuse-delete").write_text("Failed to delete: the pool is busy\n")
+
+        def tick_meanwhile(ledger, run_id, rec, last=False):
+            there = self.ledger.run(run_id)
+            there["review"] = {"state": "running", "attempts": 1}
+            self.ledger.save_run(run_id, there)
+            return None
+
+        with mock.patch.object(dispatch.telemetry, "take", tick_meanwhile):
+            self.assertEqual(dispatch.teardown(self.ledger), [])
+        rec = self.ledger.run("904-reviewed-r1")
+        self.assertEqual((rec.get("review"), rec["machine_remove_error"]["tries"], rec.get("machine_removed_at")),
+                         ({"state": "running", "attempts": 1}, 1, None))
+
+    def test_a_tick_that_holds_its_lock_for_long_does_not_hold_the_deletion_back_for_ever(self):
+        name = self.finished("905-waited-r1")
+        real, asked = dispatch.graph.writing, []
+
+        def impatient(ledger):
+            asked.append(ledger)
+            return real(ledger, wait=0.1)  # the same lock, asked for a tenth of a second instead of five
+
+        with real(self.ledger) as held:  # a tick in another process, as far as the lock can tell
+            self.assertTrue(held)
+            with mock.patch.object(dispatch.graph, "writing", impatient):
+                self.assertEqual(dispatch.teardown(self.ledger), ["905-waited-r1"])
+        self.assertEqual(len(asked), 1)
+        self.assertFalse(self.box(name).exists())
+        self.assertTrue(self.ledger.run("905-waited-r1").get("machine_removed_at"))
+
+
 class FailedDeletions(TeardownCase):
     def test_a_failed_deletion_is_recorded_and_tried_again_no_more_than_once_a_minute(self):
         name = self.finished("901-stuck-r1")

@@ -444,7 +444,7 @@ function machineRow(v) {
   let body;
   if (!t.measured) body = esc(t.why || "no measurement was taken");
   else {
-    const cpu = typeof t.cpu_s === "number" ? Math.round(t.cpu_s) + " s" + (v.elapsed_s > 0 ? ", " + (t.cpu_s / v.elapsed_s).toFixed(2) + " cores on average" : "") : "not read";
+    const cpu = typeof t.cpu_s === "number" ? Math.round(t.cpu_s) + " s" + (v.elapsed_s >= 60 ? ", " + (t.cpu_s / v.elapsed_s).toFixed(2) + " cores on average" : "") : "not read";
     const disk = typeof t.disk_bytes === "number" ? (t.disk_bytes / 1073741824).toFixed(1) + " GiB" : "not reported by the storage pool";
     const n = x => typeof x === "number" ? String(x) : "not read";
     body = "memory peak " + mib(t.memory_peak_bytes) + " of a " + mib(t.memory_limit_bytes) + " limit · cpu " + esc(cpu) + " · killed for memory " + n(t.oom_kill)
