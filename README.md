@@ -115,8 +115,10 @@ org talk "add CSV export to the table view"
    from a terminal or from the dashboard.
 4. **Watch.** `org status`, the dashboard, or `org ask "why is the export run late?"`.
 5. **Afterwards.** `org report <run>` is the engineer's report. `org review <run>` sets the
-   frozen plan against what happened. `org machine rm <run>` deletes the engineer's container
-   once the work is pushed; the report and the record stay.
+   frozen plan against what happened. The engineer's container is deleted by the next `org status`
+   or `org pump` after the run is over and fully copied, so only the report, the record, what
+   the machine measured and what the engineer pushed remain (see
+   [A finished run's machine](#a-finished-runs-machine)).
 
 ## The manager
 
@@ -294,8 +296,10 @@ scores higher than the session and the runner. Raising one's own adjustment need
 and nothing is given to anybody. Containers an engineer starts through a Docker daemon are that
 daemon's children, not the shell's, and are not covered.
 
-**What you see.** Each sync's snapshot carries the container's `oom_kill` count from
-`/sys/fs/cgroup/memory.events`. `org status` prints a line under the table when it is not zero,
+**What you see.** The count of processes killed for memory is read from outside the container,
+from the kernel's `memory.events` for it (see [A finished run's machine](#a-finished-runs-machine)),
+and the runner's snapshot carries the container's own count as well; the record's `oom_kill` is the
+larger of the two, so a container with an older bundle shows it too. `org status` prints a line under the table when it is not zero,
 for example `! <run>: 2 processes were killed for memory in its container (limit 2219MiB)`;
 `org peek` shows the same, and `org status --json` carries `oom_kill`. The count includes kills
 in containers the engineer runs inside its own, because the kernel counts a cgroup together with
@@ -309,6 +313,62 @@ slots exceeds `MemTotal` minus the reserve, or when the limit is under 2 GiB.
 services, Incus's daemon, the manager chat, the dashboard and the build cache's container.
 That is what the reserve is for, and nothing limits them. There is no swap, CPU, disk or
 process-count limit.
+
+## A finished run's machine
+
+A finished engineer leaves no machine behind. When a run is over and fully copied (its record is
+`final` and its state is `done`, `partial`, `failed` or `stopped`), the next pump deletes its
+container. A pump happens at every `org status`, every `org pump` and every ten seconds under the
+dashboard. The container is deleted without asking, whether or not the run left warnings, belongs
+to a plan, is being reviewed, is paused or is held; a terminal run cannot be continued, a retry is
+a new run in a new container, and the engineer is told that only its report and what it pushed
+survive. A run that is not final is never deleted this way. Only machines org made are deleted
+(Incus and Docker); an ssh or local machine is not org's and is not touched.
+
+For each run the order is: one last measurement, the last 5 MB of the runner's log copied to
+`mirror/runner.log`, the deletion, and then `machine_removed_at` on the run's record. The
+measurement and the deletion hold the run's own lock, the one sync holds, and `org resume` and
+`org machine rm` take it too. A deletion that fails is recorded on the run (the error, when, and how
+many tries), shows as a warning in `org status`, and is tried again at most once a minute; it never
+stops other work.
+
+```sh
+org config set machines.after_finish keep      # nothing is deleted until `org machine rm <run>`
+org config set machines.after_finish delete    # the default; also what an absent setting means
+```
+
+`machines.after_finish` is `delete` when absent. `keep` is the old behaviour. Any other value is
+treated as `keep`, so a mistyped value never deletes, and `org doctor` has a row that says the value
+is not understood. Changing back to `delete` deletes everything finished at the next pump.
+
+**Upgrading to this version deletes containers.** There is no cut-off date: the first pump after
+`org upgrade` deletes the container of every run that was already finished, taking one last
+measurement of each first. It cannot be undone. If any of the finished containers there now are
+wanted, run `org config set machines.after_finish keep` before upgrading, and copy out what is
+needed. What `org machine rm` still does is for what is left: a run under `keep`, and a run that
+is not final, with `--force`.
+
+**What is kept of a machine, and where.** While a run holds an Incus container, at most once a
+minute, org reads from outside the container, and nothing from inside it is trusted for these
+numbers: Incus's description of the container (`incus list --format json`) and the kernel's files
+for it, `/sys/fs/cgroup/lxc.payload.<name>/` or, where the container is in a project of its own,
+`lxc.payload.<project>_<name>/`: `memory.current`, `memory.peak`, `memory.max`, `pids.current`,
+`memory.events` and `cpu.stat`. Each reading is appended as one JSON line to
+`runs/<run>/machine.jsonl` in the ledger, beside `run.json`. The run's record carries the summary as
+`telemetry`, which stays after the deletion: the largest peak of memory, the limit, CPU seconds,
+kills for memory, how many times the container was seen restarted, the disk used where the storage
+pool reports it, how many measurements, and the first and last time. Only "the runner was alive"
+comes from the last sync. `org review <run>` prints the summary as a block, `org peek <run>` as a
+line, `org status --json` as `telemetry` on the run, and the dashboard's page for the run shows it.
+Docker, ssh and local machines are not measured, and the summary says so.
+
+After the deletion, `org diff`, `org ls`, `org cat` and `org exec` say the run has no machine to
+reach (removed), `attach` is null, and `org resume <run>` refuses in one sentence. A warning about
+uncommitted or unpushed work is shown as what was deleted with the machine. When the runner finds
+such work at the end it writes into `status.json` what it was (branch names, up to 20 commit
+subjects, up to 50 paths per clone), and `org review` prints it.
+
+What still stays: the build cache's container, the template, old releases and old templates.
 
 ## The build cache
 
@@ -426,6 +486,9 @@ org resume --interrupted               # after the VM restarts: every run whose 
   holds no token. Dispatch is drained, the `current` link is switched, the dashboard restarts,
   and the drain is lifted. Engineers already at work keep the code they started with.
   Rolling back moves the link to the release before and restarts the dashboard.
+  The first pump after an upgrade to the version that deletes finished runs' containers deletes
+  the container of every run that was already finished, after one last measurement of each; see
+  [A finished run's machine](#a-finished-runs-machine) for turning that off first.
 - **The template.** `org up --rebuild-template` builds `org-base-<timestamp>` from
   `incus/bootstrap.sh`, points `machines.incus.base` at it, and leaves the old template where
   it was.
@@ -601,6 +664,7 @@ Everything is optional; these are the values `org up` sets and the defaults arou
     "default": "incus",
     "incus": {"base": "org-base", "prefix": "org-eng-", "slots": 4, "push_token": true,
               "cache": {"enabled": true, "name": "org-cache", "port": 9092, "max_gb": 20}},
+    "after_finish": "delete",
     "ssh": {}
   },
   "github": {"owner": "<organization>"},
@@ -622,6 +686,9 @@ Everything is optional; these are the values `org up` sets and the defaults arou
 and do not change an existing one. The memory limit's settings, `machines.incus.memory` and
 `machines.incus.memory_reserve`, are described under [The memory limit](#the-memory-limit); both
 are absent from the file above because they have defaults.
+
+`machines.after_finish` (`delete` or `keep`, default `delete`) is described under
+[A finished run's machine](#a-finished-runs-machine).
 
 The plan's settings are described under [Plans](#plans). `manager.review_model` and
 `manager.review_effort` are the review's model and effort, and `null` means the manager chat's own.
@@ -651,7 +718,9 @@ in the VM, as the org user:
     desk/scratch/            the manager's throwaway clones
     specs/<spec>/spec.md     approved, read-only; meta.json holds the sha256 and version
     runs/<run>/run.json      where it runs
-    runs/<run>/mirror/       status.json, plan.frozen.md, report.md, actuals.json, events.jsonl
+    runs/<run>/machine.jsonl what the container measured, one line per measurement; kept after its deletion
+    runs/<run>/mirror/       status.json, plan.frozen.md, report.md, actuals.json, events.jsonl,
+                             runner.log (the last 5 MB, copied when the machine is deleted)
     budget.json              weekly-limit readings
     drain.json               there while a drain is in force
     graph.json               there once a spec with `after` was dispatched: this ledger has a plan
@@ -881,8 +950,11 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
   instant of a pause; with no `notify.url` a pause shows only in `org status` and the dashboard.
 - **Nothing starts by itself.** After the Mac restarts, `org-vm up` brings the VM and the tokens
   back and `org resume --interrupted` restarts the runners. Until then nothing runs.
-- **Containers stay.** A finished run's container is kept until `org machine rm`; nothing
-  reclaims the disk by itself.
+- **A finished run's container is deleted, and not undoably.** The next pump after a run is over
+  and copied deletes it without asking; the first pump after upgrading to this version does so for
+  every run that was already finished. Only the report, the mirror, the measurements and what was
+  pushed remain. `machines.after_finish keep` turns it off. The build cache's container, the
+  template, old releases and old templates are not deleted and nothing reclaims their disk.
 - **One engineer per spec.** Width comes from the engineer's subagents and from running several
   specs at once.
 - **All engineers and you share one weekly limit.** A run that hits it waits for the reset and

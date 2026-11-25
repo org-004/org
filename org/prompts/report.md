@@ -14,7 +14,7 @@ These numbers are measurements, not your recollection. Use them as they are.
 
 {{repo_checks}}
 
-Anything listed as uncommitted or unpushed is lost when this machine is deleted. Unless delivery is `none`, commit and push it now, and if delivery is `merge` and the work is verified and not yet landed, land it on the default branch as your instructions describe: one squashed commit, pushed, never forced.
+Anything listed as uncommitted or unpushed is lost: this machine is deleted as soon as the run ends, and only the report and what was pushed survive. Evidence the report relies on (a proof's output, measurements, pictures) must be in the report itself or pushed. Unless delivery is `none`, commit and push it now, and if delivery is `merge` and the work is verified and not yet landed, land it on the default branch as your instructions describe: one squashed commit, pushed, never forced.
 
 ## What to do
 
