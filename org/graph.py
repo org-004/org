@@ -43,7 +43,8 @@ What this module keeps on a run's record (run.json):
 
 A record is written only under the lock that its other writers use: the placement lock
 (`dispatch._placing`) for a queued run, the run's `.sync.lock` for one that sync still pulls, and
-`tick`'s own lock for a run that is final, which nothing else writes.
+`tick`'s own lock for a run that is final. The one other writer of a final run's record, the
+deleting of its machine (org/dispatch.py), takes that lock for its write through `writing`.
 """
 from __future__ import annotations
 
@@ -577,7 +578,7 @@ def _resume(ledger: Ledger, run_id: str, rec: dict, why: str, cfg: dict, log) ->
         rec.pop("dead_since", None)
         ledger.save_run(run_id, rec)
         log("plans: resuming %s: %s" % (run_id, why))
-        dispatch.resume(ledger, run_id, log)
+        dispatch.resume(ledger, run_id, log, locked=True)  # the run's lock is held here already
         notify.alert(ledger, run_id, "resume", "%s; resumed (%d of %d)" % (why, n, limit))
 
 

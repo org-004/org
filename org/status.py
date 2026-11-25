@@ -9,7 +9,7 @@ import re
 import shutil
 from typing import List, Optional
 
-from . import budget, dispatch, graph, spec
+from . import budget, dispatch, graph, notify, spec
 from .ledger import Ledger
 from .runner import TERMINAL_STATES
 from .sync import sync_all
@@ -41,6 +41,8 @@ def telemetry_view(rec: dict) -> dict:
         return {"measured": False, "why": "no machine was started, so nothing was measured"}
     if kind not in MEASURED_KINDS:
         return {"measured": False, "why": "%s machines are not measured" % kind}
+    if not rec.get("final") and not rec.get("machine_removed_at"):
+        return {"measured": False, "why": "no measurement yet: the first is taken within a minute of the run's start"}
     return {"measured": False, "why": "no measurement was taken: the run ended before org measured containers"}
 
 
@@ -123,11 +125,13 @@ def machine_line(v: dict) -> str:
 
 
 def _text(x, n=200) -> Optional[str]:
-    return x[:n] if isinstance(x, str) else None
+    # Through `notify.plain`: a branch name or a commit subject may carry a terminal's escape
+    # codes, and `org review` prints these in the owner's terminal.
+    return notify.plain(x)[:n] if isinstance(x, str) else None
 
 
 def _strings(x, cap: int) -> List[str]:
-    return [i[:200] for i in x if isinstance(i, str)][:cap] if isinstance(x, list) else []
+    return [notify.plain(i)[:200] for i in x if isinstance(i, str)][:cap] if isinstance(x, list) else []
 
 
 def clean_leftover(raw) -> List[dict]:
@@ -179,7 +183,8 @@ def run_view(ledger: Ledger, run_id: str, rate: Optional[float]) -> dict:
     machine = rec.get("machine") or {}
     activity = st.get("activity") or {}
     removed = bool(rec.get("machine_removed_at"))
-    warnings = list(st.get("warnings") or [])
+    # status.json is the engineer's machine's: a `warnings` that is not a list of strings is none.
+    warnings = [w for w in st["warnings"] if isinstance(w, str)] if isinstance(st.get("warnings"), list) else []
     if removed:
         # The work the runner said was still there went with the machine, so the sentence must not offer it.
         warnings = [_STILL_HAS.sub(r"\1: \2 uncommitted file(s) and \3 unpushed commit(s) were deleted with the machine", w)

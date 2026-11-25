@@ -286,7 +286,9 @@ class Incus(Transport):
         try:
             data = json.loads(p.stdout.decode("utf-8", "replace"))
         except ValueError:
-            return None
+            # Not None: None says Incus does not know the container, and on that word a finished
+            # run's machine is recorded as gone.
+            raise TransportError("incus list did not answer in JSON")
         for entry in data if isinstance(data, list) else []:
             if isinstance(entry, dict) and entry.get("name") == container:
                 return entry

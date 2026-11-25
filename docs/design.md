@@ -410,7 +410,7 @@ is shown afterwards as what was deleted with the machine, and the runner also wr
 `status.json` what it was (branch names, up to 20 commit subjects, up to 50 paths per clone), which
 `org review` prints. The deletion is not undoable.
 
-**The setting.** `machines.after_finish`: absent or `delete` is the rule above; `keep` is the old
+**The setting.** `machines.after_finish`: absent (the key is not there) or `delete` is the rule above; `keep` is the old
 behaviour, where nothing is deleted until `org machine rm <run>`. Any other value is treated as
 `keep`, because a mistyped setting must never delete, and `org doctor` has a row that says the value
 is not understood. Changing `keep` back to `delete` deletes everything finished at the next pump.
@@ -426,6 +426,13 @@ the deletion goes ahead: where the two pull apart, the measurements lose. A cont
 longer knows, or one that never existed (a run stopped while queued), is marked removed without an
 error and without a warning. A machine org did not make (`remove` returns `None`: ssh, local) is
 not touched and not marked.
+
+A run stopped while it was queued had a machine chosen and never made: it is marked removed with
+no measurement and no call to a backend, since a name that was never made may be another's. The
+machines of several finished runs are measured and deleted side by side, eight at a time, so that
+the first pump after an upgrade waits for the slowest of them and not for their sum. An answer from
+Incus that is not JSON is an error, not "no such container": on that word a run is recorded as
+having no machine.
 
 **The failure path.** A deletion that fails is recorded on the run as `machine_remove_error`: the
 error's text, when, and how many tries. It shows as a warning in `org status` and in the run view,
@@ -1179,8 +1186,9 @@ none is claimed for this layout.
 - The limits hold against two pumps at once and against a process that ends between two steps: a
   verdict that was recorded and not acted on becomes a pause, and a pause is told again rather
   than never. One thing the owner does at the same instant as a pump is not guarded: `org sync
-  <run>` writes a run's record without its lock, as it did before plans, and could undo a count
-  or a review that was just written. A review still running when its
+  <run>` writes a final run's record under the run's lock and not the tick's, and could undo a count
+  or a review that was just written. It leaves a run whose machine is deleted alone: sync would never
+  ask a machine that is gone, and the run would stay not final for good. A review still running when its
   spec is approved again or dispatched again by hand is left to end by itself, and its cost is
   not recorded.
 - The Docker plugin's host script still asks for a whole GitHub login and should not be used.

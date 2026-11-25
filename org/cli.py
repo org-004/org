@@ -211,9 +211,17 @@ def cmd_sync(args) -> int:
     ledger = Ledger(args.home)
     only = [need_run(ledger, args.run)] if args.run else None
     if only:
-        rec = ledger.run(only[0])
-        rec["final"] = False  # an explicit sync always asks the machine
-        ledger.save_run(only[0], rec)
+        # Under the run's lock, and never for a run whose machine is deleted: sync would not ask a
+        # machine that is gone, so the run would stay not final for good, and a plan that waits
+        # on it would wait for ever.
+        with ledger.run_lock(only[0], wait=10) as held:
+            rec = ledger.run(only[0])
+            if rec.get("machine_removed_at"):
+                print("%s: its machine was deleted; the ledger has all there is of it" % only[0])
+                return 0
+            if held:
+                rec["final"] = False  # an explicit sync always asks the machine
+                ledger.save_run(only[0], rec)
     for rec in sync.sync_all(ledger, only):
         ok = "ok" if rec.get("reachable") else ("unreachable: " + str(rec.get("last_error")))
         print("%-34s %-12s %s" % (rec.get("run_id"), rec.get("state"), ok))
@@ -361,7 +369,7 @@ def cmd_stop(args) -> int:
     run_id = need_run(ledger, args.run)
     try:
         print(dispatch.stop(ledger, run_id))
-    except (TransportError, BackendError) as e:
+    except (TransportError, BackendError, dispatch.DispatchError) as e:
         die(e)
     return 0
 
@@ -413,10 +421,13 @@ def cmd_machine(args) -> int:
     run_id = need_run(ledger, args.run)
     rec = sync.sync_run(ledger, run_id)
     status = read_json(ledger.mirror_dir(run_id) / "status.json") or {}
-    if not rec.get("final") and not args.force:
+    # A machine that is already deleted is not refused for what the run left on it: asking again
+    # only gets the backend's answer that it is gone.
+    gone = bool(rec.get("machine_removed_at"))
+    if not rec.get("final") and not args.force and not gone:
         die("%s is not finished and fully synced (state %s); `org stop` it first, or pass --force to delete the machine anyway"
             % (run_id, rec.get("state")))
-    if status.get("warnings") and not args.force:
+    if status.get("warnings") and not args.force and not gone:
         die("the run left warnings (work that may exist only on the machine):\n  " + "\n  ".join(status["warnings"])
             + "\npass --force to delete the machine anyway")
     try:

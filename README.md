@@ -343,7 +343,9 @@ is not understood. Changing back to `delete` deletes everything finished at the 
 
 **Upgrading to this version deletes containers.** There is no cut-off date: the first pump after
 `org upgrade` deletes the container of every run that was already finished, taking one last
-measurement of each first. It cannot be undone. If any of the finished containers there now are
+measurement of each first. It cannot be undone. That pump measures and deletes up to eight
+containers side by side and waits for them, so the first `org status` after the upgrade, or the
+dashboard's first pass, may take a minute or more where the containers hold much. If any of the finished containers there now are
 wanted, run `org config set machines.after_finish keep` before upgrading, and copy out what is
 needed. What `org machine rm` still does is for what is left: a run under `keep`, and a run that
 is not final, with `--force`.

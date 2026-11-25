@@ -356,6 +356,26 @@ class FailedDeletions(TeardownCase):
         self.assertEqual(self.deletes(), [])
 
 
+class SeveralAtOnce(TeardownCase):
+    def test_the_machines_of_several_finished_runs_are_measured_and_deleted_side_by_side(self):
+        names = [self.finished("91%d-old-r1" % i) for i in range(4)]
+
+        def slow(ledger, run_id, rec, last=False):
+            time.sleep(0.5)  # an Incus that takes its time over each measurement
+            return None
+
+        started = time.time()
+        with mock.patch.object(dispatch.telemetry, "take", slow):
+            self.assertEqual(len(dispatch.teardown(self.ledger)), 4)
+        self.assertLess(time.time() - started, 1.9, "four measurements of half a second each, waited for side by side")
+        self.assertTrue(not any(self.box(n).exists() for n in names))
+
+    def test_a_failure_dated_in_the_future_does_not_hold_the_retry_back(self):
+        name = self.finished("915-clock-r1", machine_remove_error={"error": "busy", "at": time.time() + 86400, "tries": 2})
+        self.assertEqual(dispatch.teardown(self.ledger), ["915-clock-r1"])
+        self.assertFalse(self.box(name).exists())
+
+
 class TwoPumps(TeardownCase):
     def test_two_pumps_at_once_delete_each_machine_once_and_lose_nothing(self):
         names = {"90%d-both-r1" % i: self.finished("90%d-both-r1" % i) for i in range(1, 5)}
@@ -415,11 +435,34 @@ class WhatIsLeftAlone(TeardownCase):
         dispatch.drain(self.ledger, "for the test")
         run_id, rec = dispatch.dispatch(self.ledger, self.approved(), log=lambda m: None)
         self.assertEqual(dispatch.stop(self.ledger, run_id), "removed from the queue")
+        before = len(self.calls())
         self.assertEqual(dispatch.pump(self.ledger), [])
         rec = self.removed(run_id)
         self.assertEqual(rec["state"], "stopped")
         self.assertEqual(self.deletes(), [])
         self.assertFalse(self.box(rec["machine"]["name"]).exists())
+        # Its machine was chosen and never made: Incus is not asked about it and nothing is measured.
+        self.assertEqual(self.calls()[before:], [])
+        self.assertNotIn("telemetry", rec)
+        self.assertFalse((self.ledger.run_dir(run_id) / "machine.jsonl").exists())
+
+    def test_a_docker_run_stopped_while_queued_never_reaches_the_backend(self):
+        self.finished("907-queued-r1", state="stopped", make=False, error=dispatch.STOPPED_WHILE_QUEUED,
+                      machine={"kind": "docker", "name": "org-eng-907-queued-r1"})
+        with mock.patch.object(dispatch.backends, "get", side_effect=AssertionError("no backend is asked")):
+            self.assertEqual(dispatch.teardown(self.ledger), ["907-queued-r1"])
+        self.removed("907-queued-r1")
+
+    def test_an_answer_from_incus_that_is_not_json_does_not_pass_for_a_container_that_is_gone(self):
+        name = self.finished("908-garbled-r1")
+        from org.transport import Incus
+        answered = subprocess.CompletedProcess(["incus"], 0, stdout=b"<html>502</html>", stderr=b"")
+        with mock.patch.object(Incus, "incus", staticmethod(lambda args, timeout=180, input=b"": answered)):
+            self.assertEqual(dispatch.teardown(self.ledger), [])
+        rec = self.ledger.run("908-garbled-r1")
+        self.assertTrue(self.box(name).exists())
+        self.assertEqual((rec.get("machine_removed_at"), rec["machine_remove_error"]["tries"]), (None, 1))
+        self.assertIn("JSON", rec["machine_remove_error"]["error"])
 
 
 class TheSetting(TeardownCase):
@@ -447,8 +490,17 @@ class TheSetting(TeardownCase):
         self.assertTrue(self.box(name).exists())
         self.assertEqual(self.deletes(), [])
 
-    def test_after_finish_absent_null_or_delete_deletes(self):
-        for how in ({"absent": True}, {"value": None}, {"value": dispatch.AFTER_FINISH_DELETE}):
+    def test_after_finish_null_is_a_value_not_understood_and_keeps(self):
+        self.after_finish_is(None)
+        cfg = self.ledger.config()
+        self.assertEqual(dispatch.after_finish(cfg), dispatch.AFTER_FINISH_KEEP)
+        self.assertIn("null", dispatch.after_finish_problem(cfg))
+        name = self.finished("909-kept-r1")
+        self.assertEqual(dispatch.teardown(self.ledger), [])
+        self.assertTrue(self.box(name).exists())
+
+    def test_after_finish_absent_or_delete_deletes(self):
+        for how in ({"absent": True}, {"value": dispatch.AFTER_FINISH_DELETE}):
             self.after_finish_is(**how)
             cfg = self.ledger.config()
             self.assertEqual((dispatch.after_finish(cfg), dispatch.after_finish_problem(cfg)), (dispatch.AFTER_FINISH_DELETE, None), how)
@@ -532,6 +584,49 @@ class Afterwards(TeardownCase):
     def org(self, *args):
         return subprocess.run([sys.executable, "-m", "org", "--home", str(self.ledger.root)] + list(args), capture_output=True,
                               text=True, cwd=str(ROOT), stdin=subprocess.DEVNULL, timeout=60)
+
+    def test_org_sync_of_a_run_whose_machine_is_deleted_leaves_it_final(self):
+        self.finished("921-synced-r1")
+        self.assertEqual(dispatch.teardown(self.ledger), ["921-synced-r1"])
+        p = self.org("sync", "921-synced-r1")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("its machine was deleted", p.stdout)
+        rec = self.ledger.run("921-synced-r1")
+        self.assertEqual((rec["final"], bool(rec["machine_removed_at"])), (True, True))
+
+    def test_org_stop_and_org_machine_rm_say_in_a_sentence_that_the_machine_is_gone(self):
+        self.finished("922-gone-r1")
+        mirror = self.ledger.mirror_dir("922-gone-r1")
+        mirror.mkdir(parents=True, exist_ok=True)
+        write_json(mirror / "status.json", {"state": "done", "warnings": ["/w/api still has 1 uncommitted file(s) and 0 unpushed commit(s)"]})
+        self.assertEqual(dispatch.teardown(self.ledger), ["922-gone-r1"])
+        p = self.org("stop", "922-gone-r1")
+        self.assertEqual((p.returncode, "Traceback" in p.stderr), (1, False))
+        self.assertIn("has no machine to reach (removed)", p.stderr)
+        p = self.org("machine", "rm", "922-gone-r1")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("was already gone", p.stdout)
+
+    def test_the_plans_tick_resumes_a_run_under_the_lock_it_already_holds(self):
+        from org import graph
+        self.finished("923-died-r1", state="executing", final=False, alive=False)
+        rec = self.ledger.run("923-died-r1")
+        with mock.patch.object(graph, "over_budget", return_value=None), mock.patch.object(dispatch, "resume", return_value="nohup") as resume:
+            graph._resume(self.ledger, "923-died-r1", rec, "its runner died", self.ledger.config(), lambda m: None)
+        self.assertEqual((resume.call_count, resume.call_args.kwargs.get("locked")), (1, True))
+
+    def test_resume_for_a_caller_that_holds_the_runs_lock_does_not_wait_for_itself(self):
+        self.finished("924-died-r1", state="executing", final=False, alive=False)
+        tr, backend = mock.Mock(), mock.Mock()
+        tr.run.return_value = mock.Mock(stdout=b"nohup\n")
+        backend.resume_facts.return_value, backend.build_cache.return_value = {}, None
+        started = time.time()
+        with self.ledger.run_lock("924-died-r1") as held, mock.patch.object(dispatch.backends, "get", return_value=backend), \
+                mock.patch.object(dispatch, "for_machine", return_value=tr), mock.patch.object(dispatch, "push_logins"):
+            self.assertTrue(held)
+            self.assertEqual(dispatch.resume(self.ledger, "924-died-r1", locked=True), "nohup")
+        self.assertLess(time.time() - started, 5)
+        self.assertTrue(self.ledger.run("924-died-r1").get("resumed_at"))
 
     def test_machine_rm_still_works_under_keep_and_with_force_for_a_run_not_final(self):
         self.after_finish_is(dispatch.AFTER_FINISH_KEEP)

@@ -247,5 +247,28 @@ class Scorecard(Case):
         self.assertIn("19 processes killed for memory", text)
 
 
+class FromTheEngineersMachine(Case):
+    """status.json is written on the engineer's machine: whatever it holds must break nothing here."""
+
+    def test_warnings_that_are_not_a_list_of_strings_break_nothing(self):
+        for bad in (5, True, "x", {"a": 1}, [1, None, "kept"]):
+            v = self.run_with(st={"warnings": bad})
+            self.assertEqual(v["warnings"], ["kept"] if isinstance(bad, list) else [], bad)
+
+    def test_escape_codes_in_what_was_left_never_reach_the_terminal(self):
+        left = [{"path": "/w/\x1b]52;c;aGk=\x07r", "branch": "b", "branches": ["x\x1b[2J"], "commits": ["\x1b[31mevil\rX"],
+                 "commits_total": 1, "files": ["a\x07"], "files_total": 1}]
+        self.run_with(self.removed(), st={"leftover": left})
+        text = status.scorecard(self.ledger, RUN)
+        for code in ("\x1b", "\x07", "\r"):
+            self.assertNotIn(code, text)
+        self.assertIn("evil", text)
+
+    def test_a_run_still_going_and_not_yet_measured_says_so(self):
+        v = self.run_with({"final": False, "state": "executing"}, st={"state": "executing"})
+        self.assertEqual(v["telemetry"]["measured"], False)
+        self.assertIn("no measurement yet", v["telemetry"]["why"])
+
+
 if __name__ == "__main__":
     unittest.main()

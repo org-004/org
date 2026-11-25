@@ -34,6 +34,13 @@
 # holds Debian 13, and needs the internet to pull it when it does not.
 set -u
 
+# Never on the VM. It is refused where the installation shows: an `org` user on this machine, or
+# engineers' containers (the default prefix) in any project of this Incus.
+if getent passwd org >/dev/null 2>&1 || incus list --all-projects -f csv -c n </dev/null 2>/dev/null | grep -q '^org-eng-'; then
+  printf 'FAIL: this machine has an `org` user or containers named org-eng-*: it looks like the installation, where this must never run\n'
+  exit 1
+fi
+
 root=$(cd "$(dirname "$0")/.." && pwd -P)
 tag="orgtd$$"
 base="$tag-base"

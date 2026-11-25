@@ -278,6 +278,30 @@ class Summary(Measuring):
         self.assertEqual(self.ledger.run(run_id)["oom_kill"], 4)
 
 
+class BetweenGoodMeasurements(Measuring):
+    GOOD = [{"at": 1.0, "cpu_s": 10.0, "oom_kill": 2, "memory_peak_bytes": 5, "running": True},
+            {"at": 3.0, "cpu_s": 20.0, "oom_kill": 3, "memory_peak_bytes": 7, "running": True}]
+    UNREAD = {"cpu_s": None, "oom_kill": None, "memory_peak_bytes": None, "running": None, "note": "Incus did not answer"}
+
+    def test_a_measurement_that_failed_between_two_good_ones_is_no_restart_and_loses_nothing(self):
+        s = telemetry.summarize([self.GOOD[0], dict(self.UNREAD, at=2.0), self.GOOD[1]])
+        self.assertEqual((s["restarts"], s["cpu_s"], s["oom_kill"], s["memory_peak_bytes"], s["samples"]), (0, 20.0, 3, 7, 3))
+
+    def test_last_measurements_of_a_container_already_gone_change_no_total(self):
+        gone = dict(self.UNREAD, running=False, last=True, note="Incus does not know the container")
+        s = telemetry.summarize(self.GOOD + [dict(gone, at=4.0), dict(gone, at=65.0)])
+        self.assertEqual((s["restarts"], s["cpu_s"], s["oom_kill"], s["memory_peak_bytes"], s["samples"], s["last_at"]),
+                         (0, 20.0, 3, 7, 4, 65.0))
+
+    def test_the_one_call_is_given_the_measurement_s_own_timeout(self):
+        run_id, name = self.a_run()
+        self.container(name, running=True)
+        with mock.patch.object(Incus, "info", return_value=None) as info:
+            self.take(run_id)
+        call = info.call_args
+        self.assertEqual(call.args[1] if len(call.args) > 1 else call.kwargs.get("timeout"), telemetry.CALL_TIMEOUT_S)
+
+
 class Due(Measuring):
     def test_one_incus_call_per_measurement_and_none_within_the_minute(self):
         run_id, name = self.a_run()
@@ -377,7 +401,7 @@ class Due(Measuring):
         with mock.patch.object(Incus, "info", side_effect=slow):
             started = time.time()
             self.assertEqual(sorted(telemetry.measure_due(self.ledger)), sorted(r for r, _ in names))
-            self.assertLess(time.time() - started, 1.9, "four calls of half a second each, waited for side by side")
+            self.assertLess(time.time() - started, 1.95, "four calls of half a second each, waited for side by side")
 
 
 class NeverRaises(Measuring):

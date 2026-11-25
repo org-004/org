@@ -24,7 +24,8 @@ import os
 import subprocess
 import tarfile
 import time
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -508,6 +509,8 @@ def pump(ledger: Ledger, log=lambda message: None) -> List[str]:
 # no new place calls `incus delete` counts added lines here that carry that word in double quotes.
 AFTER_FINISH_DELETE, AFTER_FINISH_KEEP = 'delete', 'keep'
 REMOVE_RETRY_S = 60  # a deletion that failed is tried again no more often than this
+TEARDOWN_WORKERS = 8  # how many finished runs' machines one pump measures and deletes side by side
+STOPPED_WHILE_QUEUED = "stopped while queued"  # the error `stop` writes on a run that never had a machine
 
 
 def after_finish(cfg: dict) -> str:
@@ -515,22 +518,26 @@ def after_finish(cfg: dict) -> str:
     is absent or says so, AFTER_FINISH_KEEP when it says keep or anything else. A value that is
     not understood must never delete; `after_finish_problem` is what `org doctor` says of it."""
     value = _after_finish_value(cfg)
-    return AFTER_FINISH_DELETE if value is None or (isinstance(value, str) and value == AFTER_FINISH_DELETE) else AFTER_FINISH_KEEP
+    return AFTER_FINISH_DELETE if value is _ABSENT or (isinstance(value, str) and value == AFTER_FINISH_DELETE) else AFTER_FINISH_KEEP
 
 
 def after_finish_problem(cfg: dict) -> Optional[str]:
     """Why machines.after_finish is not understood, as a sentence, or None when it is absent or one of the two values."""
     value = _after_finish_value(cfg)
-    if value is None or (isinstance(value, str) and value in (AFTER_FINISH_DELETE, AFTER_FINISH_KEEP)):
+    if value is _ABSENT or (isinstance(value, str) and value in (AFTER_FINISH_DELETE, AFTER_FINISH_KEEP)):
         return None
     return ("machines.after_finish is %s, which is neither %s nor %s, so it is treated as %s and finished runs' "
             "machines are kept" % (json.dumps(value), AFTER_FINISH_DELETE, AFTER_FINISH_KEEP, AFTER_FINISH_KEEP))
 
 
+_ABSENT = object()  # machines.after_finish is not in the config at all, which is not the same as null
+
+
 def _after_finish_value(cfg: dict):
-    # A `machines` that is not a table says nothing about this, as if it were absent.
+    # A `machines` that is not a table says nothing about this, as if it were absent. A key that
+    # is there with null is a value that is not understood, and so keeps.
     machines = (cfg or {}).get("machines") if isinstance(cfg, dict) else None
-    return machines.get("after_finish") if isinstance(machines, dict) else None
+    return machines.get("after_finish", _ABSENT) if isinstance(machines, dict) else _ABSENT
 
 
 def _deletes(backend: backends.Backend) -> bool:
@@ -548,7 +555,8 @@ def _teardown_due(rec: dict) -> bool:
     failed = rec.get("machine_remove_error")
     if isinstance(failed, dict):
         try:
-            if now() - float(failed.get("at") or 0) < REMOVE_RETRY_S:
+            # A failure dated in the future (the clock was set back) does not hold the retry back.
+            if 0 <= now() - float(failed.get("at") or 0) < REMOVE_RETRY_S:
                 return False
         except (TypeError, ValueError):
             pass  # a time that cannot be read does not hold the deletion back for ever
@@ -578,14 +586,28 @@ def teardown(ledger: Ledger, log=lambda message: None) -> List[str]:
     except Exception as e:  # a ledger that cannot be read now is read again by the next pump
         log("teardown: %s: %s" % (type(e).__name__, e))
         return []
-    gone = []
+    due = []
     for run_id in run_ids:
         try:
-            if _teardown_due(ledger.run(run_id)) and teardown_run(ledger, run_id, cfg, log):
-                gone.append(run_id)
+            if _teardown_due(ledger.run(run_id)):
+                due.append(run_id)
+        except Exception as e:
+            log("%s: its record could not be read: %s: %s" % (run_id, type(e).__name__, e))
+
+    def one(run_id: str) -> bool:
+        try:
+            return teardown_run(ledger, run_id, cfg, log)
         except Exception as e:  # one run's trouble must not keep the others' machines standing
             log("%s: its machine was not deleted: %s: %s" % (run_id, type(e).__name__, e))
-    return gone
+            return False
+
+    if not due:
+        return []
+    # Side by side: the first pump after an upgrade finds every finished run's machine at once,
+    # and one after another a pump would wait for the sum of their measurements and deletions.
+    with ThreadPoolExecutor(max_workers=min(TEARDOWN_WORKERS, len(due))) as pool:
+        done = list(pool.map(one, due))
+    return [run_id for run_id, ok in zip(due, done) if ok]
 
 
 def teardown_run(ledger: Ledger, run_id: str, cfg: dict, log=lambda message: None) -> bool:
@@ -604,6 +626,11 @@ def teardown_run(ledger: Ledger, run_id: str, cfg: dict, log=lambda message: Non
         machine = rec.get("machine")
         if not isinstance(machine, dict) or not machine.get("name"):
             # Nothing was ever made for it, so there is nothing to delete and nothing to warn of.
+            _mark_removed(ledger, run_id, rec, "teardown")
+            return True
+        if rec.get("error") == STOPPED_WHILE_QUEUED and not rec.get("dispatched_at"):
+            # It was stopped in the queue: its machine was chosen and never made. Nothing is
+            # measured and no backend is asked, since a name that was never made may be another's.
             _mark_removed(ledger, run_id, rec, "teardown")
             return True
         try:
@@ -635,7 +662,7 @@ def teardown_run(ledger: Ledger, run_id: str, cfg: dict, log=lambda message: Non
         return True
 
 
-RUNNER_LOG_TAIL = 5_000_000  # what is kept of a run's runner.log: its last 5 MB, as text
+RUNNER_LOG_TAIL = 5_000_000  # what is kept of a run's runner.log: its last 5 MB, cut as bytes and kept as text
 
 
 def _keep_runner_log(ledger: Ledger, run_id: str, rec: dict, cfg: dict) -> None:
@@ -649,7 +676,7 @@ def _keep_runner_log(ledger: Ledger, run_id: str, rec: dict, cfg: dict) -> None:
                                                  timeout=30, check=False)
         if p.returncode != 0 or not p.stdout:
             return
-        text = p.stdout.decode("utf-8", "replace")[-RUNNER_LOG_TAIL:]
+        text = p.stdout[-RUNNER_LOG_TAIL:].decode("utf-8", "replace")
         mirror = ledger.mirror_dir(run_id)
         mirror.mkdir(parents=True, exist_ok=True)
         (mirror / "runner.log").write_text(text, encoding="utf-8")
@@ -717,13 +744,15 @@ def machine_run(ledger: Ledger, run_id: str, script: str, timeout: float = 60, i
 def stop(ledger: Ledger, run_id: str) -> str:
     """Ask the runner to stop. It ends the engineer's turn and records the run as stopped."""
     rec = ledger.run(run_id)
+    if rec.get("machine_removed_at"):
+        raise DispatchError("%s has no machine to reach (removed), so there is no runner to stop" % run_id)
     if rec.get("state") == "queued":
         # Under the placement lock, as every other writer of a queued run's record is (`start`,
         # and the holds of org/graph.py): written beside one of them, the run could come back queued.
         with _placing(ledger):
             rec = ledger.run(run_id)
             if rec.get("state") == "queued":
-                rec.update(state="stopped", final=True, error="stopped while queued")
+                rec.update(state="stopped", final=True, error=STOPPED_WHILE_QUEUED)
                 ledger.save_run(run_id, rec)
                 return "removed from the queue"
     tr = for_machine(rec["machine"], ledger.config())
@@ -739,13 +768,15 @@ _NEW_FACTS = ('python3 -c \'import json, os, sys\np = sys.argv[1]\njob = json.lo
               'open(p + ".new", "w").write(json.dumps(job, indent=2))\nos.replace(p + ".new", p)\' "%s/job.json"')
 
 
-def resume(ledger: Ledger, run_id: str, log=lambda message: None) -> str:
+def resume(ledger: Ledger, run_id: str, log=lambda message: None, locked: bool = False) -> str:
     """Restart the runner for a run whose process died. It continues from its saved state.
 
     Under the run's lock for the whole of it: a pump that would delete the machine of a run that
     was final reads the record again under the same lock, and finds it made not final here.
+    `locked` says the caller holds that lock already (the plan's tick does, org/graph.py): asking
+    for it a second time from the same process would wait for itself and then refuse.
     """
-    with ledger.run_lock(run_id, wait=10) as held:
+    with (nullcontext(True) if locked else ledger.run_lock(run_id, wait=10)) as held:
         if not held:
             raise DispatchError("%s is being synced or its machine removed by another process; try again in a moment" % run_id)
         rec = ledger.run(run_id)
