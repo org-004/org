@@ -14,6 +14,12 @@ Event shapes were taken from Claude Code 2.1.322 (`claude -p --output-format str
                          model_usage_since_last_result, structured_output, result
 
 Unknown event types and missing fields are ignored: the stream grows new ones between versions.
+
+One process may print several `result` events: an API error after the turn's own result, and
+a result with `num_turns: 0` after each wake-up for background work. Each is closed with its own
+cost. A result whose `model_usage_since_last_result` is present and empty (`{}`) used no tokens
+and costs nothing; `total_cost_usd` is cumulative over the session and is never charged whole
+when the per-turn field is there.
 """
 from __future__ import annotations
 
@@ -122,11 +128,12 @@ class Meter:
     """Accumulates one run's spend and activity across turns."""
 
     def __init__(self, prices: Dict[str, Dict[str, float]], confirmed_usd: float = 0.0, by_model: Optional[dict] = None,
-                 cumulative: Optional[dict] = None):
+                 cumulative: Optional[dict] = None, totals: Optional[dict] = None):
         self.prices = prices
         self.confirmed_usd = confirmed_usd  # sum of the CLI's own per-turn costs
         self.by_model: Dict[str, Dict[str, float]] = by_model or {}
         self.cumulative: Dict[str, dict] = cumulative or {}  # session id -> last cumulative modelUsage
+        self.totals: Dict[str, float] = totals or {}  # session id -> last cumulative total_cost_usd
         self.correction: Dict[str, float] = {}  # model -> CLI cost / table cost, last turn
         self._turn: Dict[str, Any] = {}  # message id -> (model, usage) for the turn in flight
         self.session_id: Optional[str] = None
@@ -158,12 +165,13 @@ class Meter:
 
         `total_cost_usd` and `modelUsage` are cumulative over a session, across resumed
         invocations (seen in 2.1.322: 0.106, 0.232, 0.362 for three turns). The per-turn figure is
-        `model_usage_since_last_result`. If a CLI version omits it, difference the cumulative one.
+        `model_usage_since_last_result`; `{}` there means the turn used no tokens (an API error,
+        a wake-up with nothing to do). If a CLI version omits it, difference the cumulative one.
         """
         since = ev.get("model_usage_since_last_result")
         cumulative = ev.get("modelUsage") or {}
-        sid = ev.get("session_id") or self.session_id or "?"
-        if since is None:
+        sid = self._sid(ev)
+        if not isinstance(since, dict):
             before, since = self.cumulative.get(sid) or {}, {}
             for model, m in cumulative.items():
                 p = before.get(model) or {}
@@ -174,12 +182,32 @@ class Meter:
             self.cumulative[sid] = {model: {k: m.get(k) or 0 for k in CUMULATIVE_KEYS} for model, m in cumulative.items()}
         return since
 
+    def _sid(self, ev: dict) -> str:
+        return ev.get("session_id") or self.session_id or "?"
+
+    def _turn_cost(self, ev: dict, per_model: dict) -> float:
+        """What this result cost, from the most specific figure the CLI gave.
+
+        The per-turn field, when present, decides, even when empty. Without it, the differenced
+        `modelUsage`. Without either, `total_cost_usd` less the last one seen for the session: the
+        whole figure for a session not seen before, or when it went backwards (a new process).
+        """
+        sid = self._sid(ev)
+        total = ev.get("total_cost_usd")
+        last = self.totals.get(sid)
+        if total is not None:
+            self.totals[sid] = float(total)
+        if isinstance(ev.get("model_usage_since_last_result"), dict) or ev.get("modelUsage"):
+            return sum((m.get("costUSD") or 0.0) for m in per_model.values())
+        if total is None:
+            return 0.0
+        if last is None or total < last:
+            return float(total)
+        return float(total) - last
+
     def _close_turn(self, ev: dict) -> dict:
         per_model = self._turn_usage(ev)
-        if per_model:
-            cost = sum((m.get("costUSD") or 0.0) for m in per_model.values())
-        else:
-            cost = ev.get("total_cost_usd") or 0.0
+        cost = self._turn_cost(ev, per_model)
         # How far off was the table for each model this turn?
         est: Dict[str, float] = {}
         for model, usage in self._turn.values():

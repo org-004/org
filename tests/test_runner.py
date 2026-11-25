@@ -180,6 +180,56 @@ class RunnerCase(unittest.TestCase):
             costs = [m["actual_cost_usd"] for m in read_json(self.run_dir / "actuals.json")["milestones"]]
             self.assertEqual(costs, [0.3, 0.3], msg=str(scenario))
 
+    def test_no_tokens_an_api_error_and_wake_ups_after_a_costly_turn_do_not_reach_the_cost_cap(self):
+        # Run 013: the plan, then a milestone process that printed an API error and wake-ups, each a
+        # result with the session's unchanged total and an empty per-turn field. Charged the total
+        # again for each, a run whose real spend is well inside its cap ends on the cost cap.
+        # The estimate is of what is left after planning, so that the plan fits the cap.
+        small = dict(PLAN, estimate={"wall_minutes": 35, "cost_usd": 0.3, "wall_minutes_p90": 60, "cost_usd_p90": 0.4})
+        plan = dict(PLAN_TURN, structured=small, cost=0.55)
+        turns = {"plan": plan, "milestone:M1": [{"api_error": True, "wakeups": 3}, dict(DONE("M1"), cost=0.1)],
+                 "milestone:M2": dict(DONE("M2"), cost=0.1), "report": dict(REPORT, cost=0.05)}
+        self.job(turns, caps={"max_cost_usd": 1.0})
+        self.go()
+        st = self.status()
+        self.assertEqual(st["state"], "done", st.get("end_reason"))
+        self.assertAlmostEqual(st["cost"]["confirmed_usd"], 0.55 + 0.1 + 0.1 + 0.05, places=6)
+        self.assertAlmostEqual(sum(r["usd"] for r in st["cost"]["by_model"].values()), 0.8, places=6)
+        self.assertEqual(st["warnings"], [])
+        self.assertEqual([c["label"] for c in self.calls()], ["plan", "milestone:M1", "milestone:M1", "milestone:M2", "report"])
+        events = [json.loads(line) for line in (self.run_dir / "events.jsonl").read_text().splitlines()]
+        self.assertEqual(sum(1 for e in events if e.get("type") == "result" and e.get("model_usage_since_last_result") == {}), 4)
+        self.assertEqual(list(read_json(self.run_dir / "state.json")["cumulative_total"].values()), [0.8])
+
+    def test_no_tokens_a_state_json_from_before_the_fix_is_read(self):
+        self.job({"plan": PLAN_TURN})
+        old = runner.Runner(self.run_dir)._new_state()
+        old.update(confirmed_usd=2.0, by_model={"claude-fable-5-2": {"usd": 2.0}}, cumulative={"s": {}})
+        (self.run_dir / "state.json").write_text(json.dumps(old))
+        r = runner.Runner(self.run_dir)
+        self.assertEqual(r.meter.totals, {})
+        self.assertEqual(r.meter.confirmed_usd, 2.0)
+
+    def test_a_meter_that_disagrees_with_its_per_model_rows_is_warned_about_once(self):
+        self.job({"plan": PLAN_TURN})
+        r = runner.Runner(self.run_dir)
+        r.state["estimated_usd"] = 0.4
+        r.meter.by_model = {"claude-fable-5-2": {"usd": 10.0}}
+        r.meter.confirmed_usd = 10.4 + 0.09  # within 1%: no warning
+        r._check_meter()
+        r.meter.confirmed_usd = 10.4 + 0.45  # over 1% but under $0.50: no warning
+        r._check_meter()
+        self.assertEqual(r.state["warnings"], [])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            r.meter.confirmed_usd = 43.4  # an empty turn charged a session's total of $33
+            r._check_meter()
+            r.meter.confirmed_usd = 80.0
+            r._check_meter()
+        self.assertEqual(len(r.state["warnings"]), 1)
+        self.assertIn("$43.00", r.state["warnings"][0])
+        self.assertIn("$10.00", r.state["warnings"][0])
+
     def test_infeasible_plan_ends_in_fail(self):
         plan = {"verdict": "infeasible", "summary": "Cannot.", "infeasible_reason": "The API it needs does not exist.",
                 "estimate": {"wall_minutes": 0, "cost_usd": 0}, "milestones": []}
