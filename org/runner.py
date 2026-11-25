@@ -104,6 +104,8 @@ class Runner:
         self.state = read_json(self.dir / "state.json") or self._new_state()
         self.meter = Meter(self.prices, self.state.get("confirmed_usd", 0.0), self.state.get("by_model") or {},
                            self.state.get("cumulative") or {})
+        # The last total_cost_usd of each session. A state.json written before it was kept has none.
+        self.meter.totals = self.state.get("cumulative_total") or {}
         self.stop_requested = False
         self.proc: Optional[subprocess.Popen] = None
         self._killed = False
@@ -148,6 +150,7 @@ class Runner:
         self.state["confirmed_usd"] = self.meter.confirmed_usd
         self.state["by_model"] = self.meter.by_model
         self.state["cumulative"] = self.meter.cumulative
+        self.state["cumulative_total"] = self.meter.totals
         write_json(self.dir / "state.json", self.state)
 
     def cost_cap(self) -> Optional[float]:
@@ -291,6 +294,23 @@ class Runner:
         if self._log:
             self._log.write(line + "\n")
             self._log.flush()
+
+    def _check_meter(self) -> None:
+        """Warn once when the counted spend and the per-model rows disagree.
+
+        Both come from the same results, so outside the table-priced estimates of turns that died
+        without a result they must agree. A gap means the meter charged something no model spent,
+        as it once did for turns that used no tokens; the run should show it while it is alive.
+        """
+        if self.state.get("meter_warned"):
+            return
+        counted = self.meter.confirmed_usd - self.state.get("estimated_usd", 0.0)
+        rows = sum((r.get("usd") or 0.0) for r in self.meter.by_model.values())
+        gap = abs(counted - rows)
+        if gap > 0.50 and gap > 0.01 * max(abs(counted), abs(rows)):
+            self.state["meter_warned"] = True
+            self.warn("the spend counted from the CLI's results (%s) differs from the sum of its per-model rows (%s); "
+                      "the cost figures of this run may be wrong" % (fmt_usd(counted), fmt_usd(rows)))
 
     def warn(self, text: str) -> None:
         if text not in self.state["warnings"]:
@@ -453,6 +473,7 @@ class Runner:
                         self.save_state()
                     if summary is not None:
                         result = summary
+                        self._check_meter()
                     self._echo_activity()
                     self._note_utilization()
             t = now()

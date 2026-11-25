@@ -15,7 +15,11 @@ by $FAKE_CLAUDE_SCENARIO:
     }
 
 A review is the turn "review:<run id>" when the scenario has that key, else "review". A turn entry may hold: structured, files, cost, sleep, die, prose, limit (seconds until reset),
-budget, subagents, no_session. Every invocation is appended to invocations.jsonl beside the
+budget, subagents, no_session, api_error, wakeups. `api_error` ends the turn as an API error that used
+no tokens: cumulative cost and usage unchanged and `model_usage_since_last_result: {}`, as Claude Code
+2.1.330 printed it in run 013. `wakeups: N` prints N further results after the turn's first, each after a
+`system/init`, with `num_turns: 0`, an empty `result` text and an empty per-turn field: a process woken
+for background work with nothing to do. Every invocation is appended to invocations.jsonl beside the
 scenario, so tests can assert on the flags and prompts the runner used.
 """
 import fcntl
@@ -138,6 +142,26 @@ def main():
         "status": "allowed", "resetsAt": resets, "rateLimitType": "seven_day",
         "unifiedWindows": {"seven_day": {"utilization": round(util, 4), "resetsAt": resets, "status": "allowed"}}}})
 
+    def unchanged(**fields):
+        """A result that used no tokens: the session's cumulative figures as they were, `{}` for this turn."""
+        now_ = json.loads((sessions / sid).read_text())
+        n = now_["turns"]
+        so_far = {model: {"inputTokens": 10 * n, "outputTokens": 500 * n, "cacheReadInputTokens": 20000 * n,
+                          "cacheCreationInputTokens": 3000 * n, "costUSD": now_["cost"]}} if n else {}
+        return dict({"type": "result", "subtype": "success", "session_id": sid, "duration_ms": 3, "total_cost_usd": now_["cost"],
+                     "modelUsage": so_far, "model_usage_since_last_result": {}, "permission_denials": []}, **fields)
+
+    def wake_ups():
+        for _ in range(int(entry.get("wakeups", 0))):
+            emit({"type": "system", "subtype": "init", "session_id": sid, "model": model, "cwd": os.getcwd(), "tools": []})
+            emit(unchanged(is_error=False, num_turns=0, result=""))
+
+    if entry.get("api_error"):
+        emit(unchanged(is_error=True, num_turns=1, api_error_status=529,
+                       result='API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'))
+        wake_ups()
+        return 1
+
     usage = {"input_tokens": 10, "output_tokens": 500, "cache_read_input_tokens": 20000, "cache_creation_input_tokens": 3000,
              "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 3000}}
     emit({"type": "assistant", "session_id": sid, "parent_tool_use_id": None, "message": {
@@ -193,11 +217,13 @@ def main():
         return 0
     if entry.get("prose") or "structured" not in entry:
         emit(dict(base, subtype="success", is_error=False, result=entry.get("prose") or "Done. Want me to continue?"))
+        wake_ups()
         return 0
     emit({"type": "assistant", "session_id": sid, "parent_tool_use_id": None, "message": {
         "id": "msg_" + uuid.uuid4().hex[:12], "model": model, "usage": usage,
         "content": [{"type": "tool_use", "id": "toolu_2", "name": "StructuredOutput", "input": entry["structured"]}]}})
     emit(dict(base, subtype="success", is_error=False, structured_output=entry["structured"], result=json.dumps(entry["structured"])))
+    wake_ups()
     return 0
 
 

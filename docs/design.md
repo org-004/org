@@ -771,8 +771,22 @@ original is kept read-only beside them.
 
 **Cost accounting.** The CLI's `total_cost_usd` is cumulative over a session, across resumed
 invocations; the per-turn figure is `model_usage_since_last_result`. The meter uses the per-turn
-figure and falls back to differencing the cumulative one. Inside a turn, spend is estimated from
-streamed token counts with a price table and corrected at the turn's end.
+figure whenever the field is present, and a present but empty field (`{}`) means the turn used no
+tokens and costs nothing: Claude Code prints that for an API error and for a wake-up with nothing to
+do. Without the field the meter differences the cumulative per-model `modelUsage`, and without that
+too it differences `total_cost_usd` against the last one seen for the session (the whole figure for
+a new session, or when it went backwards). The last of each is kept in `state.json` (`cumulative`,
+`cumulative_total`), so a restarted runner differences from where it stopped; a `state.json` without
+`cumulative_total` is read as having none. One `claude` process may print several results (run 013's
+milestone turn printed six: its own, two API errors, three wake-ups for background work); each is
+closed with its own cost, and `Runner.invoke` keeps the last as the turn's result. Inside a turn,
+spend is estimated from streamed token counts with a price table and corrected at the turn's end.
+
+Until 2026-11-25 the meter took an empty per-turn field for a missing one and charged the session's
+whole `total_cost_usd` again, which stopped run 013 at its $150 cap with $33.06 spent. As an alarm
+for a fault of that kind, the runner warns once per run when `confirmed_usd` less `estimated_usd`
+differs from the sum of `by_model` by more than 1% and more than $0.50: both are summed from the same
+results, so they agree unless something was charged that no model spent.
 
 ## Status, sync and the page
 
