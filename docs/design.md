@@ -247,8 +247,10 @@ memory it has, that the limit is hard, that a compiler or test ending with `Kill
 `terminated` is a reason to lower parallelism and not to run it again unchanged, and that
 `/sys/fs/cgroup/memory.events` counts the kills.
 
-**What the owner sees.** Every sync's snapshot carries the container's `oom_kill` count, read
-from `/sys/fs/cgroup/memory.events`. `org status` prints a `!` line under the table
+**What the owner sees.** The kernel's count of kills for memory is read from outside the container
+(see "A finished run's machine"), and every sync's snapshot also carries the container's own
+`oom_kill` count, read from `/sys/fs/cgroup/memory.events`; the record's `oom_kill` is the larger of
+the two, so a container with an older bundle shows it too. `org status` prints a `!` line under the table
 (`! <run>: 2 processes were killed for memory in its container (limit 2219MiB)`), `org peek`
 shows the same and `org status --json` carries `oom_kill`. The count includes kills in
 containers the engineer runs inside its own, as the kernel counts a cgroup with everything under
@@ -385,6 +387,112 @@ socket. The backend and its unit tests are still here (`org/backends/docker.py`)
 host-side script `docker/up.sh` has not been updated for the token changes: it still calls
 `gh auth token` and gives the manager a whole GitHub login, and `org up` no longer leads to it.
 It is recorded here as history, not as something that works.
+
+## A finished run's machine
+
+**The rule.** The owner decided on 2026-11-24, seeing ten finished engineers still running in their
+containers, that a finished engineer leaves no machine behind. The record of a run is what the
+engineer made explicit (its report, plan and result, which the mirror already holds) and what it
+pushed to the remote. When a run's record is `final` and its state is `done`, `partial`, `failed` or
+`stopped`, the next `pump` deletes its machine through the backend's `remove`. `pump` runs whenever
+something looks: `org status`, `org pump`, and the dashboard's loop every ten seconds. It does so
+whether or not the run left warnings, belongs to a plan, is being reviewed, is paused or is held. A
+run that is not `final` is never deleted this way, and the record is read again under the lock before
+the deletion, so a run that `org resume` made not final in between is left alone.
+
+**Why no grace period and no confirmation.** A terminal run cannot be continued: the runner started
+again on one says it has finished, and a retry is a new run in a new container. The engineer is told
+that only its report and what it pushed survive. A grace period would keep exactly the state the
+owner decided against, and a confirmation would leave containers standing with nobody asked. The
+count behind a warning about unpushed work is wrong in the direction of keeping things (it counts
+worker branches that were rebased into the pushed one), so a warning does not stop the deletion; it
+is shown afterwards as what was deleted with the machine, and the runner also writes into
+`status.json` what it was (branch names, up to 20 commit subjects, up to 50 paths per clone), which
+`org review` prints. The deletion is not undoable.
+
+**The setting.** `machines.after_finish`: absent (the key is not there) or `delete` is the rule above; `keep` is the old
+behaviour, where nothing is deleted until `org machine rm <run>`. Any other value is treated as
+`keep`, because a mistyped setting must never delete, and `org doctor` has a row that says the value
+is not understood. Changing `keep` back to `delete` deletes everything finished at the next pump.
+There is no cut-off date: the first pump after `org upgrade` deletes the container of every run that
+was already finished, after one last measurement of each. An owner who wants those containers sets
+`keep` before upgrading.
+
+**The order.** For one run: a last measurement; the last 5 MB of the runner's `runner.log`, copied
+into the mirror as `runner.log` (text, under that one fixed name, bounded, because it comes from the
+engineer's machine); the deletion; then `machine_removed_at` on the record. A measurement that
+cannot be taken (the container is stopped, Incus does not answer, a file is missing) is noted and
+the deletion goes ahead: where the two pull apart, the measurements lose. A container Incus no
+longer knows, or one that never existed (a run stopped while queued), is marked removed without an
+error and without a warning. A machine org did not make (`remove` returns `None`: ssh, local) is
+not touched and not marked.
+
+A run stopped while it was queued had a machine chosen and never made: it is marked removed with
+no measurement and no call to a backend, since a name that was never made may be another's. The
+machines of several finished runs are measured and deleted side by side, eight at a time, so that
+the first pump after an upgrade waits for the slowest of them and not for their sum. An answer from
+Incus that is not JSON is an error, not "no such container": on that word a run is recorded as
+having no machine.
+
+**The failure path.** A deletion that fails is recorded on the run as `machine_remove_error`: the
+error's text, when, and how many tries. It shows as a warning in `org status` and in the run view,
+is tried again on later pumps no more than once a minute, and never raises out of `pump`, never
+keeps a queued run from starting and never keeps another run's machine from being deleted in the same
+pump.
+
+**The lock.** The measuring and the deletion hold the run's own lock, the one sync holds, so a
+dashboard loop and an `org status` that pump at the same moment end with one record: one of them
+calls Incus, or the second finds the container gone, and neither loses the other's write. `org
+resume` and `org machine rm` take the same lock now. A final run's record has one more writer, the
+plan's tick, which writes it under its own lock (`runs/.graph.lock`) and not the run's. A deletion
+takes seconds, so what it learned is not saved onto the record as it was read before: under the
+tick's lock the record is read again and only the machine's fields are laid over it (`telemetry`,
+`oom_kill`, `machine_removed_at`, `machine_removed_by`, `machine_remove_error`). Without that, a
+review a tick had just marked started was started a second time. The tick's lock is waited for
+five seconds at most and held for that one reading and writing; when a tick holds it for longer
+(it is setting up a machine), the same is done without it. A ledger that never had a plan has no
+tick and gets no such lock file.
+
+**The walls that did not move.** Only `Backend.remove` deletes. It passes the name through `_own`,
+the check of the engineers' prefix, and answers that the machine was already gone when Incus does
+not know the name. The template and the build cache's container are outside the prefix and out of
+reach of this code. No other place calls `incus delete`.
+
+**What is measured, and from where.** While a run holds an Incus container and is not final, org
+reads from outside the container at most once a minute: Incus's description of it (`incus list
+--format json`, which gives the state and the disk the pool reports) and the kernel's files for it,
+`/sys/fs/cgroup/lxc.payload.<name>/` or, where the container is in a project of its own,
+`lxc.payload.<project>_<name>/`: `memory.current`, `memory.peak`, `memory.max`, `pids.current`,
+`memory.events` and `cpu.stat`. This is one `incus` call per run per minute, and a failure of it is
+noted and never raised. It is read from outside because the inside is the engineer's to change and
+dies with it; nothing from inside the container, and nothing an engineer's machine sends, is trusted
+for these numbers or chooses a path that is read or written. Only "the runner was alive" comes from
+the last sync. This needs no bundle of any age in the container, so it works for runs dispatched
+before it existed. Docker, ssh and local machines are not measured, and where the summary is shown
+for one the text says so.
+
+**The file and the summary.** Each measurement is one JSON line appended to
+`runs/<run>/machine.jsonl`, beside `run.json` and not in `mirror/`. A value that could not be read
+is null or absent, never guessed and never zero. The run's record carries `telemetry`, kept up with
+each measurement and still there after the deletion: the largest peak of memory, the limit, CPU
+seconds, kills for memory, restarts seen, the disk used where the pool reports it, how many
+measurements, and the first and last time. A cumulative counter (CPU seconds, kills for memory) that
+is lower than in the measurement before means the container restarted, as a stopped and started
+container counts from zero: the totals add the parts and the restart is counted. Another start
+time in Incus's description counts as a restart too. The summary is worked out from the whole file
+each time, so a write of the record lost to another writer is made good by the next measurement.
+`org review <run>`
+prints the summary as a block, with CPU as seconds and the average number of cores they come to over
+the run's elapsed time; `org peek` as a line; `org status --json` as `telemetry` on the run; the
+dashboard's page for the run shows it. A run from before this has no measurements and says so in one
+line.
+
+**After the deletion.** `org diff`, `org ls`, `org cat` and `org exec` say the run has no machine to
+reach (removed); `attach` is null; `org resume <run>` refuses in one sentence, saying the container
+was deleted when the run ended and a finished run cannot be continued. The review between two specs
+of a plan works from the report, `org review`'s output and the remote. What stays: the build cache's
+container, the template, old releases and old templates. `org machine rm` remains for what is left
+(a run under `keep`, and a run that is not final, with `--force`).
 
 ## The build cache
 
@@ -671,6 +779,7 @@ streamed token counts with a price table and corrected at the turn's end.
 The runner rewrites `status.json` every few seconds. Sync is one read-only command per run,
 `org engineer snapshot`, which returns status, plan, report and the next slice of the event log
 as one JSON document. The manager's side writes that into `runs/<run>/mirror/`.
+When a run's machine is deleted, `mirror/runner.log` is added: the last 5 MB of the runner's log. What the machine measured is not in the mirror but in `runs/<run>/machine.jsonl`.
 
 **A snapshot is input from outside.** It comes from a container where a session runs with every
 permission bypassed, so sync takes from it only what a runner writes: the files named in
@@ -1045,8 +1154,9 @@ none is claimed for this layout.
   before.
 - Nothing restarts anything after the Mac restarts. `org-vm up` and then
   `org resume --interrupted` do.
-- A finished run's container stays until `org machine rm`, and old releases and old templates
-  stay until someone deletes them; nothing reclaims the disk by itself.
+- A finished run's container is deleted by the next pump, and that is not undoable (see "A finished
+  run's machine"). The build cache's container, the template, old releases and old templates stay
+  until someone deletes them; nothing reclaims their disk by itself.
 - A rollback moves links. It does not undo what the newer release wrote.
 - A run's share of the weekly limit is unknown until the rate has been learned or configured.
 - One engineer per spec. A spec too large for one engineer is the manager's to split.
@@ -1075,9 +1185,10 @@ none is claimed for this layout.
   as something an engineer may learn.
 - The limits hold against two pumps at once and against a process that ends between two steps: a
   verdict that was recorded and not acted on becomes a pause, and a pause is told again rather
-  than never. Two things the owner does at the same instant as a pump are not guarded: `org sync
-  <run>` and `org resume <run>` write a run's record without its lock, as they did before plans,
-  and could undo a count or a review that was just written. A review still running when its
+  than never. One thing the owner does at the same instant as a pump is not guarded: `org sync
+  <run>` writes a final run's record under the run's lock and not the tick's, and could undo a count
+  or a review that was just written. It leaves a run whose machine is deleted alone: sync would never
+  ask a machine that is gone, and the run would stay not final for good. A review still running when its
   spec is approved again or dispatched again by hand is left to end by itself, and its cost is
   not recorded.
 - The Docker plugin's host script still asks for a whole GitHub login and should not be used.

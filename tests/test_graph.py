@@ -599,7 +599,7 @@ class Recovery(GraphCase):
     def setUp(self):
         super().setUp()
         self.resumed = []
-        patcher = mock.patch.object(dispatch, "resume", lambda ledger, run_id, log=None: self.resumed.append(run_id) or "nohup")
+        patcher = mock.patch.object(dispatch, "resume", lambda ledger, run_id, log=None, locked=False: self.resumed.append(run_id) or "nohup")
         patcher.start()
         self.addCleanup(patcher.stop)
 

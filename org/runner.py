@@ -267,6 +267,7 @@ class Runner:
             "result": st.get("result"),
             "end_reason": st.get("end_reason"),
             "warnings": st.get("warnings") or [],
+            "leftover": st.get("leftover") or [],
             "turns": len(st.get("turns") or []),
             "retries": st.get("retries", 0),
         }
@@ -863,6 +864,34 @@ class Runner:
             })
         return out
 
+    def leftover_of(self, repo: str) -> dict:
+        """What a clone holds that exists nowhere else: the names, not only the counts, so the ledger can say what was lost."""
+        def git(*args):
+            # Unlike the counting calls this keeps leading spaces, which are part of a porcelain status.
+            try:
+                r = subprocess.run(["git", "-C", repo] + list(args), capture_output=True, text=True, timeout=30)
+                return r.stdout if r.returncode == 0 else ""
+            except (OSError, subprocess.TimeoutExpired):
+                return ""
+        subjects = [x for x in git("log", "--branches", "--not", "--remotes", "--date-order", "--format=%s").splitlines() if x.strip()]
+        files = [x[3:] for x in git("status", "--porcelain").splitlines() if x.strip()]
+        branches = []
+        # Looking at every branch of a clone with thousands of them would be slow, and 20 are all that is kept.
+        for name in git("for-each-ref", "--format=%(refname:short)", "refs/heads").split()[:200]:
+            if len(branches) >= 20:
+                break
+            if git("log", name, "--not", "--remotes", "--oneline", "-1").strip():
+                branches.append(name)
+        return {
+            "path": repo,
+            "branch": git("rev-parse", "--abbrev-ref", "HEAD").strip(),
+            "branches": branches,
+            "commits": [clip(x, 200) for x in subjects[:20]],
+            "commits_total": len(subjects),
+            "files": [clip(x, 200) for x in files[:50]],
+            "files_total": len(files),
+        }
+
     def actuals(self) -> dict:
         st, t = self.state, now()
         end = st.get("finished_at") or t
@@ -957,11 +986,13 @@ class Runner:
             result["status"] = "partial"
             result["lowered_by_runner"] = True
             result["msg"] = "%s [Runner: lowered from done; not shown passing: %s.]" % (result.get("msg", ""), ", ".join(failing))
+        left = [c for c in self.repo_checks() if c["unpushed_commits"] or c["uncommitted_files"]]
+        # The list is kept whatever the delivery, because the machine is deleted either way; finish() saves it into status.json.
+        st["leftover"] = [self.leftover_of(c["path"]) for c in left]
         if self.job.get("delivery") != "none":
-            for c in self.repo_checks():
-                if c["unpushed_commits"] or c["uncommitted_files"]:
-                    self.warn("%s still has %d uncommitted file(s) and %d unpushed commit(s)"
-                              % (c["path"], c["uncommitted_files"], c["unpushed_commits"]))
+            for c in left:
+                self.warn("%s still has %d uncommitted file(s) and %d unpushed commit(s)"
+                          % (c["path"], c["uncommitted_files"], c["unpushed_commits"]))
         return result
 
     def finish(self, state: str, result: dict) -> None:

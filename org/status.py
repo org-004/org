@@ -5,13 +5,15 @@ all three show the same numbers because all three read this.
 """
 from __future__ import annotations
 
+import re
 import shutil
 from typing import List, Optional
 
-from . import budget, dispatch, graph, spec
+from . import budget, dispatch, graph, notify, spec
 from .ledger import Ledger
 from .runner import TERMINAL_STATES
 from .sync import sync_all
+from .telemetry import MEASURED_KINDS
 from .util import clip, fmt_clock, fmt_dur, fmt_pct, fmt_usd, now, read_json, read_text
 
 STALE_AFTER_S = 180
@@ -25,6 +27,129 @@ def oom_line(v: dict) -> Optional[str]:
         return None
     limit = " (limit %s)" % v["memory_limit"] if v.get("memory_limit") else ""
     return "%d process%s killed for memory in its container%s" % (n, " was" if n == 1 else "es were", limit)
+
+
+def telemetry_view(rec: dict) -> dict:
+    """What a run's view carries as `telemetry`: the record's summary (org/telemetry.py) with `measured` true, or,
+    where there is none, {"measured": False, "why": a sentence}: machines of that kind are not
+    measured, or the run has no measurements (it ended before org measured containers)."""
+    t = rec.get("telemetry")
+    if isinstance(t, dict) and isinstance(t.get("samples"), int) and t["samples"] > 0:
+        return dict(t, measured=True)
+    kind = (rec.get("machine") or {}).get("kind")
+    if not kind:
+        return {"measured": False, "why": "no machine was started, so nothing was measured"}
+    if kind not in MEASURED_KINDS:
+        return {"measured": False, "why": "%s machines are not measured" % kind}
+    if not rec.get("final") and not rec.get("machine_removed_at"):
+        return {"measured": False, "why": "no measurement yet: the first is taken within a minute of the run's start"}
+    return {"measured": False, "why": "no measurement was taken: the run ended before org measured containers"}
+
+
+def _mib(n) -> str:
+    return "%d MiB" % (n // 1048576) if isinstance(n, (int, float)) and not isinstance(n, bool) else "not read"
+
+
+def _num(n) -> bool:
+    return isinstance(n, (int, float)) and not isinstance(n, bool)
+
+
+def _gone(m: dict) -> str:
+    """When and why the machine was deleted, as the end of a phrase, or '' while it is still there."""
+    if not m.get("removed_at"):
+        return ""
+    return "deleted %s" % fmt_clock(m["removed_at"])
+
+
+def _kills(n) -> str:
+    return "not read" if not _num(n) else "%d process%s killed for memory" % (n, "" if n == 1 else "es")
+
+
+def machine_block(v: dict) -> List[str]:
+    """The lines of `org review` about what a run's machine measured, from the run's view: peak memory beside the
+    limit, CPU seconds and the average number of cores they come to over the run's elapsed time,
+    kills for memory, restarts, disk, and when the container was deleted. One line when there is
+    nothing measured, saying why."""
+    m, t = v.get("machine") or {}, v.get("telemetry") or {}
+    if not m.get("removed_at"):
+        end = "still there"
+    elif m.get("removed_by") == "teardown":
+        end = "deleted %s when the run ended" % fmt_clock(m["removed_at"])
+    else:
+        end = "deleted %s with `org machine rm`" % fmt_clock(m["removed_at"])
+    lines = ["machine: %s %s · %s" % (m.get("kind") or "none", clip(m.get("name") or "", 40), end)]
+    if not t.get("measured"):
+        return lines + ["  measured  " + (t.get("why") or "no measurement was taken")]
+    cpu, elapsed = t.get("cpu_s"), v.get("elapsed_s")
+    cpu_text = "not read" if not _num(cpu) else "%d s" % round(cpu)
+    # Not over less than a minute: the container's CPU time also counts its start, and over a
+    # few seconds the quotient says more cores than the machine has.
+    if _num(cpu) and _num(elapsed) and elapsed >= 60:
+        cpu_text += ", %.2f cores on average over %s" % (cpu / elapsed, fmt_dur(elapsed))
+    disk = t.get("disk_bytes")
+    if not _num(disk):
+        disk_text = "not reported by the storage pool"
+    elif disk >= 1 << 30:
+        disk_text = "%.1f GiB at the last measurement" % (disk / (1 << 30))
+    else:
+        disk_text = "%s at the last measurement" % _mib(disk)
+    restarts = t.get("restarts")
+    lines += [
+        "  memory    peak %s of a %s limit" % (_mib(t.get("memory_peak_bytes")), _mib(t.get("memory_limit_bytes"))),
+        "  cpu       " + cpu_text,
+        "  kills     " + _kills(t.get("oom_kill")),
+        "  restarts  " + (str(restarts) if _num(restarts) else "not read"),
+        "  disk      " + disk_text,
+        "  measured  %d times, %s to %s" % (t["samples"], fmt_clock(t.get("first_at")), fmt_clock(t.get("last_at"))),
+    ]
+    if t.get("note"):
+        lines.append("  note      " + clip(t["note"], 200))
+    return lines
+
+
+def machine_line(v: dict) -> str:
+    """The same in one line, for `org peek`."""
+    m, t = v.get("machine") or {}, v.get("telemetry") or {}
+    if not t.get("measured"):
+        return t.get("why") or "no measurement was taken"
+    limit = t.get("memory_limit_bytes")
+    parts = ["peak %s of %s" % (_mib(t.get("memory_peak_bytes")), _mib(limit))]
+    cpu = t.get("cpu_s")
+    parts.append("cpu %s" % ("not read" if not _num(cpu) else "%d s" % round(cpu)))
+    kills, restarts = t.get("oom_kill"), t.get("restarts")
+    parts.append("%s killed for memory" % ("not read" if not _num(kills) else kills))
+    parts.append("%s restart%s" % ("not read" if not _num(restarts) else restarts, "" if restarts == 1 else "s"))
+    if m.get("removed_at"):
+        parts.append(_gone(m))
+    return " · ".join(parts)
+
+
+def _text(x, n=200) -> Optional[str]:
+    # Through `notify.plain`: a branch name or a commit subject may carry a terminal's escape
+    # codes, and `org review` prints these in the owner's terminal.
+    return notify.plain(x)[:n] if isinstance(x, str) else None
+
+
+def _strings(x, cap: int) -> List[str]:
+    return [notify.plain(i)[:200] for i in x if isinstance(i, str)][:cap] if isinstance(x, list) else []
+
+
+def clean_leftover(raw) -> List[dict]:
+    """The `leftover` list of a mirrored status.json, as far as it can be trusted: that file comes from
+    the engineer's machine, so only dicts, only the known keys, only the known types and bounded sizes pass."""
+    out = []
+    for e in [e for e in (raw if isinstance(raw, list) else []) if isinstance(e, dict)][:20]:
+        item = {"path": _text(e.get("path")) or "", "branch": _text(e.get("branch")) or "",
+                "branches": _strings(e.get("branches"), 20), "commits": _strings(e.get("commits"), 20),
+                "files": _strings(e.get("files"), 50)}
+        for key in ("commits_total", "files_total"):
+            n = e.get(key)
+            item[key] = n if isinstance(n, int) and not isinstance(n, bool) and n >= 0 else len(item[key[:-6]])
+        out.append(item)
+    return out
+
+
+_STILL_HAS = re.compile(r"(\S.*?) still has (\d+) uncommitted file\(s\) and (\d+) unpushed commit\(s\)")
 
 
 def run_view(ledger: Ledger, run_id: str, rate: Optional[float]) -> dict:
@@ -57,6 +182,18 @@ def run_view(ledger: Ledger, run_id: str, rate: Optional[float]) -> dict:
     usd = cost.get("usd")
     machine = rec.get("machine") or {}
     activity = st.get("activity") or {}
+    removed = bool(rec.get("machine_removed_at"))
+    # status.json is the engineer's machine's: a `warnings` that is not a list of strings is none.
+    warnings = [w for w in st["warnings"] if isinstance(w, str)] if isinstance(st.get("warnings"), list) else []
+    if removed:
+        # The work the runner said was still there went with the machine, so the sentence must not offer it.
+        warnings = [_STILL_HAS.sub(r"\1: \2 uncommitted file(s) and \3 unpushed commit(s) were deleted with the machine", w)
+                    if isinstance(w, str) else w for w in warnings]
+    failing = rec.get("machine_remove_error")
+    if failing and not removed and isinstance(failing, dict):
+        tries = failing.get("tries") or 0
+        warnings.append("its machine could not be deleted (%d tr%s, last %s): %s" % (
+            tries, "y" if tries == 1 else "ies", fmt_clock(failing.get("at")), clip(failing.get("error") or "", 300)))
     view = {
         "run_id": run_id,
         "spec_id": rec.get("spec_id"),
@@ -68,8 +205,11 @@ def run_view(ledger: Ledger, run_id: str, rate: Optional[float]) -> dict:
         "phase": st.get("phase"),
         "detail": st.get("detail") or rec.get("queue_reason") or rec.get("error") or rec.get("last_error"),
         "machine": {"kind": machine.get("kind"), "name": machine.get("name"), "node": machine.get("node"),
-                    "removed": bool(rec.get("machine_removed_at"))},
-        "attach": rec.get("attach"),
+                    "removed": removed, "removed_at": rec.get("machine_removed_at"),
+                    "removed_by": rec.get("machine_removed_by")},
+        "attach": None if removed else rec.get("attach"),
+        "telemetry": telemetry_view(rec),
+        "leftover": clean_leftover(st.get("leftover")),
         "model": st.get("model"),
         "started_at": (st.get("started_at") + skew) if st.get("started_at") else rec.get("dispatched_at"),
         "finished_at": (st.get("finished_at") + skew) if st.get("finished_at") else None,
@@ -94,7 +234,7 @@ def run_view(ledger: Ledger, run_id: str, rate: Optional[float]) -> dict:
         "agents": st.get("agents") or [],
         "result": st.get("result"),
         "end_reason": st.get("end_reason"),
-        "warnings": st.get("warnings") or [],
+        "warnings": warnings,
         "oom_kill": rec.get("oom_kill"),
         "memory_limit": ((machine.get("limits") or {}).get("memory")),
         "retries": st.get("retries") or 0,
@@ -263,13 +403,34 @@ def render(state: dict, width: Optional[int] = None) -> str:
     return "\n".join(lines)
 
 
+def _leftover_lines(v: dict) -> List[str]:
+    """What the runner found on the machine at the end that was neither committed nor pushed, per clone."""
+    left = v.get("leftover") or []
+    if not left:
+        return []
+    gone = v["machine"].get("removed")
+    lines = ["", "left on the machine when the run ended" + (" (deleted with the machine)" if gone else "") + ":"]
+    for e in left:
+        names = e["branches"] or ([e["branch"]] if e["branch"] else [])
+        lines.append("  %s  branch %s" % (e["path"] or "?", ", ".join(names) or "?"))
+        if e["commits"]:
+            more = e["commits_total"] - len(e["commits"])
+            lines += ["    commit  " + c for c in e["commits"]] + (["    … and %d more commit(s)" % more] if more > 0 else [])
+        if e["files"]:
+            more = e["files_total"] - len(e["files"])
+            lines += ["    file    " + f for f in e["files"]] + (["    … and %d more file(s)" % more] if more > 0 else [])
+    return lines
+
+
 def scorecard(ledger: Ledger, run_id: str) -> str:
     """Plan against outcome for one run: the page a human reads to judge the engineer's planning."""
     mirror = ledger.mirror_dir(run_id)
     a = read_json(mirror / "actuals.json")
     result = read_json(mirror / "result.json") or {}
+    view = run_view(ledger, run_id, None)
+    block = ["", *machine_block(view), *_leftover_lines(view)]
     if not a:
-        return "%s has not finished (no actuals.json in %s). Run `org sync` if it should have." % (run_id, mirror)
+        return "%s has not finished (no actuals.json in %s). Run `org sync` if it should have." % (run_id, mirror) + "\n" + "\n".join(block)
 
     def ratio(actual, est):
         return "%.2fx" % (actual / est) if actual and est else "—"
@@ -308,4 +469,4 @@ def scorecard(ledger: Ledger, run_id: str) -> str:
     if a.get("end_reason"):
         lines.append("ended because: " + a["end_reason"])
     lines += ["", "plan as frozen: %s" % (mirror / "plan.frozen.md"), "report:         %s" % (mirror / "report.md")]
-    return "\n".join(lines)
+    return "\n".join(lines + block)

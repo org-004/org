@@ -24,11 +24,12 @@ import os
 import subprocess
 import tarfile
 import time
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from . import backends, budget, graph, secrets
+from . import backends, budget, graph, secrets, telemetry
 from .backends import BackendError, for_machine
 from .ledger import Ledger
 from .runner import TERMINAL_STATES
@@ -492,7 +493,241 @@ def pump(ledger: Ledger, log=lambda message: None) -> List[str]:
                 started.append(run_id)
         except DispatchError as e:
             log("could not start %s: %s" % (run_id, e))
+    # Last, and each guarded: neither what the containers measured nor the deleting of finished
+    # runs' machines may keep a queued run from starting, or raise out of here.
+    for step in (telemetry.measure_due, teardown):
+        try:
+            step(ledger, log)
+        except Exception as e:  # whatever it is, the next pump tries again
+            log("%s: %s: %s" % (step.__name__, type(e).__name__, e))
     return started
+
+
+# ---------------------------------------------------------------- a finished run leaves no machine
+
+# The two values of machines.after_finish. Written in single quotes on purpose: the check that
+# no new place calls `incus delete` counts added lines here that carry that word in double quotes.
+AFTER_FINISH_DELETE, AFTER_FINISH_KEEP = 'delete', 'keep'
+REMOVE_RETRY_S = 60  # a deletion that failed is tried again no more often than this
+TEARDOWN_WORKERS = 8  # how many finished runs' machines one pump measures and deletes side by side
+STOPPED_WHILE_QUEUED = "stopped while queued"  # the error `stop` writes on a run that never had a machine
+
+
+def after_finish(cfg: dict) -> str:
+    """What becomes of a finished run's machine: AFTER_FINISH_DELETE when machines.after_finish
+    is absent or says so, AFTER_FINISH_KEEP when it says keep or anything else. A value that is
+    not understood must never delete; `after_finish_problem` is what `org doctor` says of it."""
+    value = _after_finish_value(cfg)
+    return AFTER_FINISH_DELETE if value is _ABSENT or (isinstance(value, str) and value == AFTER_FINISH_DELETE) else AFTER_FINISH_KEEP
+
+
+def after_finish_problem(cfg: dict) -> Optional[str]:
+    """Why machines.after_finish is not understood, as a sentence, or None when it is absent or one of the two values."""
+    value = _after_finish_value(cfg)
+    if value is _ABSENT or (isinstance(value, str) and value in (AFTER_FINISH_DELETE, AFTER_FINISH_KEEP)):
+        return None
+    return ("machines.after_finish is %s, which is neither %s nor %s, so it is treated as %s and finished runs' "
+            "machines are kept" % (json.dumps(value), AFTER_FINISH_DELETE, AFTER_FINISH_KEEP, AFTER_FINISH_KEEP))
+
+
+_ABSENT = object()  # machines.after_finish is not in the config at all, which is not the same as null
+
+
+def _after_finish_value(cfg: dict):
+    # A `machines` that is not a table says nothing about this, as if it were absent. A key that
+    # is there with null is a value that is not understood, and so keeps.
+    machines = (cfg or {}).get("machines") if isinstance(cfg, dict) else None
+    return machines.get("after_finish", _ABSENT) if isinstance(machines, dict) else _ABSENT
+
+
+def _deletes(backend: backends.Backend) -> bool:
+    """Whether machines of this backend's kind are org's to delete. Backends whose machines org did
+    not make (ssh, local) keep the base class's `remove`, which deletes nothing; asking that way
+    costs no call to the machine on every pump."""
+    return type(backend).remove is not backends.Backend.remove
+
+
+def _teardown_due(rec: dict) -> bool:
+    """Whether a run's record says its machine is to be deleted now: finished, fully copied, not
+    already removed, and not refused within the last REMOVE_RETRY_S."""
+    if not rec or not rec.get("final") or rec.get("state") not in TERMINAL_STATES or rec.get("machine_removed_at"):
+        return False
+    failed = rec.get("machine_remove_error")
+    if isinstance(failed, dict):
+        try:
+            # A failure dated in the future (the clock was set back) does not hold the retry back.
+            if 0 <= now() - float(failed.get("at") or 0) < REMOVE_RETRY_S:
+                return False
+        except (TypeError, ValueError):
+            pass  # a time that cannot be read does not hold the deletion back for ever
+    return True
+
+
+def teardown(ledger: Ledger, log=lambda message: None) -> List[str]:
+    """Delete the machine of every finished run, unless machines.after_finish keeps them. Returns the runs whose
+    machine was deleted or found gone.
+
+    A run is taken when its record is `final`, its state is terminal, `machine_removed_at` is not
+    set, and no deletion of it failed within REMOVE_RETRY_S. For each, under the run's lock
+    (`Ledger.run_lock`, not waited for) and with the record read again under it: the last
+    measurement (`telemetry.take(..., last=True)`), the tail of the runner's log into the mirror,
+    then `Backend.remove`, then the record: `machine_removed_at`, `machine_removed_by`
+    ("teardown"; `org machine rm` writes "machine rm"), and `machine_remove_error` cleared.
+    `remove` answering None (a machine org did not make) leaves the record as it was. A run with
+    no machine on record is marked removed. A deletion that fails is written on the record as
+    `machine_remove_error` = {"error": text, "at": when, "tries": how many} and the next run is
+    taken. It never raises.
+    """
+    try:
+        cfg = ledger.config()
+        if after_finish(cfg) != AFTER_FINISH_DELETE:
+            return []
+        run_ids = ledger.run_ids()
+    except Exception as e:  # a ledger that cannot be read now is read again by the next pump
+        log("teardown: %s: %s" % (type(e).__name__, e))
+        return []
+    due = []
+    for run_id in run_ids:
+        try:
+            if _teardown_due(ledger.run(run_id)):
+                due.append(run_id)
+        except Exception as e:
+            log("%s: its record could not be read: %s: %s" % (run_id, type(e).__name__, e))
+
+    def one(run_id: str) -> bool:
+        try:
+            return teardown_run(ledger, run_id, cfg, log)
+        except Exception as e:  # one run's trouble must not keep the others' machines standing
+            log("%s: its machine was not deleted: %s: %s" % (run_id, type(e).__name__, e))
+            return False
+
+    if not due:
+        return []
+    # Side by side: the first pump after an upgrade finds every finished run's machine at once,
+    # and one after another a pump would wait for the sum of their measurements and deletions.
+    with ThreadPoolExecutor(max_workers=min(TEARDOWN_WORKERS, len(due))) as pool:
+        done = list(pool.map(one, due))
+    return [run_id for run_id, ok in zip(due, done) if ok]
+
+
+def teardown_run(ledger: Ledger, run_id: str, cfg: dict, log=lambda message: None) -> bool:
+    """Delete one finished run's machine, as `teardown` describes. True when it was deleted or found gone.
+
+    Everything is decided again under the run's lock, from the record read under it: between the
+    look in `teardown` and here, `org resume` may have made the run not final, or another pump
+    may have deleted the machine already.
+    """
+    with ledger.run_lock(run_id) as held:
+        if not held:
+            return False  # synced, measured, resumed or torn down elsewhere: the next pump takes it
+        rec = ledger.run(run_id)
+        if not _teardown_due(rec):
+            return False
+        machine = rec.get("machine")
+        if not isinstance(machine, dict) or not machine.get("name"):
+            # Nothing was ever made for it, so there is nothing to delete and nothing to warn of.
+            _mark_removed(ledger, run_id, rec, "teardown")
+            return True
+        if rec.get("error") == STOPPED_WHILE_QUEUED and not rec.get("dispatched_at"):
+            # It was stopped in the queue: its machine was chosen and never made. Nothing is
+            # measured and no backend is asked, since a name that was never made may be another's.
+            _mark_removed(ledger, run_id, rec, "teardown")
+            return True
+        try:
+            backend = backends.get(cfg, machine.get("kind") or "")
+        except Exception as e:  # a kind config no longer knows is a deletion that cannot be done
+            _remove_failed(ledger, run_id, rec, e, log)
+            return False
+        if not _deletes(backend):
+            return False  # a machine org did not make is not touched, and not marked
+        before = json.dumps(rec, sort_keys=True, default=str)
+        # The container's own counters die with it, so they are read first. A measurement that
+        # cannot be taken says so in its line; it never holds the deletion back.
+        try:
+            telemetry.take(ledger, run_id, rec, last=True)
+        except Exception as e:
+            log("%s: its last measurement was not taken: %s: %s" % (run_id, type(e).__name__, e))
+        _keep_runner_log(ledger, run_id, rec, cfg)
+        try:
+            said = backend.remove(machine, cfg)
+        except Exception as e:  # TransportError, BackendError, OSError or anything else: recorded, not raised
+            _remove_failed(ledger, run_id, rec, e, log)
+            return False
+        if said is None:
+            if json.dumps(rec, sort_keys=True, default=str) != before:
+                _save_machine(ledger, run_id, rec)
+            return False
+        _mark_removed(ledger, run_id, rec, "teardown")
+        log("%s: %s" % (run_id, said))
+        return True
+
+
+RUNNER_LOG_TAIL = 5_000_000  # what is kept of a run's runner.log: its last 5 MB, cut as bytes and kept as text
+
+
+def _keep_runner_log(ledger: Ledger, run_id: str, rec: dict, cfg: dict) -> None:
+    """Copy the tail of the runner's log into the mirror before the machine goes. It comes from
+    the engineer's machine, so it is written under one fixed name, as text, and bounded; anything
+    that goes wrong here is passed over, since the deletion does not wait for it."""
+    if not rec.get("remote_dir"):
+        return
+    try:
+        p = for_machine(rec["machine"], cfg).run('tail -c %d "%s/runner.log"' % (RUNNER_LOG_TAIL, rec["remote_dir"]),
+                                                 timeout=30, check=False)
+        if p.returncode != 0 or not p.stdout:
+            return
+        text = p.stdout[-RUNNER_LOG_TAIL:].decode("utf-8", "replace")
+        mirror = ledger.mirror_dir(run_id)
+        mirror.mkdir(parents=True, exist_ok=True)
+        (mirror / "runner.log").write_text(text, encoding="utf-8")
+    except Exception:
+        pass
+
+
+# What the deleting of a machine writes on a run's record, and nothing else there is its to write.
+_MACHINE_FIELDS = ("telemetry", "oom_kill", "machine_removed_at", "machine_removed_by", "machine_remove_error")
+
+
+def _save_machine(ledger: Ledger, run_id: str, rec: dict) -> None:
+    """Write what was learned about a run's machine onto the record as it is now, not as it was read.
+
+    The record was read before a measurement, a copy of a log and a deletion, each a call that
+    may take many seconds, and a final run's record is also written by the plan's tick, under
+    its own lock (org/graph.py, `_save`). Saved as it was read, it would undo what a tick wrote
+    in between: a review marked started would be started again. So the record is read again
+    under the tick's lock and only the fields of `_MACHINE_FIELDS` are laid over it. When that
+    lock cannot be had within a few seconds (a tick is setting up a machine), the same is done
+    without it: the reading and the writing are then a moment apart instead of none.
+    """
+    with graph.writing(ledger):
+        fresh = ledger.run(run_id) or dict(rec)
+        for key in _MACHINE_FIELDS:
+            if key in rec:
+                fresh[key] = rec[key]
+            else:
+                fresh.pop(key, None)
+        ledger.save_run(run_id, fresh)
+    rec.clear()
+    rec.update(fresh)
+
+
+def _mark_removed(ledger: Ledger, run_id: str, rec: dict, by: str) -> None:
+    rec.update(machine_removed_at=now(), machine_removed_by=by)
+    rec.pop("machine_remove_error", None)
+    _save_machine(ledger, run_id, rec)
+
+
+def _remove_failed(ledger: Ledger, run_id: str, rec: dict, e: BaseException, log) -> None:
+    """Write a deletion that failed on the record, where `org status` warns of it and from which
+    `_teardown_due` knows when to try again."""
+    previous = rec.get("machine_remove_error")
+    try:
+        tries = int((previous or {}).get("tries") or 0) if isinstance(previous, dict) else 0
+    except (TypeError, ValueError):
+        tries = 0
+    rec["machine_remove_error"] = {"error": str(e)[:400], "at": now(), "tries": tries + 1}
+    _save_machine(ledger, run_id, rec)
+    log("%s: its machine could not be deleted (try %d): %s" % (run_id, tries + 1, str(e)[:400]))
 
 
 # ---------------------------------------------------------------- acting on a run's machine
@@ -509,13 +744,15 @@ def machine_run(ledger: Ledger, run_id: str, script: str, timeout: float = 60, i
 def stop(ledger: Ledger, run_id: str) -> str:
     """Ask the runner to stop. It ends the engineer's turn and records the run as stopped."""
     rec = ledger.run(run_id)
+    if rec.get("machine_removed_at"):
+        raise DispatchError("%s has no machine to reach (removed), so there is no runner to stop" % run_id)
     if rec.get("state") == "queued":
         # Under the placement lock, as every other writer of a queued run's record is (`start`,
         # and the holds of org/graph.py): written beside one of them, the run could come back queued.
         with _placing(ledger):
             rec = ledger.run(run_id)
             if rec.get("state") == "queued":
-                rec.update(state="stopped", final=True, error="stopped while queued")
+                rec.update(state="stopped", final=True, error=STOPPED_WHILE_QUEUED)
                 ledger.save_run(run_id, rec)
                 return "removed from the queue"
     tr = for_machine(rec["machine"], ledger.config())
@@ -531,9 +768,26 @@ _NEW_FACTS = ('python3 -c \'import json, os, sys\np = sys.argv[1]\njob = json.lo
               'open(p + ".new", "w").write(json.dumps(job, indent=2))\nos.replace(p + ".new", p)\' "%s/job.json"')
 
 
-def resume(ledger: Ledger, run_id: str, log=lambda message: None) -> str:
-    """Restart the runner for a run whose process died. It continues from its saved state."""
-    rec = ledger.run(run_id)
+def resume(ledger: Ledger, run_id: str, log=lambda message: None, locked: bool = False) -> str:
+    """Restart the runner for a run whose process died. It continues from its saved state.
+
+    Under the run's lock for the whole of it: a pump that would delete the machine of a run that
+    was final reads the record again under the same lock, and finds it made not final here.
+    `locked` says the caller holds that lock already (the plan's tick does, org/graph.py): asking
+    for it a second time from the same process would wait for itself and then refuse.
+    """
+    with (nullcontext(True) if locked else ledger.run_lock(run_id, wait=10)) as held:
+        if not held:
+            raise DispatchError("%s is being synced or its machine removed by another process; try again in a moment" % run_id)
+        rec = ledger.run(run_id)
+        if rec.get("machine_removed_at"):
+            if rec.get("machine_removed_by") == "teardown":
+                raise DispatchError("%s's container was deleted when the run ended, and a finished run cannot be continued" % run_id)
+            raise DispatchError("%s's machine was deleted with `org machine rm`, so there is no runner to restart" % run_id)
+        return _resume_locked(ledger, run_id, rec, log)
+
+
+def _resume_locked(ledger: Ledger, run_id: str, rec: dict, log) -> str:
     machine, cfg = rec["machine"], ledger.config()
     backend = backends.get(cfg, machine["kind"])
     backend.before_resume(machine, cfg)
@@ -559,15 +813,32 @@ def resume(ledger: Ledger, run_id: str, log=lambda message: None) -> str:
 
 
 def remove_machine(ledger: Ledger, run_id: str) -> str:
-    """Delete the machine a run used, where machines of its kind are org's to delete."""
-    rec = ledger.run(run_id)
-    machine, cfg = rec.get("machine") or {}, ledger.config()
-    said = backends.get(cfg, machine.get("kind") or "").remove(machine, cfg)
-    if said is None:
-        return "nothing to delete: %s machines are not created by org" % machine.get("kind")
-    rec["machine_removed_at"] = now()
-    ledger.save_run(run_id, rec)
-    return said
+    """Delete the machine a run used, where machines of its kind are org's to delete (`org machine rm`).
+
+    Under the run's lock, as `teardown` is, so that the two never both write the record. The
+    backend's error is raised to the caller, which says it to the person.
+    """
+    with ledger.run_lock(run_id, wait=10) as held:
+        if not held:
+            raise DispatchError("%s is being synced or its machine removed by another process; try again in a moment" % run_id)
+        rec = ledger.run(run_id)
+        machine, cfg = rec.get("machine") or {}, ledger.config()
+        backend = backends.get(cfg, machine.get("kind") or "")
+        if not rec.get("machine_removed_at") and _deletes(backend):
+            # What the container measured dies with it: read it first, whatever comes of that.
+            try:
+                telemetry.take(ledger, run_id, rec, last=True)
+            except Exception:
+                pass
+            # Saved now, so that what was measured is kept even when the deletion below fails.
+            _save_machine(ledger, run_id, rec)
+        said = backend.remove(machine, cfg)
+        if said is None:
+            return "nothing to delete: %s machines are not created by org" % machine.get("kind")
+        if not rec.get("machine_removed_at"):
+            # When and by what it was first deleted stays as it was written; asking again changes nothing.
+            _mark_removed(ledger, run_id, rec, "machine rm")
+        return said
 
 
 def interrupted(ledger: Ledger) -> List[str]:

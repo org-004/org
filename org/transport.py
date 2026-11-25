@@ -275,18 +275,20 @@ class Incus(Transport):
         return p.stdout.decode("utf-8", "replace").strip()
 
     @classmethod
-    def info(cls, container: str) -> Optional[dict]:
+    def info(cls, container: str, timeout: float = 60) -> Optional[dict]:
         """The container as Incus describes it (status, expanded_config, expanded_devices), or None."""
         # `incus list`, not `incus query`: a user confined to a project of its own is shown that
         # project by the first and the default one, where it has nothing, by the second. The
         # filter is a pattern, so it is anchored and the name is compared again.
-        p = cls.incus(["list", "--format", "json", "^%s$" % container], 60)
+        p = cls.incus(["list", "--format", "json", "^%s$" % container], timeout)
         if p.returncode != 0:
             raise TransportError("incus list failed: %s" % p.stderr.decode("utf-8", "replace").strip()[-300:])
         try:
             data = json.loads(p.stdout.decode("utf-8", "replace"))
         except ValueError:
-            return None
+            # Not None: None says Incus does not know the container, and on that word a finished
+            # run's machine is recorded as gone.
+            raise TransportError("incus list did not answer in JSON")
         for entry in data if isinstance(data, list) else []:
             if isinstance(entry, dict) and entry.get("name") == container:
                 return entry

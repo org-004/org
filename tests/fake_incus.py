@@ -40,6 +40,9 @@ A container's /etc/bazel.bazelrc is <container>/home/etc-bazel.bazelrc ($ORG_BAZ
 address is what override.json says under "state", as `incus list --format json` reports it.
 A container's /sys/fs/cgroup is <container>/home/.cgroup ($ORG_CGROUP_DIR): it does not exist, so
 the container exposes no count of memory kills, until a test writes memory.events there.
+Its description says it is in the project $FAKE_INCUS_PROJECT (default `default`), and carries no
+`state` unless override.json gives one. A container whose directory holds a file `refuse-delete`
+is not deleted: `incus delete` fails with that file's words, until the test removes the file.
 The template named by $FAKE_INCUS_BASE (default `base`) exists, stopped and empty, without the
 test having to make it; any other name the test did not make is not found.
 """
@@ -123,7 +126,8 @@ def main(argv):
 
     def describe(name):
         running = state(name) == "running"
-        info = {"name": name, "type": "container", "status": "Running" if running else "Stopped",
+        info = {"name": name, "type": "container", "project": os.environ.get("FAKE_INCUS_PROJECT", "default"),
+                "status": "Running" if running else "Stopped",
                 "status_code": 103 if running else 102, "profiles": ["default"], "config": {}, "devices": {},
                 "expanded_config": {}, "expanded_devices": json.loads(json.dumps(ISOLATED))}
         try:
@@ -301,6 +305,8 @@ def main(argv):
                 return fail("Instance not found: %s" % name)
             if state(name) == "running" and not force:
                 return fail("The instance is currently running, stop it first or pass --force")
+            if (root / name / "refuse-delete").exists():
+                return fail((root / name / "refuse-delete").read_text().strip() or "Failed to delete instance")
             shutil.rmtree(root / name)
         return 0
 

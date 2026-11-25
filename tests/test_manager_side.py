@@ -541,7 +541,11 @@ class ManagerSide(unittest.TestCase):
         self.assertEqual(self.ledger.runs_for(spec_id), ["001-csv-export-r1"])
         self.assertIn("dispatched 001-csv-export-r2", org("dispatch", spec_id).stdout, "asking for another run is explicit")
         self.wait_final("001-csv-export-r2")
-        self.assertIn("deleted", org("machine", "rm", "001-csv-export-r1").stdout)
+        # A finished run's machine is deleted by the next pump, so there is nothing left for
+        # `org machine rm` to delete; it still answers, and the listing says the machine is removed.
+        org("pump")
+        self.assertIn("removed", [line for line in org("machine", "ls").stdout.splitlines() if line.startswith("001-csv-export-r1 ")][0])
+        self.assertIn("was already gone", org("machine", "rm", "001-csv-export-r1").stdout)
         self.assertIn("v1", org("spec", "ls").stdout)
         self.assertIn(str(self.ledger.draft_path(spec_id)), org("spec", "check", str(self.ledger.draft_path(spec_id))).stdout)
 

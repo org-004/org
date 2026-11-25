@@ -430,6 +430,88 @@ class RunnerCase(unittest.TestCase):
         self.assertLess(part["events"]["offset"], size)
         self.assertTrue(part["events"]["data"].endswith("\n"), "cut at a line boundary")
 
+    def clone(self, name="proj"):
+        """A git clone in the run's workspace, with one commit that is pushed to its origin."""
+        origin = self.tmp / (name + "-origin.git")
+        repo = self.tmp / "work" / name
+        repo.mkdir(parents=True)
+        def git(*args):
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"] + list(args), check=True, capture_output=True, timeout=30)
+        subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True, timeout=30)
+        subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True, timeout=30)
+        git("remote", "add", "origin", str(origin))
+        (repo / "base.txt").write_text("base\n")
+        git("add", ".")
+        git("commit", "-m", "base")
+        git("push", "origin", "main")
+        git("fetch", "origin")
+        return repo, git
+
+    def run_with_leftovers(self):
+        self.job({"plan": PLAN_TURN, "milestone:M1": DONE("M1"), "milestone:M2": DONE("M2"), "report": REPORT})
+        self.assertEqual(self.go(), 0)
+        return self.status()
+
+    def test_the_status_names_the_uncommitted_files_and_unpushed_commits_that_were_left(self):
+        repo, git = self.clone()
+        git("checkout", "-b", "feature-a")
+        (repo / "a.txt").write_text("a\n")
+        git("add", ".")
+        git("commit", "-m", "Add a")
+        git("checkout", "-b", "feature-b")
+        (repo / "b.txt").write_text("b\n")
+        git("add", ".")
+        git("commit", "-m", "Add b")
+        (repo / "base.txt").write_text("changed\n")
+        (repo / "new file.txt").write_text("x\n")
+        left = self.run_with_leftovers()["leftover"]
+        self.assertEqual(len(left), 1)
+        e = left[0]
+        self.assertEqual(e["path"], str(repo))
+        self.assertEqual(e["branch"], "feature-b")
+        self.assertEqual(sorted(e["branches"]), ["feature-a", "feature-b"])
+        self.assertEqual(e["commits"], ["Add b", "Add a"])
+        self.assertEqual(e["commits_total"], 2)
+        self.assertEqual(sorted(e["files"]), ["\"new file.txt\"", "base.txt"], "a path git quotes is kept as git printed it")
+        self.assertEqual(e["files_total"], 2)
+
+    def test_the_lists_of_what_was_left_are_capped_but_the_totals_stay_right(self):
+        repo, git = self.clone()
+        for i in range(25):
+            git("checkout", "-b", "b%02d" % i, "main")
+            (repo / ("c%02d.txt" % i)).write_text("x\n")
+            git("add", ".")
+            git("commit", "-m", "long %02d " % i + "x" * 250)
+        for i in range(60):
+            (repo / ("u%02d.txt" % i)).write_text("x\n")
+        (repo / ("d" * 100)).mkdir()
+        (repo / ("d" * 100) / ("n" * 200 + ".txt")).write_text("x\n")
+        e = self.run_with_leftovers()["leftover"][0]
+        self.assertEqual((len(e["branches"]), len(e["commits"]), len(e["files"])), (20, 20, 50))
+        self.assertEqual((e["commits_total"], e["files_total"]), (25, 61))
+        self.assertEqual(max(len(c) for c in e["commits"]), 200, "a long subject is clipped to 200 characters")
+        self.assertTrue(all(len(f) <= 200 for f in e["files"]))
+
+    def test_a_clone_with_nothing_left_gives_no_leftover(self):
+        self.clone()
+        self.assertFalse(self.run_with_leftovers().get("leftover"))
+
+    def test_a_clone_where_git_fails_does_not_stop_the_status_from_being_written(self):
+        repo, git = self.clone()
+        (repo / "a.txt").write_text("a\n")
+        r = runner.Runner.__new__(runner.Runner)
+        real = subprocess.run
+        def broken(*a, **k):
+            raise subprocess.TimeoutExpired("git", 30)
+        subprocess.run = broken
+        try:
+            e = r.leftover_of(str(repo))
+        finally:
+            subprocess.run = real
+        self.assertEqual(e, {"path": str(repo), "branch": "", "branches": [], "commits": [], "commits_total": 0, "files": [], "files_total": 0})
+        shutil.rmtree(repo / ".git")
+        self.assertEqual(r.leftover_of(str(repo))["files"], [])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

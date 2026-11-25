@@ -43,11 +43,13 @@ What this module keeps on a run's record (run.json):
 
 A record is written only under the lock that its other writers use: the placement lock
 (`dispatch._placing`) for a queued run, the run's `.sync.lock` for one that sync still pulls, and
-`tick`'s own lock for a run that is final, which nothing else writes.
+`tick`'s own lock for a run that is final. The one other writer of a final run's record, the
+deleting of its machine (org/dispatch.py), takes that lock for its write through `writing`.
 """
 from __future__ import annotations
 
 import fcntl
+import time
 import os
 import signal
 from contextlib import contextmanager
@@ -139,6 +141,42 @@ def _sync_lock(ledger: Ledger, run_id: str):
         except OSError:
             yield False
             return
+        yield True
+
+
+@contextmanager
+def writing(ledger: Ledger, wait: float = 5.0):
+    """`tick`'s lock, waited for, for the one writer of a final run's record that is not the tick:
+    the deleting of its machine (org/dispatch.py). Yields whether it was got.
+
+    A final run's record is written here under `tick`'s lock and not under the run's own, so a
+    writer that held only the run's lock could write the record as it read it a moment ago over
+    what a tick had just put there (a review marked started, which would then be started twice).
+    It is held only for the reading and the writing of one record, never for a call to a machine.
+    A tick in another process that finds it taken leaves its work to the next pump, as it does
+    when another tick holds it. In a ledger that has no plan no tick writes anything, so there is
+    nothing to wait for and no lock file is made: such a ledger keeps no trace of plans.
+    """
+    if not has_plan(ledger):
+        yield False
+        return
+    try:
+        ledger.runs.mkdir(parents=True, exist_ok=True)
+        lock = open(ledger.runs / ".graph.lock", "w")
+    except OSError:
+        yield False
+        return
+    with lock:
+        end = time.time() + max(0.0, wait)
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.time() >= end:
+                    yield False
+                    return
+                time.sleep(0.02)
         yield True
 
 
@@ -540,7 +578,7 @@ def _resume(ledger: Ledger, run_id: str, rec: dict, why: str, cfg: dict, log) ->
         rec.pop("dead_since", None)
         ledger.save_run(run_id, rec)
         log("plans: resuming %s: %s" % (run_id, why))
-        dispatch.resume(ledger, run_id, log)
+        dispatch.resume(ledger, run_id, log, locked=True)  # the run's lock is held here already
         notify.alert(ledger, run_id, "resume", "%s; resumed (%d of %d)" % (why, n, limit))
 
 

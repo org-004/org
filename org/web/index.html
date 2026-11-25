@@ -436,6 +436,22 @@ async function openPort(run) {
     banner("");
   } catch (e) { banner("Could not open port " + port + " of " + run + ": " + e.message); }
 }
+// What the machine measured, as numbers only. Every string goes through esc: the summary is read from files.
+function machineRow(v) {
+  const t = v.telemetry || {}, m = v.machine || {};
+  const mib = n => typeof n === "number" ? Math.floor(n / 1048576) + " MiB" : "not read";
+  const gone = m.removed_at ? "deleted " + clock(m.removed_at) + (m.removed_by === "teardown" ? " when the run ended" : " with org machine rm") : "still there";
+  let body;
+  if (!t.measured) body = esc(t.why || "no measurement was taken");
+  else {
+    const cpu = typeof t.cpu_s === "number" ? Math.round(t.cpu_s) + " s" + (v.elapsed_s >= 60 ? ", " + (t.cpu_s / v.elapsed_s).toFixed(2) + " cores on average" : "") : "not read";
+    const disk = typeof t.disk_bytes === "number" ? (t.disk_bytes / 1073741824).toFixed(1) + " GiB" : "not reported by the storage pool";
+    const n = x => typeof x === "number" ? String(x) : "not read";
+    body = "memory peak " + mib(t.memory_peak_bytes) + " of a " + mib(t.memory_limit_bytes) + " limit · cpu " + esc(cpu) + " · killed for memory " + n(t.oom_kill)
+      + " · restarts " + n(t.restarts) + " · disk " + esc(disk) + " · measured " + n(t.samples) + " times";
+  }
+  return '<div class="now"><span class="k">Machine</span><span class="v">' + body + " · " + esc(gone) + "</span></div>";
+}
 function runCard(v) {
   const est = v.estimate || {}, live = !v.terminal;
   const elapsed = live && v.health === "ok" && v.elapsed_s != null ? v.elapsed_s + (nowS() - fetchedAt) : v.elapsed_s;
@@ -481,7 +497,7 @@ function runCard(v) {
     + '<span class="machine">' + esc((v.machine.kind || "") + " · " + (v.machine.name || "") + (v.machine.removed ? " (deleted)" : "")) + (v.model ? " · " + esc(v.model) : "") + "</span></div>"
     + segments(v)
     + '<div class="stats">' + stat("Elapsed", dur(elapsed), "started " + clock(v.started_at)) + when + stat("Spend", usd(v.cost_usd), spendSub, meter) + share + "</div>"
-    + now + warns + milestoneTable(v) + '<div class="actions">' + actions + "</div></section>";
+    + now + machineRow(v) + warns + milestoneTable(v) + '<div class="actions">' + actions + "</div></section>";
 }
 function renderRuns(s) {
   const host = $("runs");

@@ -54,8 +54,10 @@ class IncusCase(unittest.TestCase):
         self.scen.mkdir()
         self.root = self.tmp / "incus"
         os.environ.update(HOME=str(home), PATH=str(self.bindir) + os.pathsep + self.old_env["PATH"], ORG_SECRETS_DIR=str(self.secrets),
-                          FAKE_INCUS_ROOT=str(self.root), FAKE_CLAUDE_SCENARIO=str(self.scen / "scenario.json"))
-        for name in ("ORG_HOME", "FAKE_INCUS_BASE"):
+                          FAKE_INCUS_ROOT=str(self.root), FAKE_CLAUDE_SCENARIO=str(self.scen / "scenario.json"),
+                          # The kernel's files for the containers, of the test's own: never this machine's /sys/fs/cgroup.
+                          ORG_CGROUP_ROOT=str(self.tmp / "cgroup"))
+        for name in ("ORG_HOME", "FAKE_INCUS_BASE", "FAKE_INCUS_PROJECT"):
             os.environ.pop(name, None)
         # The template: what every engineer starts as. Stopped, isolated, and holding no login.
         self.container(TEMPLATE)
@@ -123,6 +125,26 @@ class IncusCase(unittest.TestCase):
         if value is None:
             return path.read_text().strip()
         path.write_text(value + "\n")
+
+    def cgroup(self, name, project="default", **values):
+        """Write the kernel's files for a container, as /sys/fs/cgroup/lxc.payload.<name> holds them.
+
+        `current`, `peak` and `max` are bytes (`max` may be the word "max"), `pids` a count,
+        `oom_kill` a count, `cpu_usec` microseconds. A value of None removes that file; with no
+        values the directory is made empty. Returns the directory.
+        """
+        d = self.tmp / "cgroup" / ("lxc.payload.%s" % name if project == "default" else "lxc.payload.%s_%s" % (project, name))
+        d.mkdir(parents=True, exist_ok=True)
+        texts = {"current": ("memory.current", "%s\n"), "peak": ("memory.peak", "%s\n"), "max": ("memory.max", "%s\n"),
+                 "pids": ("pids.current", "%s\n"), "oom_kill": ("memory.events", "low 0\nhigh 0\nmax 0\noom 0\noom_kill %s\noom_group_kill 0\n"),
+                 "cpu_usec": ("cpu.stat", "usage_usec %s\nuser_usec 0\nsystem_usec 0\n")}
+        for key, value in values.items():
+            filename, text = texts[key]
+            if value is None:
+                (d / filename).unlink(missing_ok=True)
+            else:
+                (d / filename).write_text(text % value)
+        return d
 
     def calls(self):
         path = self.root / "calls.jsonl"
