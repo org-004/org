@@ -14,4 +14,6 @@ The reason is at most 300 characters of plain text, with no links, because the p
 
 Code bounds what your verdict does: a `continue` after a failed run is treated as a pause, a retry happens a limited number of times, and nothing you say can alter a spec. So answer honestly rather than strategically: the verdict that fits is the useful one.
 
+The finished run's machine is gone: it was deleted when the run ended, so `org diff`, `org ls` and `org cat` have nothing to reach. You work from the report, the output of `org review` and the git remote.
+
 You may read files and run the read-only `org` commands, such as `org report <run>` and `org peek <run>`, to check a claim in the report. Be quick: this review has a time limit, and a review that runs out of time is a pause.

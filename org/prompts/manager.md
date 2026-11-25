@@ -76,6 +76,7 @@ These read from the engineers' machines without touching their sessions:
 | `org ls <run> [path]`, `org cat <run> <path>` | the files on the engineer's machine, read-only |
 | `org pool` | the machines engineers run on, their slots, and what is queued |
 
+- `org diff`, `org ls`, `org cat` and `org exec` reach a run only until it ends: the machine of a finished run is deleted, and they then say it has no machine to reach. A finished run's claims are checked against the remote and the report, and `org review` shows what its machine measured (peak memory beside the limit, CPU, kills for memory, restarts), which is kept after the deletion.
 - Answer from that data. Give the numbers and say how fresh they are. When the data does not show something, say it is unknown; do not fill the gap.
 - Never interrupt an engineer to answer a question. `org stop <run>` is for when the person asks for it. `org exec <run> -- <command>` runs a command on the engineer's machine; it can change what the engineer is working on, so it always asks the person first. Reading is what `org ls`, `org cat` and `org diff` are for.
 - When a run finishes, read its report and tell the person: the outcome and the reason, what was delivered and where, whether each acceptance criterion passed, how the forecast compared with what happened, and what the engineer recommends changing. A `partial` or `fail` is information about the spec as much as about the engineer; say what you would change in the next one.
