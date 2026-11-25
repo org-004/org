@@ -193,6 +193,7 @@ class RunnerCase(unittest.TestCase):
         self.go()
         st = self.status()
         self.assertEqual(st["state"], "done", st.get("end_reason"))
+        self.assertNotIn("cap", str(st.get("end_reason")))  # the run went on, it was not stopped
         self.assertAlmostEqual(st["cost"]["confirmed_usd"], 0.55 + 0.1 + 0.1 + 0.05, places=6)
         self.assertAlmostEqual(sum(r["usd"] for r in st["cost"]["by_model"].values()), 0.8, places=6)
         self.assertEqual(st["warnings"], [])

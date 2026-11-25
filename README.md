@@ -621,8 +621,9 @@ and check it with `org notify test`.
   reports no usage for it: an API error or a wake-up with nothing to do. One `claude` process may
   print several results (its own, an API error, one for each wake-up for background work), and
   each is closed with its own cost; the session's running total is never charged again. If the
-  spend counted and the sum of the per-model rows ever disagree by more than 1% and $0.50, the
-  run gets a warning that `org status` shows.
+  spend counted from the CLI's results (leaving out the estimates for turns that died without one)
+  and the sum of the per-model rows ever disagree by more than 1% and $0.50, the run gets a
+  warning that `org status` shows.
 - **The weekly limit** is the account-wide figure the CLI reports at the start of every engineer
   turn. It is exact and shared with everything else you do with Claude.
 - **A run's share of the weekly limit** needs the exchange rate between the two, which is not
