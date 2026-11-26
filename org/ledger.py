@@ -64,6 +64,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # repositories itself: no shell sandbox, so every shell command that is not a read asks;
         # pushes are no longer denied; and the chat is given the organization's GitHub token.
         "direct": False,
+        # The model and effort of a turn of the loop (org/loop.py). None: the manager's own.
+        "turn_model": None,
+        "turn_effort": None,
     },
     "machines": {
         # Where a spec runs when its header does not say: "incus", "ssh:<name>", "local", or a kind
@@ -115,6 +118,20 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Where a pause is told to the person: an address that takes an HTTP POST of one line of
     # text, such as a push service's topic. None: pauses show in `org status` and the dashboard only.
     "notify": {"url": None, "headers": {}},
+    # The manager's loop (org/loop.py): org wakes a headless session of the manager when a run
+    # ended, something went wrong, or a time the manager named has come. Nothing runs by itself
+    # until `enabled` is set. `day_max_usd` and the brake (graph.pause_above_weekly_pct) are the
+    # two numbers that bound it.
+    "loop": {
+        "enabled": False,
+        "gap_min": 5,  # minutes from the end of one turn to the start of the next, at least
+        "settle_s": 120,  # how long a run's end must stand, over two ticks, before it wakes a turn
+        "idle_wake_h": 6,  # with nothing running and no wake time named, look again after this
+        "turn_max_usd": 10,  # a turn that has cost this much is killed
+        "turn_timeout_min": 60,  # a turn that has run this long is killed (a clock that does not jump)
+        "day_max_usd": 25,  # no turn starts once the local day's turns have cost this much
+        "tells_per_day": 6,  # lines a turn's `tell` may send to the owner in a local day
+    },
 }
 
 # What `org init` writes: only the knobs a person is likely to turn. Everything else comes from

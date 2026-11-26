@@ -29,7 +29,7 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from . import backends, budget, graph, secrets, telemetry
+from . import backends, budget, graph, loop, secrets, telemetry
 from .backends import BackendError, for_machine
 from .ledger import Ledger
 from .runner import TERMINAL_STATES
@@ -485,6 +485,12 @@ def pump(ledger: Ledger, log=lambda message: None) -> List[str]:
     started = []
     reap(ledger, log)
     graph.tick(ledger, log)  # returns at once in a ledger that has no plan
+    try:
+        # The manager's loop: does nothing unless loop.enabled is set; never raises, and is
+        # guarded here as well, because nothing of the loop may keep a queued run from starting.
+        loop.tick(ledger, log)
+    except Exception as e:  # noqa: BLE001
+        log("loop: %s: %s" % (type(e).__name__, e))
     queued = [r for r in ledger.run_ids() if ledger.run(r).get("state") == "queued"]
     queued.sort(key=lambda r: ledger.run(r).get("created_at") or 0)
     for run_id in queued:

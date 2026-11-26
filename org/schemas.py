@@ -139,6 +139,21 @@ REVIEW = {
 }
 
 
+TURN = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["did", "wake_in_min", "tell"],
+    "properties": {
+        "did": {"type": "array", "items": {"type": "string"},
+                "description": "What this turn did, one plain sentence each; the first is what `org loop status` shows"},
+        "wake_in_min": {"type": ["number", "null"], "minimum": 15, "maximum": 1440,
+                        "description": "Wake me this many minutes after this turn ends, or null: a run's end or trouble wakes me anyway"},
+        "tell": {"type": ["string", "null"],
+                 "description": "One line for the owner's phone, or null: the day's plan, when the owner is needed, or a result worth a minute of theirs"},
+    },
+}
+
+
 def problems(obj, schema, path="") -> list:
     """A small validator for the subset of JSON Schema used above.
 

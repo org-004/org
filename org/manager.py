@@ -256,6 +256,107 @@ def launch_env(ledger: Ledger, github: bool = False) -> dict:
     return env
 
 
+# ---------------------------------------------------------------- a turn of the loop (org/loop.py)
+
+ACTOR = "manager"  # the value of ORG_ACTOR in every chat and turn of the manager, and nowhere else
+
+
+def turn_problems(ledger: Ledger) -> list:
+    """What of R1 of spec 016 is missing for the loop to start a turn, as sentences; [] when a turn
+    may start. A turn runs as a direct chat that asks nothing runs, and under nothing else."""
+    mgr = ledger.config().get("manager") or {}
+    out = []
+    if not mgr.get("direct"):
+        out.append("manager.direct is not true")
+    if mgr.get("permission_mode") != "bypassPermissions":
+        out.append("manager.permission_mode is not bypassPermissions")
+    return out
+
+
+def turn_settings(ledger: Ledger) -> dict:
+    """The settings of a turn: exactly `settings(ledger, "talk")` of a direct chat that asks nothing,
+    with the deny rules of `loop.TURN_DENY_SHELL` and `loop.TURN_DENY_ORG` added, each in every
+    form a session could type it. Nothing else differs; a chat never has these rules."""
+    from . import loop
+
+    out = settings(ledger, "talk", with_sandbox=False)
+    extra = ["Bash(%s)" % c for c in loop.TURN_DENY_SHELL] + ["Bash(%s *)" % c for c in loop.TURN_DENY_SHELL] + _org(loop.TURN_DENY_ORG)
+    out["permissions"]["deny"] = out["permissions"]["deny"] + [r for r in extra if r not in out["permissions"]["deny"]]
+    return out
+
+
+def turn_env(ledger: Ledger) -> dict:
+    """The environment of a turn: `launch_env(ledger, github=True)` with `ORG_ACTOR=manager`."""
+    env = launch_env(ledger, github=True)
+    env["ORG_ACTOR"] = ACTOR
+    return env
+
+
+def actor_refusal(ledger: Ledger, command: str, header: Optional[dict] = None) -> Optional[str]:
+    """Why `org approve`, `org dispatch` or `org release` (`command`) is refused to the manager, or
+    None. Only when `ORG_ACTOR` is `manager` in this process's environment (R12 of spec 016): at
+    the brake, `graph.over_budget`'s reason; for `approve` and `dispatch`, a spec whose `header`
+    lacks `expect_usd` or `expect_hours`. Without `ORG_ACTOR` always None: a person's command
+    behaves as it always has."""
+    raise NotImplementedError
+
+
+def sessions_path(ledger: Ledger) -> Path:
+    return ledger.root / "manager.jsonl"
+
+
+def record_session(ledger: Ledger, kind: str, model: Optional[str], cost_usd: float, what: str, at: Optional[float] = None) -> None:
+    """Append one line to `<ledger>/manager.jsonl` for a headless session of the manager that ended
+    (R15 of spec 016): {"at", "kind" (`turn`, `review` or `ask`), "model", "cost_usd", "what"}.
+    Never raises: a line that cannot be written is not worth failing the session for."""
+    entry = {"at": now() if at is None else at, "kind": kind, "model": model, "cost_usd": round(float(cost_usd or 0.0), 6),
+             "what": str(what)[:300]}
+    try:
+        path = sessions_path(ledger)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=True) + "\n")
+    except OSError:
+        pass
+
+
+def sessions(ledger: Ledger) -> list:
+    """Every line of manager.jsonl, oldest first; a line that is not a JSON object is skipped."""
+    out = []
+    try:
+        with open(sessions_path(ledger), encoding="utf-8") as f:
+            for raw in f:
+                try:
+                    entry = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(entry, dict):
+                    out.append(entry)
+    except OSError:
+        pass
+    return out
+
+
+def sessions_cost(ledger: Ledger, since: float) -> dict:
+    """What the manager's headless sessions that ended at or after `since` cost, by kind:
+    {"turn": $, "review": $, "ask": $, "total": $}."""
+    out = {"turn": 0.0, "review": 0.0, "ask": 0.0}
+    for entry in sessions(ledger):
+        if (entry.get("at") or 0) >= since and isinstance(entry.get("cost_usd"), (int, float)):
+            kind = entry.get("kind") if entry.get("kind") in out else "other"
+            out[kind] = out.get(kind, 0.0) + float(entry["cost_usd"])
+    out["total"] = sum(v for k, v in out.items())
+    return out
+
+
+def chat_cost_estimate(ledger: Ledger, since: float) -> Optional[float]:
+    """An estimate of what the manager's chats cost since `since` (R21 of spec 016): the token counts
+    of Claude Code's own transcripts of conversations in the desk (`~/.claude/projects/<the desk's
+    path with every / as ->/*.jsonl`), messages at or after `since`, times `org/pricing.py`'s prices.
+    None when there is no transcript to read. Labelled an estimate wherever it is shown."""
+    return None
+
+
 def machines_help(cfg: dict) -> str:
     """The sentence of the persona that says what a spec's `machine` may be, from what is configured here."""
     from . import backends

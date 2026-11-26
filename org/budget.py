@@ -62,6 +62,14 @@ def weekly(ledger: Ledger) -> Optional[dict]:
     return week
 
 
+def windows(ledger: Ledger) -> dict:
+    """Every weekly window the newest `rate_limit_event`s carried, by the name it came with (R25 of
+    spec 016): {name: {"at", "utilization", "resets_at", "status", "run_id", "stale"}}. Nothing is
+    guessed about which model a window belongs to. `weekly` stays the `seven_day` window."""
+    week = weekly(ledger)
+    return {"seven_day": week} if week else {}
+
+
 def finished_actuals(ledger: Ledger) -> List[dict]:
     out = []
     for run_id in ledger.run_ids():

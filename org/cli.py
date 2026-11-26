@@ -836,6 +836,36 @@ def cmd_review_run(args) -> int:
     return review.run(ledger, need_run(ledger, args.run), args.attempt)
 
 
+def cmd_loop(args) -> int:
+    """`org loop status|pause [reason]|resume`: the manager's loop (org/loop.py). `status` reads;
+    `pause` and `resume` are allowed to the manager as well as to the person."""
+    from . import loop
+
+    ledger = Ledger(args.home)
+    ledger.init()
+    if args.action == "status":
+        if args.json:
+            json.dump(loop.status(ledger), sys.stdout, indent=2, sort_keys=True)
+            print()
+        else:
+            print(loop.render_status(loop.status(ledger)))
+    elif args.action == "pause":
+        loop.pause(ledger, " ".join(args.reason).strip(), by="hand")
+        print("the loop is paused; a running turn is left to end. `org loop resume` lifts it.")
+    elif args.action == "resume":
+        loop.resume(ledger)
+        print("the loop is resumed; the next pump starts a turn when one is due.")
+    return 0
+
+
+def cmd_loop_run(args) -> int:
+    """One turn of the manager's loop, as a process of its own. Started by org/loop.py only."""
+    from . import loop
+
+    ledger = Ledger(args.home)
+    return loop.run_turn(ledger, args.turn, args.offset)
+
+
 def cmd_login(args) -> int:
     from . import login
 
@@ -1053,6 +1083,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_subparsers(dest="action", required=True).add_parser("test", help="send one test message to notify.url")
     s.set_defaults(fn=cmd_notify)
     sub.add_parser("graph", help="every plan: its specs in order, their runs, what waits and why").set_defaults(fn=cmd_graph)
+    s = sub.add_parser("loop", help="the manager's loop: whether it is on, what it waits for; pause and resume it")
+    ls = s.add_subparsers(dest="action", required=True)
+    a = ls.add_parser("status", help="on or off, paused and why, the last three turns, what it waits for")
+    a.add_argument("--json", action="store_true")
+    a = ls.add_parser("pause", help="start no turn until `org loop resume` (a running turn is left to end)")
+    a.add_argument("reason", nargs="*")
+    ls.add_parser("resume", help="lift any pause, the loop's own after two failed turns included")
+    s.set_defaults(fn=cmd_loop)
+    s = sub.add_parser("loop-run", help=argparse.SUPPRESS)
+    s.add_argument("turn", type=int)
+    s.add_argument("--offset", type=float, default=0.0)
+    s.set_defaults(fn=cmd_loop_run)
     s = sub.add_parser("review-run", help=argparse.SUPPRESS)
     s.add_argument("run")
     s.add_argument("--attempt", type=int, default=1)
