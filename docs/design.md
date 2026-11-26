@@ -1041,15 +1041,19 @@ instruction and that an outside contribution is not worked on; that is a rule a 
 a wall. The walls are the ones the owner chose: the VM, and the tokens' scope.
 
 **What R2 keeps from it.** A turn has these denied, by deny rules added for a turn only (a chat is
-not changed): `ssh` and `scp`, because they reach other machines and the owner's computer resolves
-from the VM (`host.lima.internal`); and `org login`, `org down`, `org node add` and `org node rm`,
+not changed): `org login`, `org down`, `org node add` and `org node rm`,
 because they change the owner's login or stop the organization with nobody there. Each is denied
 with `--home <dir>` or `--home=<dir>` before the verb (the only option that may stand there), and
-through `~/.local/bin/org` as well as `org`, `python -m org` and `bin/org`; `sftp` and the full
-paths of `ssh`, `scp` and `sftp` are denied too. A turn also cannot set the two numbers that bound
+through `~/.local/bin/org` as well as `org`, `python -m org` and `bin/org`. `ssh`, `scp` and `sftp`
+were denied to a turn when the loop landed and are not any more: the owner asked "what's the point
+of blocking the loops ssh access if engineers can do it anyways?", and there was none. An engineer's
+container has them, a chat has them, a prefix rule stops neither `python3` nor `git` from opening
+the same connection, and a manager that keeps machines in a cloud needs them. What keeps a session
+from the owner's computer is on that computer (whether it accepts logins at all) and in `org-host`.
+A turn also cannot set the two numbers that bound
 it, `loop.*` and `graph.pause_above_weekly_pct`, by `org config set` or by the file tools on
 `loop/`, though its shell could still write the file: that is a guard against a slip. `sudo` and `su`
-stay denied as in a chat. Deny rules are what keeps `sudo` and `ssh` here, because there is no
+stay denied as in a chat. Deny rules are what keeps `sudo` here, because there is no
 sandbox to do it, and they match the form a model normally writes, so they guard against a slip
 and are not a wall; the wall is that the VM has no directory of the owner's computer mounted and no
 SSH agent, and what keeps the VM from that computer is made in `org-host`. Whether deny rules hold
@@ -1103,7 +1107,7 @@ first is a rule a model follows; only the second is a setting.
 | `org-host` on the Mac | Lima; the two tokens, from the Keychain | start, stop and delete the VM; pipe the tokens in; run commands in it |
 | `admin` and root in the VM | sudo; the firewall; `/etc/claude-code`; Incus | everything in the VM; used only by `org-vm` and its provisioning |
 | the `org` program in the VM | the ledger; both tokens; the `org` user's Incus project | create, enter and delete containers there; whatever the person or the page asks of it |
-| a turn of the manager's loop | what a direct chat that asks nothing holds: the organization's token, the Claude login, no sandbox, `incus`; `ssh`, `scp`, `org login`, `org down` and `org node add`/`rm` are denied | act with nobody watching, bounded by `loop.turn_max_usd`, `loop.day_max_usd` and the brake (see "The loop") |
+| a turn of the manager's loop | what a direct chat that asks nothing holds: the organization's token, the Claude login, no sandbox, `incus`, `ssh`; `org login`, `org down` and `org node add`/`rm` are denied | act with nobody watching, bounded by `loop.turn_max_usd`, `loop.day_max_usd` and the brake (see "The loop") |
 | manager chat | read access to what the `org` user can read, less the tokens; the desk | draft; propose approve, dispatch, stop, exec and the rest of the person's decisions |
 | the review, a headless manager session | what `ask` mode holds: reading, the read-only `org` commands; the text of a run's report | answer `continue`, `retry` or `pause`, and write a reason and a note for each waiting spec; code decides what that does |
 | engineer | root in its container; copies of both tokens | anything in its container; on GitHub and the model, what the tokens allow; read and write the build cache |

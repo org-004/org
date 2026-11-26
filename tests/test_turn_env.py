@@ -83,10 +83,13 @@ class WhatATurnRunsUnder(Base):
         self.assertNotIn("sandbox", s)
         self.assertEqual(s["permissions"]["ask"], [])
 
-    def test_what_a_turn_runs_under_denies_root_and_other_machines(self):
+    def test_what_a_turn_runs_under_denies_root_and_not_other_machines(self):
         deny = manager.turn_settings(self.ledger)["permissions"]["deny"]
-        for command in ("sudo ls", "su", "ssh host", "ssh", "scp a b:c", "scp"):
+        for command in ("sudo ls", "su"):
             self.assertTrue(listed(deny, command), command)
+        # A manager that keeps machines in a cloud reaches them as an engineer's container can.
+        for command in ("ssh host", "ssh", "scp a b:c", "sftp host", "/usr/bin/ssh host", "/usr/bin/scp a b:c"):
+            self.assertFalse(listed(deny, command), command)
 
     def test_what_a_turn_runs_under_denies_the_commands_that_stop_the_organization(self):
         deny = manager.turn_settings(self.ledger)["permissions"]["deny"]
@@ -112,12 +115,6 @@ class WhatATurnRunsUnder(Base):
         for command in ('org spec new "Fix the login page"', "org loop pause waiting for the owner to login",
                         "org exec 012 -- docker compose down"):
             self.assertFalse(listed(deny, command), command)
-
-    def test_what_a_turn_runs_under_denies_every_way_to_another_machine(self):
-        deny = manager.turn_settings(self.ledger)["permissions"]["deny"]
-        for command in ("sftp host", "sftp", "/usr/bin/ssh host", "/usr/bin/ssh", "/usr/bin/scp a b:c", "/usr/bin/scp",
-                        "/usr/bin/sftp h", "/usr/bin/sftp"):
-            self.assertTrue(listed(deny, command), command)
 
     def test_what_a_turn_runs_under_may_not_set_the_two_numbers_that_bound_it(self):
         turn = manager.turn_settings(self.ledger)["permissions"]["deny"]

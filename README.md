@@ -132,10 +132,11 @@ the machine slept counts at the next pump.
 or no turn starts; `org loop status` and `org doctor` say which is missing): no shell sandbox,
 no question before a command, the organization's GitHub token in its environment. It may read
 and change the organization's repositories, push, use the web, run `incus` and `docker`, approve
-and dispatch its own specs, and upgrade org. It may not run `sudo` or `su`, `ssh` or `scp`,
-`org login`, `org down`, `org node add` or `org node rm`: the last three would change your login or
-stop the organization with nobody there, and `ssh` would reach other machines, among them your
-computer, whose address resolves from the VM. Its prompt (`org/prompts/turn.md`) puts the work
+and dispatch its own specs, upgrade org, and reach machines it keeps elsewhere with `ssh`. It may
+not run `sudo` or `su`, `org login`, `org down`, `org node add` or `org node rm`: the last three
+would change your login or stop the organization with nobody there. Nothing in this repository
+keeps a session from your own computer, whose address resolves from the VM: that is for the
+computer itself (whether it accepts logins) and for `org-host`. Its prompt (`org/prompts/turn.md`) puts the work
 in this order: read the roadmap, the briefs and the journal; read each run it was woken for and
 write what it taught into the project's brief; mend what is small; on the first turn of a day
 write that day's plan at the top of the journal and send it to you; start only what the last
