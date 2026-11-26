@@ -527,7 +527,7 @@ def _launch(ledger: Ledger, turn: int, clock_offset: float) -> int:
     a turn's process is made, so that a test can stand in for it."""
     log = log_path(ledger, turn)
     log.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [sys.executable, "-m", "org", "--home", str(ledger.root), "loop-run", str(turn), "--offset", repr(float(clock_offset))]
+    cmd = [sys.executable, "-m", "org", "--home", str(ledger.root), "loop-run", str(turn), "--offset=%r" % float(clock_offset)]
     env = dict(os.environ)
     here = str(Path(__file__).resolve().parent.parent)
     env["PYTHONPATH"] = here + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
@@ -640,6 +640,16 @@ def _num(x) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool)
 
 
+def _as_num(x) -> Optional[float]:
+    """A number of a spec's header, which a header of an older parser may hold as text; None when it is none."""
+    if _num(x):
+        return float(x)
+    try:
+        return float(str(x).strip()) if isinstance(x, str) and x.strip() else None
+    except ValueError:
+        return None
+
+
 def _when(t: Optional[float]) -> str:
     return time.strftime("%a %Y-%m-%d %H:%M", time.localtime(t)) if _num(t) else "unknown"
 
@@ -660,8 +670,9 @@ def _run_section(ledger: Ledger, run_id: str, rate: Optional[float]) -> str:
     hold = rec.get("paused") or rec.get("held")
     forecast = []
     for key, words in (("expect_usd", "$%g"), ("expect_hours", "%g hours")):
-        forecast.append(words % header[key] if _num(header.get(key)) else "no %s" % key)
-    caps = ["%s %s" % (key, header[key]) for key in ("max_cost_usd", "max_hours", "max_weekly_pct") if _num(header.get(key))]
+        value = _as_num(header.get(key))
+        forecast.append(words % value if value is not None else "no %s" % key)
+    caps = ["%s %g" % (key, _as_num(header[key])) for key in ("max_cost_usd", "max_hours", "max_weekly_pct") if _as_num(header.get(key)) is not None]
     lines.append("- forecast: %s; caps: %s" % (", ".join(forecast), ", ".join(caps) or "none in its header"))
     took = []
     took.append(fmt_usd(view.get("cost_usd")) if _num(view.get("cost_usd")) else "no cost recorded")
@@ -722,8 +733,8 @@ def _budget_section(ledger: Ledger, now: float) -> str:
         if kind not in ("live", "queued", "held", "paused"):
             continue
         view = status.run_view(ledger, run_id, rv)
-        cap = _header(ledger, rec.get("spec_id") or "").get("max_cost_usd")
-        if not _num(cap):
+        cap = _as_num(_header(ledger, rec.get("spec_id") or "").get("max_cost_usd"))
+        if cap is None:
             cap = view.get("cost_cap_usd")
         spent = view.get("cost_usd") if _num(view.get("cost_usd")) else 0.0
         if _num(cap):
@@ -1044,6 +1055,11 @@ def run_turn(ledger: Ledger, turn: int, clock_offset: float = 0.0) -> int:
                     kill("killed at loop.turn_max_usd (%s): it had cost %s" % (fmt_usd(cap_usd), fmt_usd(meter.total_usd())))
             rc = proc.wait()
             threads[2].join(timeout=5)
+            for pipe in (proc.stdout, proc.stderr, proc.stdin):
+                try:
+                    pipe.close()
+                except (OSError, ValueError):
+                    pass
         err = tail.decode("utf-8", "replace").strip()[-400:]
         if stopped.is_set():
             outcome, reason = "stopped", "the turn's process was told to end (SIGTERM), and ended its session"
