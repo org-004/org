@@ -39,6 +39,17 @@ def restarted(meter):
 
 
 class NoTokensTest(unittest.TestCase):
+    def test_a_background_shell_is_not_a_subagent(self):
+        from org.stream import Meter, is_shell
+        m = Meter({})
+        m.feed({"type": "system", "subtype": "task_started", "task_id": "a", "description": "W1", "task_type": "local_agent"})
+        m.feed({"type": "system", "subtype": "task_started", "task_id": "b", "description": "sleep 580", "task_type": "local_bash"})
+        m.feed({"type": "system", "subtype": "task_started", "task_id": "c", "description": "old CLI"})
+        self.assertEqual((m.agents_spawned, m.shells_spawned, sorted(m.agents), sorted(m.shells)), (2, 1, ["a", "c"], ["b"]))
+        m.feed({"type": "system", "subtype": "task_notification", "task_id": "b", "status": "completed"})
+        self.assertEqual(m.shells, {})
+        self.assertFalse(is_shell({"task_type": "local_agent"}))
+
     def test_no_tokens_turns_of_the_three_ledger_runs_are_counted_as_spent(self):
         for run, (events, last) in LEDGER.items():
             m = Meter({})

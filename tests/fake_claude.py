@@ -18,7 +18,7 @@ A review is the turn "review:<run id>" when the scenario has that key, else "rev
 the first words of its message (TURN_OPENING, which is org/loop.py's OPENING) and is the turn "turn:<n>" when the scenario
 has that key, else "turn"; n is the number its message gives as "(turn <n>)". A turn entry may hold: structured, files,
 commands (argument lists run in the session's working directory and environment before its result, their output on
-stderr), cost, sleep, die, prose, limit (seconds until reset),
+stderr), cost, sleep, die, prose, limit (seconds until reset), shells (background shell tasks),
 budget, subagents, no_session, api_error, wakeups. `api_error` ends the turn as an API error that used
 no tokens: cumulative cost and usage unchanged and `model_usage_since_last_result: {}`, as Claude Code
 2.1.330 printed it in run 013. `wakeups: N` prints N further results after the turn's first, each after a
@@ -184,9 +184,16 @@ def main():
         "id": "msg_" + uuid.uuid4().hex[:12], "model": model, "usage": usage,
         "content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "echo working on " + label}}]}})
 
+    # A background shell command is a task too, as the real CLI reports one: task_type local_bash.
+    for n in range(int(entry.get("shells", 0))):
+        tid = "shell%d" % n
+        emit({"type": "system", "subtype": "task_started", "task_id": tid, "description": "sleep %d" % n, "task_type": "local_bash", "session_id": sid})
+        emit({"type": "system", "subtype": "task_notification", "task_id": tid, "status": "completed", "session_id": sid})
+
     for n in range(int(entry.get("subagents", 0))):
         tid = "task%d" % n
-        emit({"type": "system", "subtype": "task_started", "task_id": tid, "description": "worker %d" % n, "subagent_type": "general-purpose", "session_id": sid})
+        emit({"type": "system", "subtype": "task_started", "task_id": tid, "description": "worker %d" % n, "subagent_type": "general-purpose",
+              "task_type": "local_agent", "session_id": sid})
         emit({"type": "assistant", "session_id": sid, "parent_tool_use_id": "toolu_agent%d" % n, "message": {
             "id": "msg_" + uuid.uuid4().hex[:12], "model": MODELS["haiku"],
             "usage": {"input_tokens": 5, "output_tokens": 100, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 1000},

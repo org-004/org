@@ -287,6 +287,8 @@ class Runner:
             "agents_running": len(m.agents),
             "agents": list(m.agents.values())[:8],
             "agents_spawned": m.agents_spawned,
+            "shells_running": len(m.shells),
+            "shells_spawned": m.shells_spawned,
             "rate_limit": m.rate_limit,
             "waiting_until": st.get("waiting_until"),
             "caps": self.caps,
@@ -994,6 +996,7 @@ class Runner:
             "waits": [{"minutes": round((w["until"] - w["from"]) / 60.0, 1), "reason": w["reason"]} for w in st.get("waits") or []],
             "amendments": len(st.get("amendments") or []),
             "subagents_spawned": self.meter.agents_spawned,
+            "shells_spawned": self.meter.shells_spawned,
             "weekly": {
                 "utilization_start": (st.get("util_start") or {}).get("utilization"),
                 "utilization_end": week.get("utilization"),

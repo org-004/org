@@ -6,7 +6,8 @@ Event shapes were taken from Claude Code 2.1.322 (`claude -p --output-format str
   system/init            session_id, model
   assistant              message.id, message.model, message.usage, message.content[],
                          parent_tool_use_id (set for a subagent's messages)
-  system/task_started    task_id, description, subagent_type      (a subagent began)
+  system/task_started    task_id, description, subagent_type, task_type  (a subagent, or with
+                         task_type local_bash a background shell command, began)
   system/task_notification  task_id, status, usage                (a subagent ended)
   rate_limit_event       rate_limit_info.status, .resetsAt, .rateLimitType,
                          .unifiedWindows.<window>.utilization     (0..1 of the plan's limit)
@@ -118,10 +119,19 @@ def feed(path, start: int = 0):
                     if text:
                         yield f.tell(), lead + text
             elif kind == "system" and ev.get("subtype") == "task_started":
-                yield f.tell(), "  + subagent: %s" % clip(ev.get("description") or "", 120)
+                what = "background shell" if is_shell(ev) else "subagent"
+                yield f.tell(), "  + %s: %s" % (what, clip(ev.get("description") or "", 120))
             elif kind == "result":
                 cost = sum((m.get("costUSD") or 0) for m in (ev.get("model_usage_since_last_result") or {}).values())
                 yield f.tell(), "— turn ended: %s, $%.2f" % (ev.get("subtype"), cost)
+
+
+def is_shell(ev: dict) -> bool:
+    """Whether a `task_started` event is a background shell command, not a subagent. The CLI
+    reports both as tasks and tells them apart by `task_type` (`local_bash`, `local_agent`);
+    an event without one, from an older CLI, is taken for a subagent, as it was before."""
+    kind = str(ev.get("task_type") or "")
+    return kind.endswith("bash") or kind.endswith("shell")
 
 
 class Meter:
@@ -142,6 +152,8 @@ class Meter:
         self.activity: Optional[dict] = None
         self.agents: Dict[str, str] = {}  # running subagents: task id -> description
         self.agents_spawned = 0
+        self.shells: Dict[str, str] = {}  # background shell commands: task id -> command line
+        self.shells_spawned = 0
         self.last_event_at: Optional[float] = None
         self.unpriced: set = set()
 
@@ -253,13 +265,20 @@ class Meter:
                 self.session_id = ev.get("session_id") or self.session_id
                 self.model = ev.get("model") or self.model
             elif sub == "task_started":
-                self.agents[ev.get("task_id") or "?"] = ev.get("description") or ev.get("subagent_type") or "subagent"
-                self.agents_spawned += 1
+                if is_shell(ev):
+                    # A command the session left running in the background: not an agent.
+                    self.shells[ev.get("task_id") or "?"] = ev.get("description") or "shell"
+                    self.shells_spawned += 1
+                else:
+                    self.agents[ev.get("task_id") or "?"] = ev.get("description") or ev.get("subagent_type") or "subagent"
+                    self.agents_spawned += 1
             elif sub == "task_notification":
                 self.agents.pop(ev.get("task_id") or "?", None)
+                self.shells.pop(ev.get("task_id") or "?", None)
             elif sub == "task_updated":
                 if (ev.get("patch") or {}).get("status") in ("completed", "failed", "killed", "stopped"):
                     self.agents.pop(ev.get("task_id") or "?", None)
+                    self.shells.pop(ev.get("task_id") or "?", None)
             elif sub == "compact_boundary":
                 self.activity = {"at": now(), "text": "context compacted", "sub": False}
         elif kind == "assistant":

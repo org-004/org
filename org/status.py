@@ -518,8 +518,10 @@ def scorecard(ledger: Ledger, run_id: str) -> str:
                  "%s, %.1f h" % (fmt_usd(tot.get("cost_usd")), took_h),
                  "%s / %s" % (ratio(tot.get("cost_usd"), ex_usd), ratio(took_h, ex_hours))])
     lines += _table(rows, 200)
-    lines += ["", "turns %s · retries %s · usage-limit waits %s · plan amendments %s · subagents %s" % (
-        a.get("turns"), a.get("retries"), len(a.get("waits") or []), a.get("amendments"), a.get("subagents_spawned"))]
+    lines += ["", "turns %s · retries %s · usage-limit waits %s · plan amendments %s · subagents %s%s" % (
+        a.get("turns"), a.get("retries"), len(a.get("waits") or []), a.get("amendments"), a.get("subagents_spawned"),
+        # A run from before shells were told apart counted them among its subagents.
+        " · background shells %s" % a["shells_spawned"] if a.get("shells_spawned") is not None else "")]
     by_model = tot.get("by_model") or {}
     if by_model:
         lines.append("by model: " + ", ".join("%s %s" % (k.replace("claude-", ""), fmt_usd(v.get("usd"))) for k, v in sorted(by_model.items(), key=lambda kv: -kv[1].get("usd", 0))))

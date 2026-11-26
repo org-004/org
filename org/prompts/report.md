@@ -18,7 +18,7 @@ Anything listed as uncommitted or unpushed is lost: this machine is deleted as s
 
 ## What to do
 
-1. Check every acceptance criterion in the spec ({{acceptance_ids}}). Run the check; do not reason about whether it would pass. Where the run changed code, have a subagent that did not write the code verify the criteria from the spec alone, on a model you choose for the difficulty, and reconcile any disagreement before you report.
+1. Check every acceptance criterion in the spec ({{acceptance_ids}}) yourself. Run the check; do not reason about whether it would pass.
 2. Write `{{run_dir}}/report.md` for the person who approved the spec. They read it whole, so it is short: at most about 1,200 words, tables included. Facts and figures, not narrative. What changed in the code is in the commit message; do not repeat it. These sections, in this order:
    - **Outcome**: the status and the reason in two or three sentences, with the headline figure.
    - **Delivered**: per repository, the branch and the commit on the default branch when landed.

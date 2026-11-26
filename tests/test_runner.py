@@ -134,14 +134,15 @@ class RunnerCase(unittest.TestCase):
 
     # ------------------------------------------------------------ the normal path
     def test_plan_execute_report(self):
-        self.job({"plan": PLAN_TURN, "milestone:M1": dict(DONE("M1"), subagents=2), "milestone:M2": DONE("M2"), "report": REPORT})
+        self.job({"plan": PLAN_TURN, "milestone:M1": dict(DONE("M1"), subagents=2, shells=3), "milestone:M2": DONE("M2"), "report": REPORT})
         self.assertEqual(self.go(), 0)
         st = self.status()
         self.assertEqual(st["state"], "done")
         self.assertEqual(st["result"]["status"], "done")
         self.assertEqual((st["progress"]["done"], st["progress"]["total"]), (2, 2))
         self.assertAlmostEqual(st["cost"]["confirmed_usd"], 0.25 + 0.3 + 0.3 + 0.1, places=6)
-        self.assertEqual(st["agents_spawned"], 2)
+        self.assertEqual((st["agents_spawned"], st["shells_spawned"]), (2, 3), "background shells are not counted as subagents")
+        self.assertEqual(json.loads((self.run_dir / "actuals.json").read_text())["shells_spawned"], 3)
         self.assertEqual(st["rate_limit"]["windows"]["seven_day"]["status"], "allowed")
         calls = self.calls()
         self.assertEqual([c["label"] for c in calls], ["plan", "milestone:M1", "milestone:M2", "report"])
