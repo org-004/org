@@ -9,7 +9,7 @@ import re
 import shutil
 from typing import List, Optional
 
-from . import budget, dispatch, graph, notify, spec
+from . import budget, dispatch, graph, loop, notify, spec
 from .ledger import Ledger
 from .runner import TERMINAL_STATES
 from .sync import sync_all
@@ -152,6 +152,31 @@ def clean_leftover(raw) -> List[dict]:
 _STILL_HAS = re.compile(r"(\S.*?) still has (\d+) uncommitted file\(s\) and (\d+) unpushed commit\(s\)")
 
 
+def _forecast_of(ledger: Ledger, spec_id, version) -> dict:
+    """`expect_usd` and `expect_hours` from the header of the run's own version of its approved
+    spec (the current spec.md, or the saved spec.v<N>.md); None for each that is absent."""
+    out = {"expect_usd": None, "expect_hours": None}
+    if not spec_id:
+        return out
+    sdir = ledger.spec_dir(spec_id)
+    paths = [sdir / "spec.md"]
+    if version:
+        paths.insert(0, sdir / ("spec.v%s.md" % version))
+    for path in paths:
+        text = read_text(path)
+        if not text:
+            continue
+        meta, _ = spec.parse(text)
+        for key in out:
+            # Another part of the tool may or may not have typed the number yet: take either.
+            try:
+                out[key] = float(meta.get(key))
+            except (TypeError, ValueError):
+                out[key] = None
+        break
+    return out
+
+
 def run_view(ledger: Ledger, run_id: str, rate: Optional[float]) -> dict:
     rec = ledger.run(run_id)
     st = read_json(ledger.mirror_dir(run_id) / "status.json") or {}
@@ -225,6 +250,7 @@ def run_view(ledger: Ledger, run_id: str, rate: Optional[float]) -> dict:
         # The plan's cost as a share of the weekly limit: what the human budgets against.
         "estimate_weekly_pct": ((st.get("estimate") or {}).get("cost_usd") / rate)
         if (rate and (st.get("estimate") or {}).get("cost_usd") is not None) else None,
+        **_forecast_of(ledger, rec.get("spec_id"), rec.get("spec_version")),
         "forecast_cost_usd": forecast.get("cost_usd") if not terminal else None,
         "forecast_basis": forecast.get("basis"),
         "progress": st.get("progress") or {"done": 0, "total": 0, "milestones": []},
@@ -250,6 +276,14 @@ def run_view(ledger: Ledger, run_id: str, rate: Optional[float]) -> dict:
     return graph.annotate(ledger, rec, view)
 
 
+def loop_view(ledger: Ledger) -> dict:
+    """The loop's status for `org status`; when it cannot be read, say so rather than fail the page."""
+    try:
+        return loop.summary(ledger)
+    except Exception as e:  # the page must still draw
+        return {"error": str(e) or type(e).__name__, "line": "loop: unknown (%s)" % (str(e) or type(e).__name__)}
+
+
 def collect(ledger: Ledger, do_sync: bool = False) -> dict:
     if do_sync:
         # Someone is waiting on this. A machine that does not answer within a few seconds is
@@ -260,6 +294,7 @@ def collect(ledger: Ledger, do_sync: bool = False) -> dict:
         dispatch.pump(ledger)  # a run that just finished may have freed a slot for a queued one
     rate = budget.usd_per_pct(ledger)
     week = budget.weekly(ledger)
+    wins = budget.windows(ledger)
     runs = [run_view(ledger, r, rate["value"]) for r in ledger.run_ids()]
     runs.sort(key=lambda v: (v["terminal"], -(v["finished_at"] or v["started_at"] or 0)))
 
@@ -292,8 +327,10 @@ def collect(ledger: Ledger, do_sync: bool = False) -> dict:
         "now": now(),
         "home": str(ledger.root),
         "pool": dispatch.pool(ledger),
+        "loop": loop_view(ledger),
         "budget": {
             "weekly": week,
+            "windows": wins,
             "usd_per_pct": rate,
             "org_spend_this_window_usd": spent if window_start else None,
             "org_pct_this_window": (spent / rate["value"]) if (window_start and rate["value"]) else None,
@@ -314,9 +351,23 @@ def state_label(v: dict) -> str:
     return label
 
 
+def _windows_head(wins: dict) -> str:
+    """Each weekly window by the name it came with, with its share used."""
+    parts = []
+    for name, w in sorted(wins.items(), key=lambda kv: kv[0] != "seven_day"):
+        if w.get("stale"):
+            parts.append("%s reset %s; no reading since" % (name, fmt_clock(w.get("resets_at"))))
+        else:
+            parts.append("%s %s used, resets %s (in %s)" % (name, fmt_pct(w.get("utilization")), fmt_clock(w.get("resets_at")),
+                                                            fmt_dur((w.get("resets_at") or now()) - now())))
+    return "Weekly limits: " + "; ".join(parts)
+
+
 def budget_line(b: dict) -> str:
     week, rate = b.get("weekly"), b.get("usd_per_pct") or {}
-    if not week:
+    if len(b.get("windows") or {}) > 1:
+        head = _windows_head(b["windows"])
+    elif not week:
         head = "Weekly limit: not seen yet (the first engineer turn reports it)"
     elif week.get("stale"):
         head = "Weekly limit: reset %s; no reading since" % fmt_clock(week.get("resets_at"))
@@ -358,6 +409,8 @@ def render(state: dict, width: Optional[int] = None) -> str:
         lines.append("Pool: " + " · ".join("%s %d/%d" % ((p["kind"] + ":" if several else "") + p["node"], p["used"], p["slots"])
                                            for p in state["pool"])
                      + ((" · %d queued" % queued) if queued else ""))
+    if state.get("loop"):
+        lines.append(state["loop"].get("line") or "loop: unknown")
     lines.append("")
     runs = state["runs"]
     if runs:
@@ -457,6 +510,13 @@ def scorecard(ledger: Ledger, run_id: str) -> str:
     if rep:
         rows.append(["verify and report", "in the totals", "%s %s" % (fmt_dur((rep.get("minutes") or 0) * 60), fmt_usd(rep.get("cost_usd"))), "—"])
     rows.append(["total", "", "%s, %s" % (fmt_dur((tot.get("elapsed_minutes") or 0) * 60), fmt_usd(tot.get("cost_usd"))), ""])
+    # The forecast is what the spec's header said before the run; the plan's estimate is the engineer's.
+    ex_usd, ex_hours = view.get("expect_usd"), view.get("expect_hours")
+    took_h = (tot.get("elapsed_minutes") or 0) / 60.0
+    rows.append(["forecast in the spec", "%s, %s" % (fmt_usd(ex_usd) if ex_usd is not None else "—",
+                                                      ("%g h" % ex_hours) if ex_hours is not None else "—"),
+                 "%s, %.1f h" % (fmt_usd(tot.get("cost_usd")), took_h),
+                 "%s / %s" % (ratio(tot.get("cost_usd"), ex_usd), ratio(took_h, ex_hours))])
     lines += _table(rows, 200)
     lines += ["", "turns %s · retries %s · usage-limit waits %s · plan amendments %s · subagents %s" % (
         a.get("turns"), a.get("retries"), len(a.get("waits") or []), a.get("amendments"), a.get("subagents_spawned"))]

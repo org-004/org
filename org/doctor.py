@@ -12,10 +12,10 @@ import sys
 from pathlib import Path
 from typing import List, Tuple
 
-from . import backends, budget, dispatch, login, notify, secrets
+from . import backends, budget, dispatch, login, loop, manager, notify, secrets
 from .ledger import Ledger
 from .manager import launch_env
-from .util import fmt_usd
+from .util import fmt_usd, now
 
 BIN = Path(__file__).resolve().parent.parent / "bin" / "org"
 
@@ -105,7 +105,34 @@ def checks(ledger: Ledger) -> List[Tuple[str, str, str, str]]:
     found += "; 1%% ≈ %s (%s)" % (fmt_usd(rate["value"]), rate["source"]) if rate["value"] else "; dollars per 1% not known yet"
     rows.append(("ok", "weekly limit", found, ""))
     add(*notify.doctor_row(cfg), soft=True)
+    _loop_rows(ledger, cfg, add)
     return rows
+
+
+PUMP_STALE_S = 600.0  # a dashboard pumps every few seconds; ten minutes of silence means it is not running
+
+
+def _loop_rows(ledger: Ledger, cfg: dict, add) -> None:
+    """The `loop` row: off, or on with what is missing for a turn to run and whether anything pumps."""
+    if not loop.enabled(ledger):
+        add(True, "loop", "off")
+        return
+    problems = []
+    if not str((cfg.get("notify") or {}).get("url") or ""):
+        problems.append("notify.url is not set: a loop that cannot tell you anything runs unseen")
+    try:
+        problems += ["%s" % p for p in manager.turn_problems(ledger)]
+    except Exception as e:  # a doctor that fails on one row hides the rest
+        problems.append("the loop's settings could not be read (%s)" % e)
+    try:
+        pumped = loop.pumped_at(ledger)
+    except Exception:
+        pumped = None
+    if pumped is None or now() - pumped > PUMP_STALE_S:
+        problems.append("nothing has pumped for ten minutes: is the dashboard's service running?"
+                        if pumped is not None else "nothing has pumped yet: is the dashboard's service running?")
+    add(not problems, "loop", "on" if not problems else "on; " + "; ".join(problems),
+        "org config set the settings named above (see `org loop status`), and keep `org dashboard` running" if problems else "", soft=True)
 
 
 def run(ledger: Ledger) -> int:
