@@ -294,9 +294,42 @@ class ManagerSettings(unittest.TestCase):
         self.assertEqual(env["GIT_CONFIG_VALUE_%d" % n], manager.GIT_HELPER)
         self.assertNotIn("github_pat", manager.GIT_HELPER, "the helper reads the token from the environment; it does not hold it")
         self.assertNotIn("GH_TOKEN", manager.launch_env(self.ledger), "a question, a review and an ordinary chat get no token")
-        note = manager.DIRECT_NOTE % {"desk": self.ledger.desk}
+        # A session started from inside a direct chat inherits its environment and still gets neither.
+        inherited = dict(GH_TOKEN="github_pat_not_a_real_token", GIT_CONFIG_COUNT="1",
+                         GIT_CONFIG_KEY_0="credential.https://github.com.helper", GIT_CONFIG_VALUE_0=manager.GIT_HELPER)
+        old = {k: os.environ.get(k) for k in inherited}
+        os.environ.update(inherited)
+        self.addCleanup(lambda: [os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v) for k, v in old.items()])
+        plain = manager.launch_env(self.ledger)
+        self.assertNotIn("GH_TOKEN", plain)
+        self.assertNotIn(manager.GIT_HELPER, plain.values())
+        again = manager.launch_env(self.ledger, github=True)
+        self.assertEqual(list(again.values()).count(manager.GIT_HELPER), 1, "and a direct chat started from one has the helper once")
+        self.assertEqual(manager.direct_note(self.ledger), "", "no note unless manager.direct is set")
+        write_json(self.ledger.config_path, {"manager": {"direct": True}})
+        note = manager.direct_note(self.ledger)
         self.assertIn("%s/work/<name>" % self.ledger.desk, note)
+        self.assertIn("asks the owner", note)
         self.assertNotIn("%(", note)
+
+    def test_a_direct_chat_asks_nothing_when_the_owner_sets_the_mode_that_bypasses_permissions(self):
+        write_json(self.ledger.config_path, {"manager": {"permission_mode": "bypassPermissions"}})
+        self.assertFalse(manager.unasked(self.ledger), "the mode alone does not take the questions away: manager.direct must be set too")
+        self.assertIn("Bash(org approve *)", manager.settings(self.ledger, "talk", with_sandbox=False)["permissions"]["ask"])
+        write_json(self.ledger.config_path, {"manager": {"direct": True, "permission_mode": "bypassPermissions"}})
+        self.assertTrue(manager.unasked(self.ledger))
+        self.assertEqual(manager.session_mode(self.ledger), "bypassPermissions")
+        p = manager.settings(self.ledger, "talk")["permissions"]
+        self.assertEqual(p["ask"], [], "an ask rule asks in every mode, so there is none")
+        # The wall that is left is root, and the ledger's own records are still not edited by hand.
+        for rule in ("Bash(sudo *)", "Bash(sudo)", "Bash(su *)", "mcp__*", "Edit(/%s/specs/**)" % self.ledger.root):
+            self.assertIn(rule, p["deny"], rule)
+        note = manager.direct_note(self.ledger)
+        self.assertIn("Nothing asks the owner", note)
+        self.assertNotIn("%(", note)
+        ask = manager.settings(self.ledger, "ask")["permissions"]
+        self.assertIn("Bash(org approve *)", ask["ask"], "a question or a review is not changed by it")
+        self.assertIn("Bash(git push *)", ask["deny"])
 
     def test_persona_names_the_desk_and_the_state(self):
         text = manager.persona(self.ledger)

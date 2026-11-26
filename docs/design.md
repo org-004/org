@@ -942,6 +942,16 @@ network. The person's answer to each prompt is the only check, and a page or a p
 misleads the session could lead it to ask for something harmful in words that look harmless.
 No live check of this mode against the real Claude Code had been run when this was written.
 
+**And the questions can go too.** The same owner, an hour later: "Can you make it so each command
+doesn't ask me? I want you to essentially run in skip-permissions-run-dangerously, same as the
+engineers". With `manager.direct` true and `manager.permission_mode` `bypassPermissions`, the
+chat is started in that mode and its `ask` list is empty, because an ask rule asks in every
+mode. Approve, dispatch, stop, exec and upgrade are then the manager's to run. What is left is
+the deny list: `sudo` and `su`, the ledger's records under the file tools, `mcp__*`. Deny rules
+match the form a model normally writes and are a guard against a slip, not a wall; the wall is
+the machine, which the owner makes and keeps apart from their own computer. Neither setting
+alone does this: the mode without `manager.direct` leaves the confined chat as it was.
+
 **What the live check taught**, in the layouts before this one (`tests/live_manager_rules.py`,
 fourteen attempted actions judged by outcome). The rules that came of it are unchanged:
 

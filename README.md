@@ -708,6 +708,12 @@ GitHub token, which git uses for github.com. `sudo` and `su` stay refused, the l
 unreadable, and approve, dispatch, stop, exec and upgrade still ask. Questions from the
 dashboard and the reviews between specs are not changed by it.
 
+With `manager.direct` true and `org config set manager.permission_mode bypassPermissions`, the
+chat asks nothing at all, as an engineer's session does: no question before a shell command, a
+file, an approval, a dispatch or an upgrade. `sudo` and `su` stay refused. The machine is then
+the only wall between the chat and everything it can reach; set it only on a machine you have
+given to the organization.
+
 The plan's settings are described under [Plans](#plans). `manager.review_model` and
 `manager.review_effort` are the review's model and effort, and `null` means the manager chat's own.
 `graph.max_retries` is the reviews' retries per version of a spec, `graph.max_resumes` the resumes

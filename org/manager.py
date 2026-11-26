@@ -124,6 +124,13 @@ def direct(ledger: Ledger) -> bool:
     return bool((ledger.config().get("manager") or {}).get("direct"))
 
 
+def unasked(ledger: Ledger) -> bool:
+    """Whether a direct chat runs without questions, as an engineer's session does: the owner
+    has set `manager.direct` and `manager.permission_mode` to `bypassPermissions`. The machine
+    is then the only wall, which is the owner's decision to make and nobody else's."""
+    return direct(ledger) and (ledger.config().get("manager") or {}).get("permission_mode") == "bypassPermissions"
+
+
 def sandboxed(ledger: Ledger) -> bool:
     if direct(ledger):
         return False  # a sandboxed shell has no login and cannot write a clone outside the desk
@@ -157,13 +164,16 @@ def settings(ledger: Ledger, mode: str, with_sandbox: Optional[bool] = None) -> 
         with_sandbox = False
     if with_sandbox is None:
         with_sandbox = mode == "talk" and sandboxed(ledger)
+    free = direct_mode and unasked(ledger)
     outward = [] if direct_mode else ["Bash(%s *)" % c for c in OUTWARD] + ["Bash(%s)" % c for c in OUTWARD_FORMS + OUTWARD_API]
     host = ROOT_COMMANDS if direct_mode else HOST_COMMANDS
     perms = {
         # Read(//**) as well as Read: the harness checks the paths given to ls, cat and the like
         # against read rules by path, and a rule without a path does not satisfy that check.
         "allow": ["Read", "Read(//**)", "Grep", "Glob"] + _org(READ_COMMANDS) + _read_rules(),
-        "ask": _org(HUMAN_COMMANDS) + ["Bash(ssh *)"],
+        # An ask rule asks in every permission mode, so a chat that is to run without
+        # questions has none.
+        "ask": [] if free else _org(HUMAN_COMMANDS) + ["Bash(ssh *)"],
         # An absolute path in a rule is written with a second leading slash.
         "deny": outward
         + ["Edit(/%s/specs/**)" % root, "Edit(/%s/runs/**)" % root, "Edit(/%s/config.json)" % root]
@@ -217,6 +227,16 @@ def launch_env(ledger: Ledger, github: bool = False) -> dict:
         env["CLAUDE_CODE_OAUTH_TOKEN"] = token
     for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"):
         env.pop(name, None)
+    # A session started from inside a direct chat inherits that chat's environment: take the
+    # credential helper out again, so that only a session meant to have it has it, once.
+    kept = [(env.get("GIT_CONFIG_KEY_%d" % i), env.get("GIT_CONFIG_VALUE_%d" % i)) for i in range(int(env.get("GIT_CONFIG_COUNT") or 0))]
+    for name in [k for k in env if k.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))] + ["GIT_CONFIG_COUNT"]:
+        env.pop(name, None)
+    kept = [(k, v) for k, v in kept if k is not None and v is not None and v != GIT_HELPER]
+    for i, (k, v) in enumerate(kept):
+        env["GIT_CONFIG_KEY_%d" % i], env["GIT_CONFIG_VALUE_%d" % i] = k, v
+    if kept:
+        env["GIT_CONFIG_COUNT"] = str(len(kept))
     if github:
         # Only a direct chat (`manager.direct`) is started this way: it is given the token that
         # engineers are given, which reaches the repositories of one organization, and git is
@@ -273,9 +293,23 @@ The owner has chosen to work with you directly in this chat. This section replac
 
 - You may change a repository of the organization yourself when that is the quickest way to a verified result: a small fix, a document, a configuration value, a failed check with a plain cause. Dispatch an engineer when the work needs a long build or test, or more than about half an hour.
 - Work in a clone of your own under `%(desk)s/work/<name>`, made with `git clone` (a scratch clone from `org clone` is given a push address that refuses). Follow the repository's own rules (`AGENTS.md`), run its checks, commit as its log does, and push. Your shell has the organization's token as `GH_TOKEN`, and git uses it for github.com.
-- There is no shell sandbox in this mode: every shell command that is not a read asks the owner, and so does a file written outside the desk. Say in a few words what a command is for before you run it.
+%(asks)s
 - Still not yours: `sudo` and `su`, the logins kept on this machine, and anything on the owner's own computer. What cannot be undone (deleting a repository or a branch, rewriting a default branch's history) is put to the owner in words first.
 - After you push, read the checks on the commit and say what they show."""
+
+
+DIRECT_ASKS = "- There is no shell sandbox in this mode: every shell command that is not a read asks the owner, and so does a file written outside the desk. Say in a few words what a command is for before you run it."
+DIRECT_FREE = ("- Nothing asks the owner in this mode: there is no shell sandbox and no question before a command, an approval, a dispatch or an upgrade, as in an engineer's session. "
+               "The machine is yours and it is the only wall. So you are the check: read a command before you run it, look at what you are about to delete or overwrite, "
+               "verify before you push, and say afterwards what you did. `org approve`, `org dispatch`, `org stop`, `org exec` and `org upgrade` are yours to run when the work calls for them; "
+               "keep to the budget the owner set, and never pass `--skip-tests` to an upgrade.")
+
+
+def direct_note(ledger: Ledger) -> str:
+    """What the persona gains in a direct chat; the empty string otherwise."""
+    if not direct(ledger):
+        return ""
+    return DIRECT_NOTE % {"desk": ledger.desk, "asks": DIRECT_FREE if unasked(ledger) else DIRECT_ASKS}
 
 
 def persona(ledger: Ledger, live_state: bool = True, extra: str = "", with_sandbox: bool = False) -> str:
@@ -337,7 +371,7 @@ def talk(ledger: Ledger, prompt: Optional[str] = None, project: Optional[str] = 
         return 127
     with_sandbox = sandboxed(ledger)
     direct_mode = direct(ledger)
-    note = (DIRECT_NOTE % {"desk": ledger.desk}) if direct_mode else ""
+    note = direct_note(ledger)
     mode = session_mode(ledger, with_sandbox)
     if dry_run:
         print("would run, in %s:\n  %s --append-system-prompt <persona, %d characters> --settings <below> --name 'org manager'%s\n"
@@ -353,8 +387,9 @@ def talk(ledger: Ledger, prompt: Optional[str] = None, project: Optional[str] = 
     prepare_own_session(ledger, claude)
     mgr = ledger.config().get("manager") or {}
     if direct_mode:
-        print("org: manager.direct is set: no shell sandbox, the manager asks before any shell command that is not a read,\n"
-              "     and it has the organization's GitHub token.", file=sys.stderr)
+        print("org: manager.direct is set: no shell sandbox, and the manager has the organization's GitHub token.\n     "
+              + ("manager.permission_mode is bypassPermissions: it asks nothing." if unasked(ledger)
+                 else "It asks before any shell command that is not a read."), file=sys.stderr)
     elif not with_sandbox and mgr.get("sandbox", True):
         print("org: no shell sandbox on this machine; the manager will ask before any shell command that is not a read.\n"
               "     `org doctor` says what is missing.", file=sys.stderr)
