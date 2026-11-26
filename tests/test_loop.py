@@ -413,6 +413,13 @@ class TwoFailuresInARow(LoopCase):
         self.assertEqual((line["outcome"], line["reason"]), ("failed", loop.NO_LINE))
         self.assertEqual(self.loop_state()["failures"], 1)
 
+    def test_what_a_turn_that_left_no_line_spent_is_read_from_its_log(self):
+        self.pid = gone_pid()
+        self.assertEqual(self.tick(), "bootstrap")
+        loop.log_path(self.ledger, 1).write_text(json.dumps({"type": "result", "session_id": "s", "total_cost_usd": 2.5}) + "\nnot json\n")
+        self.tick()
+        self.assertAlmostEqual(loop.turns(self.ledger)[0]["cost_usd"], 2.5)
+
 
 class TheTurnProcess(LoopCase):
     def started(self, why="bootstrap"):

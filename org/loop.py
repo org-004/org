@@ -560,7 +560,7 @@ def reap(ledger: Ledger, state: dict, now: float) -> None:
     """Step 2 of `tick`; changes `state` and sends what it says, writes nothing else but a line for
     a turn whose process ended without one. A process is gone when `dispatch._gone` says so for
     {"pid", "boot"} of `state.running`. A running turn whose line is there is over too, whatever
-    its pid now names."""
+    its pid now names. The line written for a turn that left none has the cost its log shows."""
     from . import dispatch, notify
 
     running = state.get("running")
@@ -571,7 +571,7 @@ def reap(ledger: Ledger, state: dict, now: float) -> None:
         has_line = any(line["turn"] == n for line in turns(ledger))
         if gone and not has_line:
             _append_line(ledger, turn_line(n, running.get("started_at") or now, now, running.get("why") or "?",
-                                           running.get("runs") or [], 0.0, "failed", NO_LINE, None, None))
+                                           running.get("runs") or [], _logged_cost(ledger, n), "failed", NO_LINE, None, None))
         if gone or has_line:
             state["running"] = None
     elif running is not None:
@@ -603,6 +603,26 @@ def reap(ledger: Ledger, state: dict, now: float) -> None:
                 _alert(ledger, "loop", "loop_paused", reason, now)
                 if (ledger.config().get("notify") or {}).get("url"):
                     notify._enqueue(ledger, "loop", PAUSED_TITLE, body)
+
+
+def _logged_cost(ledger: Ledger, turn: int) -> float:
+    """What a turn whose process ended without a line had cost, read again from the stream in its
+    log, so that the day's cost counts it; 0 when there is nothing to read."""
+    from . import pricing, stream
+
+    try:
+        meter = stream.Meter(pricing.table(ledger.config().get("pricing")))
+        with open(log_path(ledger, turn), "rb") as f:
+            for raw in f:
+                try:
+                    ev = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(ev, dict):
+                    meter.feed(ev)
+        return meter.total_usd()
+    except (OSError, ValueError, TypeError):
+        return 0.0
 
 
 def tell(ledger: Ledger, turn: int, line: str, now: float) -> bool:
