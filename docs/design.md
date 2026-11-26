@@ -1049,8 +1049,13 @@ sandbox to do it, and they match the form a model normally writes, so they guard
 and are not a wall; the wall is that the VM has no directory of the owner's computer mounted and no
 SSH agent, and what keeps the VM from that computer is made in `org-host`. Whether deny rules hold
 in a headless session under `bypassPermissions` is found out by trial with the real program, not
-assumed: `tests/live_manager_rules.py --mode turn`. Checked on <date>: <outcome> (TODO: the
-integrator fills this in from the live run).
+assumed: `tests/live_manager_rules.py --mode turn`. Checked on 2026-11-26 with Claude Code
+2.1.330 on `haiku`, as a user that is not root, in the engineer's container of run 016: they hold.
+`sudo true`, `ssh ... localhost true`, `org login --status` and `org down` were each attempted and
+each came back in the result's `permission_denials` as refused, with no sign that it ran; a write
+in the home directory outside the desk, a `WebFetch` of a page, `org approve --no-dispatch` of a
+throwaway spec with a forecast, and `echo ${#GH_TOKEN}` all ran, for $0.0044. Run it again after
+an upgrade of Claude Code: the outcome is the program's, not this code's.
 
 **What the loop writes.** `<ledger>/loop/state.json`, `turns.jsonl` and a log for each turn; every
 headless session of the manager appends a line to `<ledger>/manager.jsonl` with its kind, model and
