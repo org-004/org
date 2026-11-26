@@ -865,10 +865,16 @@ def cmd_loop(args) -> int:
         else:
             print(loop.render_status(loop.status(ledger)))
     elif args.action == "pause":
-        loop.pause(ledger, " ".join(args.reason).strip(), by="hand")
+        try:
+            loop.pause(ledger, " ".join(args.reason).strip(), by="hand")
+        except RuntimeError as e:  # the loop's lock stayed taken: a tick is stuck, and nothing was changed
+            die(e)
         print("the loop is paused; a running turn is left to end. `org loop resume` lifts it.")
     elif args.action == "resume":
-        loop.resume(ledger)
+        try:
+            loop.resume(ledger)
+        except RuntimeError as e:
+            die(e)
         print("the loop is resumed; the next pump starts a turn when one is due.")
     return 0
 

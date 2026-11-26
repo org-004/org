@@ -64,12 +64,12 @@ class EveryWeeklyWindow(Case):
         self.assertIn("seven_day_overage_included 81%", first)
         self.assertEqual(sorted(json.loads(json.dumps(state))["budget"]["windows"]), ["seven_day", "seven_day_overage_included"])
 
-    def test_the_brake_holds_when_only_the_second_window_is_at_81_percent_and_names_it(self):
+    def test_every_weekly_window_holds_the_brake_when_only_the_second_is_at_81_percent_and_it_is_named(self):
         self.sample_two_windows()
         self.assertEqual(graph.over_budget(self.ledger),
                          "the weekly limit seven_day_overage_included is 81% used, at or above graph.pause_above_weekly_pct (80%)")
 
-    def test_a_window_that_has_reset_does_not_hold_the_brake(self):
+    def test_every_weekly_window_that_has_reset_is_stale_and_holds_no_brake(self):
         self.sample_two_windows()
         book = read_json(self.ledger.budget_path)
         book["windows"]["seven_day_overage_included"]["resets_at"] = time.time() - 5

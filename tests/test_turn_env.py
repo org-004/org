@@ -133,7 +133,16 @@ class WhatATurnRunsUnder(Base):
         for kw in ({"direct": True}, {"permission_mode": "bypassPermissions"}, {}):
             self.set_manager(**kw)
             self.assertTrue(manager.turn_problems(self.ledger), kw)
-        # loop.tick may not exist yet in this worktree; what starts a turn is turn_problems.
+        # And the loop, turned on and due for its bootstrap, starts nothing while either is missing.
+        from org import loop
+
+        for kw in ({"direct": True}, {"permission_mode": "bypassPermissions"}):
+            self.set_manager(**kw)
+            write_json(self.ledger.config_path, dict(self.ledger.config(), loop={"enabled": True}))
+            with mock.patch.object(loop, "_launch") as launch:
+                self.assertIsNone(loop.tick(self.ledger, clock=lambda: 1795687200.0))
+            launch.assert_not_called()
+            self.assertEqual(loop.status(self.ledger)["problems"], manager.turn_problems(self.ledger))
 
     def test_what_a_turn_runs_under_reads_a_chats_cost_from_the_transcripts(self):
         home = self.tmp / "home"
