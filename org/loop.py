@@ -590,10 +590,31 @@ def _launch(ledger: Ledger, turn: int, clock_offset: float) -> int:
 NO_LINE = "the turn's process ended without a line"
 
 
+def _cmdline(pid) -> Optional[bytes]:
+    """The command line of a process, or None when /proc cannot tell (no /proc, or no such process)."""
+    try:
+        return Path("/proc/%d/cmdline" % int(pid)).read_bytes()
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _turn_process_gone(running: dict) -> bool:
+    """Whether the turn's process is gone: `dispatch._gone`, or a pid that now names a process that
+    is not a turn, which would otherwise keep the turn "running" for ever after a reuse of the pid."""
+    from . import dispatch
+
+    who = {"pid": running.get("pid"), "boot": running.get("boot")}
+    if dispatch._gone(who):
+        return True
+    cmd = _cmdline(running.get("pid"))
+    return cmd is not None and b"loop-run" not in cmd
+
+
 def reap(ledger: Ledger, state: dict, now: float) -> None:
     """Step 2 of `tick`; changes `state` and sends what it says, writes nothing else but a line for
     a turn whose process ended without one. A process is gone when `dispatch._gone` says so for
-    {"pid", "boot"} of `state.running`. A running turn whose line is there is over too, whatever
+    {"pid", "boot"} of `state.running`, or when its pid now names a process whose command line is
+    not a turn's (`loop-run`). A running turn whose line is there is over too, whatever
     its pid now names. The line written for a turn that left none has the cost its log shows."""
     from . import dispatch, notify
 
@@ -601,7 +622,7 @@ def reap(ledger: Ledger, state: dict, now: float) -> None:
     if isinstance(running, dict):
         n = int(running.get("turn") or 0)
         # Gone first, lines after: a process that has ended has written all it will write.
-        gone = dispatch._gone({"pid": running.get("pid"), "boot": running.get("boot")})
+        gone = _turn_process_gone(running)
         has_line = any(line["turn"] == n for line in turns(ledger))
         if gone and not has_line:
             _append_line(ledger, turn_line(n, running.get("started_at") or now, now, running.get("why") or "?",

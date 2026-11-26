@@ -52,6 +52,11 @@ class LoopCase(AfterCase):
         patcher = mock.patch.object(loop, "_launch", self.launch)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # The stood-in turn's pid is the test runner's, so what /proc says of it is said here.
+        self.cmdline = b"python\0-m\0org\0loop-run\0001\0"
+        reader = mock.patch.object(loop, "_cmdline", lambda pid: self.cmdline)
+        reader.start()
+        self.addCleanup(reader.stop)
         self.turn_on()
 
     # ------------------------------------------------------------ configuration and clock
@@ -412,6 +417,21 @@ class TwoFailuresInARow(LoopCase):
         (line,) = loop.turns(self.ledger)
         self.assertEqual((line["outcome"], line["reason"]), ("failed", loop.NO_LINE))
         self.assertEqual(self.loop_state()["failures"], 1)
+
+    def test_a_turn_whose_pid_now_names_another_process_is_failed_and_not_running_for_ever(self):
+        self.assertEqual(self.tick(), "bootstrap")
+        self.cmdline = b"/usr/sbin/sshd\0-D\0"
+        self.assertIsNone(self.tick())
+        (line,) = loop.turns(self.ledger)
+        self.assertEqual((line["outcome"], line["reason"]), ("failed", loop.NO_LINE))
+        self.assertIsNone(self.loop_state()["running"])
+
+    def test_a_turn_is_kept_running_when_proc_cannot_be_read(self):
+        self.assertEqual(self.tick(), "bootstrap")
+        self.cmdline = None
+        self.assertIsNone(self.tick())
+        self.assertEqual(loop.turns(self.ledger), [])
+        self.assertEqual(self.loop_state()["running"]["turn"], 1)
 
     def test_what_a_turn_that_left_no_line_spent_is_read_from_its_log(self):
         self.pid = gone_pid()
