@@ -143,7 +143,11 @@ def build_job(ledger: Ledger, meta: dict, run_id: str, machine: dict, facts: Opt
         "budget": {"usd_per_weekly_pct": rate["value"], "rate_source": rate["source"], "weekly": budget.weekly(ledger)},
         "pricing": cfg.get("pricing") or {},
         "history": budget.history(ledger),
-        "engineer": {k: eng[k] for k in ("max_turn_retries", "silence_timeout_min", "report_reserve_usd", "retry_backoff_s") if k in eng},
+        "engineer": {k: eng[k] for k in ("max_turn_retries", "silence_timeout_min", "report_reserve_usd", "retry_backoff_s", "plan_turn")
+                     if k in eng},
+        # The manager's forecast for the whole run, which a run done in one turn is measured against.
+        "forecast": {k: header[v] for k, v in (("usd", "expect_usd"), ("hours", "expect_hours"))
+                     if isinstance(header.get(v), (int, float)) and not isinstance(header.get(v), bool)},
         "claude_bin": machine.get("claude_bin") or "claude",
         "workspace": machine.get("workspace"),
         "machine": {"kind": machine["kind"], "name": machine["name"]},

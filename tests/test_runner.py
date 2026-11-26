@@ -132,6 +132,34 @@ class RunnerCase(unittest.TestCase):
         self.assertEqual(self.go(), 0)
         self.assertEqual({c["env"]["CLAUDE_CODE_SHELL_PREFIX"] for c in self.calls()}, {str(self.run_dir.resolve() / ".org" / "shell-prefix")})
 
+    # ------------------------------------------------------------ the spec in one turn
+    def test_with_plan_turn_false_the_spec_is_one_turn_that_ends_in_the_final_status(self):
+        self.job({"work": dict(REPORT, cost=0.6, shells=2)}, engineer={"plan_turn": False}, forecast={"usd": 2.0, "hours": 0.5})
+        self.assertEqual(self.go(), 0)
+        st = self.status()
+        self.assertEqual((st["state"], st["result"]["status"]), ("done", "done"))
+        self.assertEqual([c["label"] for c in self.calls()], ["work"], "no planning turn, no milestone turns, no report turn")
+        self.assertAlmostEqual(st["cost"]["confirmed_usd"], 0.6, places=6)
+        self.assertEqual((st["progress"]["done"], st["progress"]["total"]), (1, 1))
+        plan = json.loads((self.run_dir / "plan.frozen.json").read_text())
+        self.assertEqual((plan["one_turn"], plan["estimate"]), (True, {"wall_minutes": 30.0, "cost_usd": 2.0}))
+        self.assertTrue((self.run_dir / "report.md").exists())
+        self.assertEqual(json.loads((self.run_dir / "actuals.json").read_text())["shells_spawned"], 2)
+
+    def test_a_one_turn_run_is_still_held_to_its_criteria(self):
+        bad = dict(REPORT, structured={"status": "done", "msg": "Fine.", "acceptance": [{"id": "AC1", "verdict": "unverified", "evidence": "-"}]})
+        self.job({"work": bad}, engineer={"plan_turn": False})
+        self.go()
+        result = self.status()["result"]
+        self.assertEqual((result["status"], result.get("lowered_by_runner")), ("partial", True))
+
+    def test_a_one_turn_run_cut_off_by_its_cost_cap_still_gets_a_report_turn(self):
+        self.job({"work": {"budget": True}, "report": REPORT}, engineer={"plan_turn": False}, caps={"max_cost_usd": 5.0})
+        self.go()
+        st = self.status()
+        self.assertEqual([c["label"] for c in self.calls()], ["work", "report"])
+        self.assertIn("cost cap", st.get("end_reason") or "")
+
     # ------------------------------------------------------------ the normal path
     def test_plan_execute_report(self):
         self.job({"plan": PLAN_TURN, "milestone:M1": dict(DONE("M1"), subagents=2, shells=3), "milestone:M2": DONE("M2"), "report": REPORT})

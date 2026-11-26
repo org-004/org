@@ -771,6 +771,14 @@ class Runner:
             out.append("plan.md is missing or too short to review")
         return out
 
+    def one_turn(self) -> bool:
+        """Whether the spec is done in one turn (engineer.plan_turn false) instead of a planning
+        turn, a turn per milestone and a report turn. A run keeps the flow it started with."""
+        st = self.state
+        if "one_turn" not in st:
+            st["one_turn"] = self.cfg.get("plan_turn", True) is False
+        return bool(st["one_turn"])
+
     def phase_plan(self) -> None:
         st = self.state
         self.set(state="planning", phase="planning", detail="researching and planning")
@@ -886,6 +894,55 @@ class Runner:
                 break
         st["exec_ended_at"] = now()
         self.save_state()
+
+    def phase_work(self) -> dict:
+        """The spec in one turn: the engineer plans as much as it sees fit, does the work,
+        writes the report and returns the final status. The caps hold as in any turn; a turn
+        that is ended by one goes on to the report turn, as a milestone would."""
+        st = self.state
+        forecast = self.job.get("forecast") or {}
+        if not st.get("plan_done_at"):
+            # A plan of one milestone, so that status, ETA and `org review` read this run as any other.
+            minutes = (forecast.get("hours") or 0) * 60 or None
+            milestone = {"id": "W", "title": "the spec, in one turn", "est_minutes": minutes or 0,
+                         "est_cost_usd": forecast.get("usd") or 0, "goal": "every MUST requirement met and reported"}
+            plan = {"verdict": "proceed", "summary": "One turn: the engineer planned as it saw fit.",
+                    "estimate": {"wall_minutes": minutes or 0, "cost_usd": forecast.get("usd") or 0}, "milestones": [milestone],
+                    "one_turn": True}
+            write_json(self.dir / "plan.json", plan)
+            write_json(self.dir / "plan.frozen.json", plan)
+            st.update(plan=plan, verdict="proceed", estimate=plan["estimate"], milestones=[dict(milestone)],
+                      plan_done_at=now(), plan_cost_usd=self.meter.confirmed_usd)
+        if not st.get("exec_started_at"):
+            st["exec_started_at"] = now()
+        m = st["milestones"][0]
+        if not m.get("started_at"):
+            m["started_at"] = now()
+            m["cost_start"] = self.meter.confirmed_usd
+        self.set(state="executing", phase="executing", detail="working on the spec")
+        self.save_state()
+        self.check_spec()
+        prompt = render(
+            read_text(PROMPTS / "work.md"),
+            run_dir=self.dir,
+            spec_sha=self.job.get("spec_sha") or "",
+            repos=", ".join(self.job.get("repos") or []) or "none named; see the spec",
+            caps=self._caps_text(),
+            budget=self._budget_text(),
+            acceptance_ids=", ".join(self.job.get("acceptance_ids") or []) or "see the spec",
+        )
+        # The reserve is kept, so a turn ended by the cost cap still leaves the report turn its money.
+        res = self.turn("work", prompt, schemas.RESULT)
+        result = dict(res["structured"])
+        m["ended_at"] = now()
+        m["outcome"] = {"done": "done", "partial": "partial"}.get(result.get("status"), "blocked")
+        m["summary"] = result.get("msg")
+        m["cost_usd"] = self.meter.confirmed_usd - (m.get("cost_start") or 0)
+        st["exec_ended_at"] = now()
+        st["end_reason"] = st.get("end_reason") or "the engineer finished the spec in one turn"
+        self.say("work: %s in %s for %s" % (result.get("status"), fmt_dur(m["ended_at"] - m["started_at"]), fmt_usd(m["cost_usd"])))
+        self.save_state()
+        return self.settle(result)
 
     def repo_checks(self) -> List[dict]:
         """Every git repository in the workspace, with what would be lost if the machine vanished."""
@@ -1028,7 +1085,11 @@ class Runner:
             run_dir=self.dir,
         )
         res = self.turn("report", prompt, schemas.RESULT, reserve=False)
-        result = dict(res["structured"])
+        return self.settle(dict(res["structured"]))
+
+    def settle(self, result: dict) -> dict:
+        """What the runner checks of a final status, however it was reached."""
+        st = self.state
         # A run is done only if every criterion in the spec was reported as passing.
         verdicts = {a.get("id"): a.get("verdict") for a in result.get("acceptance") or []}
         failing = [i for i in (self.job.get("acceptance_ids") or []) if verdicts.get(i) != "pass"]
@@ -1080,12 +1141,17 @@ class Runner:
             return 3
         self.prepare()
         self.say("run %s on %s, model %s" % (self.job["run_id"], os.uname().nodename, self.job.get("model")))
+        result: Optional[dict] = None
         try:
             try:
-                if not st.get("plan_done_at"):
-                    self.phase_plan()
-                if st.get("verdict") == "proceed" and not st.get("exec_ended_at"):
-                    self.phase_execute()
+                if self.one_turn():
+                    if not st.get("exec_ended_at"):
+                        result = self.phase_work()
+                else:
+                    if not st.get("plan_done_at"):
+                        self.phase_plan()
+                    if st.get("verdict") == "proceed" and not st.get("exec_ended_at"):
+                        self.phase_execute()
             except CapReached as e:
                 cap = self.cost_cap()
                 st["end_reason"] = ("the cost cap of %s was reached" % fmt_usd(cap)) if e.kind == "cost" else (
@@ -1096,7 +1162,8 @@ class Runner:
                 self.say(st["end_reason"])
             self.save_state()
             try:
-                result = self.phase_report()
+                if result is None:
+                    result = self.phase_report()
             except (TurnFailed, CapReached) as e:
                 progressed = any(m.get("outcome") in ("done", "partial") for m in st.get("milestones") or [])
                 result = {

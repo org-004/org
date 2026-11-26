@@ -23,7 +23,7 @@ Standard library Python around the `claude` CLI. No database: the state is files
  │         │ copy the template / run a command in / delete      (incus)        │
  │         ▼                                                                   │
  │  org-eng-<run>    one unprivileged container per run, a copy of org-base    │
- │  org-eng-<run>    runner ─▶ claude -p: plan ▸ milestones ▸ report           │
+ │  org-eng-<run>    runner ─▶ claude -p: the spec in one turn, or plan ▸ …    │
  │                   the internet, and one port of org-cache                   │
  │  org-cache        the build cache every engineer reads and writes           │
  └─────────────────────────────────────────────────────────────────────────────┘
@@ -277,15 +277,18 @@ through it an engineer uses what other engineers built. Dispatch copies the two 
 container's memory and the runner hands them to the session as `CLAUDE_CODE_OAUTH_TOKEN` and
 `GH_TOKEN`.
 
-A deterministic runner drives the session through three phases, resuming one session throughout:
+A deterministic runner drives one session. With `engineer.plan_turn` false
+(`org config set engineer.plan_turn false`) it is one turn: the spec, with the caps and the
+budget. The engineer plans as much as it sees fit, works alone, writes `report.md` and returns
+`done`, `partial` or `fail`. The runner then checks it as it checks any report. A turn that a
+cap ends goes on to the report turn of step 3 below. Otherwise, and by default, there are three
+phases, resuming one session throughout:
 
 1. **Plan.** Research, then `plan.md` and a structured plan: verdict, milestones, and an estimate
    of time and cost with a 90th percentile. The runner checks the plan against the spec's caps,
    sends it back once if it does not fit, and freezes it (`plan.frozen.md`) for later review.
    A plan may say `infeasible`; the run then ends with `fail` and the reason.
-2. **Execute.** One turn per milestone. Parallelism lives inside a milestone: the engineer fans
-   out to subagents on cheaper models, in separate worktrees, against interfaces it settled
-   first. After each milestone the runner records the real cost and re-forecasts the finish. The
+2. **Execute.** One turn per milestone, done by the engineer alone. After each milestone the runner records the real cost and re-forecasts the finish. The
    engineer may replan the remaining milestones; the original stays frozen.
 3. **Report.** The runner hands over its measurements (estimate against actual per milestone,
    retries, waits, repositories with unpushed work) and the engineer verifies each acceptance

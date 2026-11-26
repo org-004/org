@@ -87,6 +87,8 @@ def label_of(prompt, turns=None):
         return "report"
     if "Plan the implementation of the spec" in prompt:
         return "plan"
+    if "Do the spec, all of it, in this turn." in prompt:
+        return "work"
     if "Question:" in prompt:
         return "ask"
     return "other"
