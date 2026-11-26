@@ -267,7 +267,7 @@ class DispatchOffersTheCache(CacheCase):
             def run(self, script, **how):
                 self.ran.append(script)
 
-        def broken(cfg):
+        def broken(cfg, remote=None):
             raise AttributeError("'NoneType' object has no attribute 'get'")
 
         real, cache.look = cache.look, broken

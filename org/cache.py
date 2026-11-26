@@ -143,9 +143,10 @@ def bazelrc(address: str, port: int) -> str:
     ]) + "\n"
 
 
-def look(cfg: dict) -> dict:
+def look(cfg: dict, remote: Optional[str] = None) -> dict:
     """The cache as `incus list` shows it: {"state": off, misnamed, missing, stopped or running, ...}.
-    Raises TransportError when Incus does not answer."""
+    Raises TransportError when Incus does not answer. With `remote`, the cache of that machine:
+    each machine of machines.incus.nodes has its own, beside its engineers, made by its `org up`."""
     s = settings(cfg)
     if not s["enabled"]:
         return {"state": "off"}
@@ -153,10 +154,10 @@ def look(cfg: dict) -> dict:
     why = _misnamed(cfg)
     if why:
         return {"state": "misnamed", "name": name, "why": why}
-    info = Incus.info(name)
+    info = Incus.info(name, remote=remote)
     if not isinstance(info, dict):
-        return {"state": "missing", "name": name}
-    seen = {"name": name, "faults": faults(info), "port": _port(cfg)}
+        return {"state": "missing", "name": Incus.at(remote, name)}
+    seen = {"name": Incus.at(remote, name), "faults": faults(info), "port": _port(cfg)}
     if info.get("status") != "Running":
         return dict(seen, state="stopped")
     return dict(seen, state="running", address=address(info))
@@ -175,7 +176,8 @@ def offer(tr: Transport, cfg: dict, log, again: bool = False) -> Optional[dict]:
     and settings written then are taken away when the cache is no longer reached, so that no
     build waits on an address nothing answers at."""
     try:
-        seen = look(cfg)
+        # The cache beside the engineer: on the machine whose Incus holds its container.
+        seen = look(cfg, getattr(tr, "remote", None))
         state = seen["state"]
         if state == "off":
             return None
@@ -216,12 +218,12 @@ def offer(tr: Transport, cfg: dict, log, again: bool = False) -> Optional[dict]:
         return {"state": "error"}
 
 
-def doctor(cfg: dict, add) -> None:
+def doctor(cfg: dict, add, remote: Optional[str] = None) -> None:
     """One row for `org doctor`, from `incus list` alone."""
     s = settings(cfg)
-    row = "build cache `%s`" % s.get("name")
+    row = "build cache `%s`" % Incus.at(remote, str(s.get("name")))
     try:
-        seen = look(cfg)
+        seen = look(cfg, remote)
     except TransportError as e:
         add(False, row, str(e)[:200], "is this user in the `incus` group?")
         return

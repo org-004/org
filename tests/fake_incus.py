@@ -12,6 +12,9 @@ from Incus's description of it, the token copy, the bundle transfer, the detache
     incus start|stop [-q] <name>            incus delete [-q] [-f] <name>
     incus list [-f csv|json] [-c ns] [prefix]
     incus exec <name> [-T|-t] [--env K=V] -- <argv...>
+    <remote>:<name> anywhere above        the same, on a remote: a directory .remote-<remote> of its own
+                                          ($FAKE_INCUS_DOWN="w1,w2": those remotes do not answer)
+    incus query <remote>:/1.0/resources   {"memory": {"total": $FAKE_INCUS_MEMORY_MIB MiB}} when that is set
     incus config … (the rest) | network … | profile … | storage … | admin …      accepted, recorded, nothing done
 
 Every call is appended to calls.log (its first four words) and calls.jsonl (all of it), so a test
@@ -57,6 +60,7 @@ SECRETS = ".run-org"  # under a container's home: what /run/org is in a real one
 BAZELRC = "etc-bazel.bazelrc"  # under a container's home: what /etc/bazel.bazelrc is in a real one
 CGROUP = ".cgroup"  # under a container's home: what /sys/fs/cgroup is in a real one
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
+REMOTE_ARG = re.compile(r"([a-z][a-z0-9-]*):(.*)")
 NOTHING_DONE = ("config", "network", "profile", "storage", "admin")
 INIT_FLAGS_WITH_VALUE = ("-c", "--config", "-d", "--device", "-p", "--profile", "-s", "--storage", "-n", "--network",
                          "-t", "--type", "--target", "--description")
@@ -97,6 +101,31 @@ def main(argv):
         f.write(json.dumps(argv) + "\n")
     if not argv:
         return 2
+    # `remote:name` (and `remote:` alone, in `list`) is a container of another machine's Incus:
+    # here, a directory of its own under the root, .remote-<remote>. One call reaches one remote.
+    # Only the words before `--`: what follows is the command run in the container.
+    remotes, end = set(), argv.index("--") if "--" in argv else len(argv)
+    head = []
+    for i, a in enumerate(argv[:end]):
+        # `init` and `launch` name an image, and `images:` is the image server, not a machine.
+        found = REMOTE_ARG.fullmatch(a) if i and not a.startswith("-") and argv[0] not in ("init", "launch") else None
+        if found:
+            remotes.add(found.group(1))
+            if found.group(2):
+                head.append(found.group(2))
+        else:
+            head.append(a)
+    argv = head + argv[end:]
+    if len(remotes) > 1:
+        sys.stderr.write("Error: fake incus: one call reaches one remote, not %s\n" % ", ".join(sorted(remotes)))
+        return 1
+    if remotes:
+        remote = remotes.pop()
+        if remote in os.environ.get("FAKE_INCUS_DOWN", "").split(","):
+            sys.stderr.write("Error: Get \"https://%s:8443/1.0\": dial tcp: connect: connection refused\n" % remote)
+            return 1
+        root = root / (".remote-" + remote)
+        root.mkdir(parents=True, exist_ok=True)
 
     def fail(message, code=1):
         sys.stderr.write("Error: %s\n" % message)
@@ -196,6 +225,9 @@ def main(argv):
         if flags or len(plain) != 1:
             return fail("fake incus: only `query <path>` is supported, not %s" % " ".join(args), 2)
         path = plain[0].rstrip("/")
+        if path == "/1.0/resources" and os.environ.get("FAKE_INCUS_MEMORY_MIB"):
+            print(json.dumps({"memory": {"total": int(os.environ["FAKE_INCUS_MEMORY_MIB"]) * 1024 * 1024}}))
+            return 0
         if path == "/1.0":
             print(json.dumps({"api_version": "1.0", "environment": {"server": "incus", "server_version": "fake"}}))
             return 0

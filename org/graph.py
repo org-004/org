@@ -622,7 +622,7 @@ def machine_stopped(ledger: Ledger, record: dict) -> bool:
         return False
     try:
         if machine.get("kind") == "incus":
-            info = Incus.info(name)
+            info = Incus.info(name, remote=machine.get("remote"))
             return info is not None and info.get("status") != "Running"
         if machine.get("kind") == "docker":
             state = Docker.state(name, machine.get("host"))

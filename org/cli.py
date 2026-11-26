@@ -633,9 +633,10 @@ def cmd_pool(args) -> int:
 
             # A setting that cannot be read is said here as `org doctor` says it, not raised.
             try:
-                limit = memory_limit(ledger.config())
+                cfg_now = ledger.config()
+                limit = memory_limit(cfg_now, node=p["node"] if ((cfg_now.get("machines") or {}).get("incus") or {}).get("nodes") else None)
                 where += ", %s each" % limit if limit else ", no memory limit"
-            except BackendError as e:
+            except Exception as e:  # BackendError, or a remote that did not answer
                 where += " (%s)" % e
         print("%-20s %d of %d slot(s) in use   %s" % (p["kind"] + ":" + p["node"], p["used"], p["slots"], where))
     if not nodes:
@@ -667,8 +668,9 @@ def cmd_node(args) -> int:
     if args.action == "ls":
         return cmd_pool(args)
     if "docker" not in backends.kinds(ledger.config()):
-        die('nodes belong to the Docker backend, which is a plugin and is not enabled here. For Incus containers the '
-            'pool is one number: `org config set machines.incus.slots 6`.')
+        die('`org node add` is for the Docker backend, which is a plugin and is not enabled here. For Incus containers '
+            'set the pool in config.json: `org config set machines.incus.slots 6` for this machine alone, or '
+            'machines.incus.nodes for several (see org/backends/incus.py).')
     from .backends.docker import nodes_of
 
     saved = read_json(ledger.config_path, {}) or {}

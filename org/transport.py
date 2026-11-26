@@ -9,9 +9,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 from typing import Dict, List, Optional
+
+
+#: The name of an Incus remote, as `incus remote add` is given it here.
+REMOTE_RE = re.compile(r"[a-z][a-z0-9-]{0,62}")
 
 
 class TransportError(Exception):
@@ -234,11 +239,26 @@ class Incus(Transport):
 
     kind = "incus"
 
-    def __init__(self, container: str):
+    def __init__(self, container: str, remote: Optional[str] = None):
         self.name = container
+        self.remote = remote
+        self.target = self.at(remote, container)
+
+    @staticmethod
+    def at(remote: Optional[str], name: str) -> str:
+        """The name Incus is given: `remote:name` for a container on another machine's Incus (a
+        remote of this user's client, `incus remote add`), the plain name for one on this machine."""
+        if not remote:
+            return name
+        if not REMOTE_RE.fullmatch(str(remote)):
+            raise TransportError("%r is not the name of an Incus remote: lowercase letters, digits and dashes" % (remote,))
+        return "%s:%s" % (remote, name)
 
     def argv(self, script: str) -> List[str]:
-        return ["incus", "exec", self.name, "-T", "--", "bash", "-c", script]
+        return ["incus", "exec", self.target, "-T", "--", "bash", "-c", script]
+
+    def describe(self) -> str:
+        return "incus:%s" % self.target
 
     def run(self, script: str, input: Optional[bytes] = None, timeout: float = 120, check: bool = True):
         return super().run(script, input=b"" if input is None else input, timeout=timeout, check=check)
@@ -250,13 +270,13 @@ class Incus(Transport):
         where this connects. python3 is in every engineer's container; nothing else is needed.
         """
         try:
-            return subprocess.Popen(["incus", "exec", self.name, "-T", "--", "python3", "-c", RELAY, str(int(port)), str(int(idle))],
+            return subprocess.Popen(["incus", "exec", self.target, "-T", "--", "python3", "-c", RELAY, str(int(port)), str(int(idle))],
                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
         except FileNotFoundError:
             raise TransportError("`incus` is not installed on this machine")
 
     def attach_hint(self, run_id: str) -> str:
-        return "incus exec %s -t -- tmux attach -t org-%s" % (self.name, run_id)
+        return "incus exec %s -t -- tmux attach -t org-%s" % (self.target, run_id)
 
     @staticmethod
     def incus(args: List[str], timeout: float = 180, input: bytes = b"") -> subprocess.CompletedProcess:
@@ -275,12 +295,13 @@ class Incus(Transport):
         return p.stdout.decode("utf-8", "replace").strip()
 
     @classmethod
-    def info(cls, container: str, timeout: float = 60) -> Optional[dict]:
+    def info(cls, container: str, timeout: float = 60, remote: Optional[str] = None) -> Optional[dict]:
         """The container as Incus describes it (status, expanded_config, expanded_devices), or None."""
         # `incus list`, not `incus query`: a user confined to a project of its own is shown that
         # project by the first and the default one, where it has nothing, by the second. The
         # filter is a pattern, so it is anchored and the name is compared again.
-        p = cls.incus(["list", "--format", "json", "^%s$" % container], timeout)
+        where = [cls.at(remote, "")] if remote else []
+        p = cls.incus(["list", "--format", "json"] + where + ["^%s$" % container], timeout)
         if p.returncode != 0:
             raise TransportError("incus list failed: %s" % p.stderr.decode("utf-8", "replace").strip()[-300:])
         try:
@@ -295,41 +316,55 @@ class Incus(Transport):
         return None
 
     @classmethod
-    def create(cls, base: str, container: str, config: Optional[Dict[str, str]] = None) -> "Incus":
+    def create(cls, base: str, container: str, config: Optional[Dict[str, str]] = None,
+               remote: Optional[str] = None) -> "Incus":
         """Copy the template and start the copy. On a copy-on-write pool the copy is instant.
 
         `config` is given to the command that makes the copy, so the copy never exists without
-        it and is never started without it; a key Incus refuses leaves no copy behind.
+        it and is never started without it; a key Incus refuses leaves no copy behind. On a
+        remote, the template is that machine's own, so the copy never crosses the network.
         """
-        args = ["copy", "-q", base, container]
+        args = ["copy", "-q", cls.at(remote, base), cls.at(remote, container)]
         for key in sorted(config or {}):
             args += ["-c", "%s=%s" % (key, config[key])]
-        cls.ok(args, "incus copy %s %s" % (base, container))
+        cls.ok(args, "incus copy %s %s" % (cls.at(remote, base), cls.at(remote, container)))
         try:
-            return cls.start(container)
+            return cls.start(container, remote)
         except TransportError:
-            cls.incus(["delete", "-q", "-f", container], 120)  # the copy is ours and is of no use
+            cls.incus(["delete", "-q", "-f", cls.at(remote, container)], 120)  # the copy is ours and is of no use
             raise
 
     @classmethod
-    def start(cls, container: str) -> "Incus":
-        info = cls.info(container)
+    def start(cls, container: str, remote: Optional[str] = None) -> "Incus":
+        info = cls.info(container, remote=remote)
         if info is None:
-            raise TransportError("incus: no container named %s" % container)
+            raise TransportError("incus: no container named %s" % cls.at(remote, container))
         if info.get("status") != "Running":
-            cls.ok(["start", "-q", container], "incus start %s" % container)
-        tr = cls(container)
+            cls.ok(["start", "-q", cls.at(remote, container)], "incus start %s" % cls.at(remote, container))
+        tr = cls(container, remote)
         # Started is not ready: wait for its init and for an address, or the first clone fails.
         ready = ('for i in $(seq 1 60); do ip -4 -o addr show scope global 2>/dev/null | grep -q inet && exit 0; sleep 0.5; done; exit 1')
         if tr.run(ready, timeout=90, check=False).returncode != 0:
-            raise TransportError("%s started but got no network address within 30s" % container)
+            raise TransportError("%s started but got no network address within 30s" % cls.at(remote, container))
         return tr
 
     @classmethod
-    def set_config(cls, container: str, key: str, value: str) -> None:
+    def set_config(cls, container: str, key: str, value: str, remote: Optional[str] = None) -> None:
         """Set one key on a container that exists, as `incus config set` does."""
-        cls.ok(["config", "set", container, key, value], "incus config set %s %s %s" % (container, key, value), 60)
+        target = cls.at(remote, container)
+        cls.ok(["config", "set", target, key, value], "incus config set %s %s %s" % (target, key, value), 60)
 
     @classmethod
-    def delete(cls, container: str) -> None:
-        cls.ok(["delete", "-q", "-f", container], "incus delete %s" % container, 120)
+    def delete(cls, container: str, remote: Optional[str] = None) -> None:
+        target = cls.at(remote, container)
+        cls.ok(["delete", "-q", "-f", target], "incus delete %s" % target, 120)
+
+    @classmethod
+    def memory_mib(cls, remote: str, timeout: float = 60) -> Optional[int]:
+        """The memory of the machine behind a remote, in whole MiB, as its Incus reports it, or None."""
+        p = cls.incus(["query", cls.at(remote, "/1.0/resources")], timeout)
+        try:
+            total = json.loads(p.stdout.decode("utf-8", "replace"))["memory"]["total"] if p.returncode == 0 else None
+            return int(total) // (1024 * 1024) if total else None
+        except (ValueError, KeyError, TypeError):
+            return None

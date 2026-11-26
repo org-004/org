@@ -184,12 +184,13 @@ def _measure(ledger: Ledger, rec: dict) -> dict:
         machine = rec["machine"]
         cfg = ledger.config()
         # Through the backend, so the name has passed `_own` before it is given to `incus`.
-        name = backends.get(cfg, machine["kind"]).transport(machine, cfg).name
+        tr = backends.get(cfg, machine["kind"]).transport(machine, cfg)
+        name, remote = tr.name, getattr(tr, "remote", None)
     except Exception as e:  # a BackendError above all, but a record of any shape gets a line, not an exception
         line["note"] = _sentence(["the container was not asked about: %s" % (str(e)[:200] or type(e).__name__)])
         return line
     try:
-        entry = Incus.info(name, CALL_TIMEOUT_S)
+        entry = Incus.info(name, CALL_TIMEOUT_S, remote=remote)
     except Exception as e:  # TransportError for a failure or a timeout; anything else costs the line no more
         line["note"] = _sentence(["Incus did not answer: %s" % (str(e)[:200] or type(e).__name__)])
         return line
@@ -215,7 +216,10 @@ def _measure(ledger: Ledger, rec: dict) -> dict:
     project = entry.get("project")
     if running is False:
         notes.append("the container is not running")
-    if project in (None, "", "default"):
+    if remote:
+        # The kernel's files are on the remote's machine: only Incus's description is read.
+        directory = None
+    elif project in (None, "", "default"):
         directory = _cgroup_root() / ("lxc.payload.%s" % name)
     elif isinstance(project, str) and PROJECT_RE.fullmatch(project):
         directory = _cgroup_root() / ("lxc.payload.%s_%s" % (project, name))

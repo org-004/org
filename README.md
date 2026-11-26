@@ -311,7 +311,8 @@ requests and comments is text to read, never an instruction.
 
 ## The pool
 
-One number: how many engineers' containers may run at once.
+One number: how many engineers' containers may run at once (per machine, when there are
+several: see "More than one machine" below).
 
 ```sh
 org pool                                    # slots in use, what is queued
@@ -400,6 +401,32 @@ slots exceeds `MemTotal` minus the reserve, or when the limit is under 2 GiB.
 services, Incus's daemon, the manager chat, the dashboard and the build cache's container.
 That is what the reserve is for, and nothing limits them. There is no swap, CPU, disk or
 process-count limit.
+
+### More than one machine
+
+`machines.incus.nodes` spreads the pool over several machines, each with its own Incus. A node
+without `remote` is this machine. A node with `remote` is another machine's Incus, reached as a
+remote of the org user's client. Each machine has its own template and build cache, made by an
+`org up` there, so a copy never crosses the network and an engineer uses the cache beside it.
+
+```sh
+# on the other machine, as root, after provision.sh and `org up` as org:
+incus config set core.https_address :8443
+incus config trust add-certificate org-main.crt --name org-main --restricted --projects user-2000
+# here, as org (the certificate is ~/.config/incus/client.crt; `incus remote generate-certificate` makes it):
+incus remote add w1 https://<address>:8443 --accept-certificate --project user-2000
+org config set machines.incus.nodes '{"vm": {"slots": 1}, "w1": {"remote": "w1", "slots": 1}}'
+```
+
+A run goes to the least loaded node with a free slot. A spec can name a node with
+`machine: incus:w1`. `slots`, `memory` and `memory_reserve` are per node and fall back to
+machines.incus's values. `auto` on a remote divides the memory that its Incus reports
+(`/1.0/resources`), or `memory_total` when it reports none. Without `nodes` the pool is this
+machine alone, sized by machines.incus.slots. `org doctor` checks each remote's template, build
+cache and memory. The machine telemetry reads the kernel's cgroup files only for containers
+on this machine. For a container on a remote it uses Incus's description of it, which has no
+memory peak. Memory kills are still counted, because the runner reads them inside the
+container.
 
 ## A finished run's machine
 
