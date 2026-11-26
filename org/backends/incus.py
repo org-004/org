@@ -36,7 +36,7 @@ import re
 import shutil
 from typing import Dict, List, Optional
 
-from .. import cache
+from .. import cache, power
 from ..transport import REMOTE_RE, Incus, Transport, TransportError
 from . import Backend, BackendError, machine_name
 
@@ -232,6 +232,27 @@ class IncusBackend(Backend):
         return {name: {"slots": e["slots"], "host": ("remote %s" % e["remote"]) if e["remote"] else None}
                 for name, e in node_entries(cfg).items()}
 
+    def ready(self, cfg: dict, node: str) -> bool:
+        entry = node_entries(cfg).get(node) or {}
+        remote = entry.get("remote")
+        if not remote:
+            return True  # this machine
+        base = self._settings(cfg)["base"]
+
+        def ask():
+            Incus.info(base, 8, remote=remote)  # raises when the remote does not answer
+            return True
+        return power.ready(node, ask)
+
+    def wake(self, ledger, cfg: dict, node: str, log=lambda message: None) -> bool:
+        return power.wake(ledger, node, node_entries(cfg).get(node) or {}, log)
+
+    def waking(self, ledger, cfg: dict) -> List[str]:
+        return power.waking(ledger, node_entries(cfg))
+
+    def power_tick(self, ledger, cfg: dict, load: Dict[str, int], log=lambda message: None) -> None:
+        power.idle(ledger, node_entries(cfg), load, lambda n: self.ready(cfg, n), log)
+
     def assign(self, cfg: dict, machine: dict, node: str) -> None:
         machine["node"] = node
         remote = node_entries(cfg)[node]["remote"]
@@ -372,6 +393,9 @@ class IncusBackend(Backend):
             try:
                 info = Incus.info(s["base"], 30, remote=remote)
             except TransportError as e:
+                if power.settings(entry):
+                    add(True, "node %s (remote %s)" % (node, remote), "not answering: started when a run is queued for it")
+                    continue
                 add(False, "node %s (remote %s)" % (node, remote), str(e)[:200],
                     "incus remote add %s https://<address>:8443, with this user's certificate trusted there" % remote)
                 continue

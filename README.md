@@ -421,7 +421,12 @@ incus remote add w1 https://<address>:8443 --accept-certificate --project user-2
 org config set machines.incus.nodes '{"vm": {"slots": 1}, "w1": {"remote": "w1", "slots": 1}}'
 ```
 
-A run goes to the least loaded node with a free slot. A spec can name a node with
+A run goes to the least loaded node with a free slot that answers. A node that does not
+answer is passed over. If it has `power` (`{"start": [argv], "stop": [argv], "idle_stop_min":
+20}`), it is started and the run waits in the queue for it. A node with power that has held no
+run for `idle_stop_min` is stopped. The commands are this user's own (a cloud VM's start and
+stop, say), run detached with their output in `<ledger>/logs/power-<node>.log`; see
+`org/power.py`. A spec can name a node with
 `machine: incus:w1`. `slots`, `memory` and `memory_reserve` are per node and fall back to
 machines.incus's values. `auto` on a remote divides the memory that its Incus reports
 (`/1.0/resources`), or `memory_total` when it reports none. Without `nodes` the pool is this

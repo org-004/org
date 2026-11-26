@@ -7,6 +7,7 @@ made here, and a test can see on which machine everything happened.
 import json
 import os
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -14,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from org import cache, dispatch, spec  # noqa: E402
+from org import cache, dispatch, power, spec  # noqa: E402
 from org.backends import BackendError  # noqa: E402
 from org.backends.incus import IncusBackend, memory_limit, node_entries  # noqa: E402
 from org.transport import Incus, TransportError  # noqa: E402
@@ -29,6 +30,7 @@ TWO = {"vm": {"slots": 1}, "w1": {"remote": "w1", "slots": 1, "memory_total": "8
 class Nodes(IncusCase):
     def setUp(self):
         super().setUp()
+        power._ready.clear()
         self.remote_container("w1", TEMPLATE)
         (self.remote_box("w1", TEMPLATE) / "home" / "from-w1s-template").write_text("w1\n")
         self.configure(nodes=TWO)
@@ -131,21 +133,79 @@ class Nodes(IncusCase):
         with self.assertRaises(TransportError):
             Incus.at("not a remote", "org-eng-x")
 
-    def test_a_remote_that_does_not_answer_fails_the_dispatch_and_doctor_says_so(self):
+    def test_a_remote_that_does_not_answer_is_passed_over_and_doctor_says_so(self):
         os.environ["FAKE_INCUS_DOWN"] = "w1"
-        with self.assertRaises(dispatch.DispatchError) as ctx:
-            dispatch.dispatch(self.ledger, self.approved(), machine_override="incus:w1", log=lambda m: None)
-        self.assertIn("connection refused", str(ctx.exception))
-        rec = self.ledger.run("001-csv-export-r1")
-        self.assertEqual((rec["state"], rec["machine"]["node"]), ("dispatch_failed", "w1"))
-        self.assertEqual(dispatch.pool(self.ledger)[1]["used"], 0, "a dispatch that failed holds no slot")
+        run_id, rec = dispatch.dispatch(self.ledger, self.approved(), machine_override="incus:w1", log=lambda m: None)
+        self.assertEqual(rec["state"], "queued", "a node that does not answer is not failed on")
+        self.assertIn("no free slot on w1", rec["queue_reason"])
+        self.assertNotIn("starting", rec["queue_reason"], "a node without power is not started")
         rows = self.rows()
         self.assertEqual(rows["node w1 (remote w1)"][0], "FAIL")
         self.assertIn("connection refused", rows["node w1 (remote w1)"][1])
         os.environ.pop("FAKE_INCUS_DOWN")
+        power.forget("w1")
+        self.assertEqual(dispatch.pump(self.ledger), [run_id], "it starts once the node answers")
         rows = self.rows()
         self.assertEqual(rows["node w1: template `org-base`"], ("ok", "stopped, isolated"))
         self.assertEqual(rows["node w1"], ("ok", "remote w1, 1 at once, 5120MiB each"))
+        self.wait_final(run_id)
+
+    def powered(self, idle_min=20):
+        marker = self.root / ".remote-w1" / ".." / ".down-w1"
+        nodes = json.loads(json.dumps(TWO))
+        nodes["w1"]["power"] = {"start": ["rm", "-f", str(marker)], "stop": ["touch", str(marker)], "idle_stop_min": idle_min}
+        self.configure(nodes=nodes)
+        return marker
+
+    def test_a_run_for_a_stopped_node_starts_it_and_waits_for_it(self):
+        marker = self.powered()
+        marker.touch()
+        run_id, rec = dispatch.dispatch(self.ledger, self.approved(), machine_override="incus:w1", log=lambda m: None)
+        self.assertEqual(rec["state"], "queued")
+        self.assertIn("starting w1", rec["queue_reason"])
+        for _ in range(50):
+            if not marker.exists():
+                break
+            time.sleep(0.1)
+        self.assertFalse(marker.exists(), "the start command ran")
+        self.assertTrue((self.ledger.root / "logs" / "power-w1.log").read_text().count("$ rm -f"), 1)
+        # Asked once: another pump within the wake interval does not ask again.
+        marker.touch()
+        power.forget("w1")
+        dispatch.pump(self.ledger)
+        time.sleep(0.3)
+        self.assertTrue(marker.exists(), "not woken twice in a row")
+        marker.unlink()
+        power.forget("w1")
+        self.assertEqual(dispatch.pump(self.ledger), [run_id])
+        self.assertEqual(self.wait_final(run_id)["state"], "done")
+        self.assertEqual(self.rows()["node w1 (remote w1)"][0] if "node w1 (remote w1)" in self.rows() else "ok", "ok")
+
+    def test_an_idle_node_is_stopped_once_and_a_busy_one_is_not(self):
+        marker = self.powered(idle_min=0.01)  # under a second
+        self.scenario(dict(TURNS, **{"milestone:M1": dict(TURNS["milestone:M1"], sleep=1.5)}))
+        run_id, _ = dispatch.dispatch(self.ledger, self.approved(), machine_override="incus:w1", log=lambda m: None)
+        time.sleep(0.8)
+        dispatch.pump(self.ledger)
+        self.assertFalse(marker.exists(), "not stopped while it holds a run")
+        self.wait_final(run_id)
+        dispatch.pump(self.ledger)  # the run's machine is torn down; the node is idle from its last busy pump
+        time.sleep(1.0)
+        power.forget("w1")
+        dispatch.pump(self.ledger)
+        for _ in range(50):
+            if marker.exists():
+                break
+            time.sleep(0.1)
+        self.assertTrue(marker.exists(), "an idle node is stopped")
+        log = (self.ledger.root / "logs" / "power-w1.log").read_text()
+        power.forget("w1")
+        dispatch.pump(self.ledger)
+        time.sleep(0.3)
+        self.assertEqual((self.ledger.root / "logs" / "power-w1.log").read_text(), log, "stopped once, not at every pump")
+        rows = self.rows()
+        self.assertEqual(rows["node w1 (remote w1)"], ("ok", "not answering: started when a run is queued for it"))
+        self.assertNotIn("vm", json.loads((self.ledger.root / "power.json").read_text()), "this machine has no power and is left alone")
 
     def rows(self):
         import re

@@ -45,6 +45,21 @@ class Backend:
         """Capacity: node name -> {"slots": n, ...}. Empty means no limit and nothing to place."""
         return {}
 
+    def ready(self, cfg: dict, node: str) -> bool:
+        """Whether a node can take a run now. A node that does not answer is passed over."""
+        return True
+
+    def wake(self, ledger, cfg: dict, node: str, log=lambda message: None) -> bool:
+        """Ask a node that does not answer to start, if this backend knows how. True when asked now."""
+        return False
+
+    def waking(self, ledger, cfg: dict) -> List[str]:
+        """Nodes asked to start lately, which queued runs wait for."""
+        return []
+
+    def power_tick(self, ledger, cfg: dict, load: Dict[str, int], log=lambda message: None) -> None:
+        """Stop the nodes that have been idle long enough, if this backend stops nodes."""
+
     def assign(self, cfg: dict, machine: dict, node: str) -> None:
         """Record on the machine what it needs to know about the node it was placed on."""
         machine["node"] = node

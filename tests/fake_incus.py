@@ -13,7 +13,8 @@ from Incus's description of it, the token copy, the bundle transfer, the detache
     incus list [-f csv|json] [-c ns] [prefix]
     incus exec <name> [-T|-t] [--env K=V] -- <argv...>
     <remote>:<name> anywhere above        the same, on a remote: a directory .remote-<remote> of its own
-                                          ($FAKE_INCUS_DOWN="w1,w2": those remotes do not answer)
+                                          ($FAKE_INCUS_DOWN="w1,w2", or a file .down-<remote> under
+                                          the root: that remote does not answer)
     incus query <remote>:/1.0/resources   {"memory": {"total": $FAKE_INCUS_MEMORY_MIB MiB}} when that is set
     incus config … (the rest) | network … | profile … | storage … | admin …      accepted, recorded, nothing done
 
@@ -121,7 +122,7 @@ def main(argv):
         return 1
     if remotes:
         remote = remotes.pop()
-        if remote in os.environ.get("FAKE_INCUS_DOWN", "").split(","):
+        if remote in os.environ.get("FAKE_INCUS_DOWN", "").split(",") or (root / (".down-" + remote)).exists():
             sys.stderr.write("Error: Get \"https://%s:8443/1.0\": dial tcp: connect: connection refused\n" % remote)
             return 1
         root = root / (".remote-" + remote)

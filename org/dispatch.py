@@ -95,9 +95,16 @@ def place(ledger: Ledger, machine: dict) -> Optional[str]:
     if not nodes or (wanted and wanted not in nodes):
         return ""
     load = node_load(ledger)
-    free = [(load.get((kind, n), 0), n) for n in ([wanted] if wanted else sorted(nodes))
-            if load.get((kind, n), 0) < int(nodes[n]["slots"])]
-    return min(free)[1] if free else None
+    free = sorted((load.get((kind, n), 0), n) for n in ([wanted] if wanted else sorted(nodes))
+                  if load.get((kind, n), 0) < int(nodes[n]["slots"]))
+    backend = backends.get(cfg, kind)
+    for _, n in free:
+        # A node that does not answer is passed over, and started if it can be: the run waits in
+        # the queue for it, or takes a slot elsewhere, instead of failing on it.
+        if backend.ready(cfg, n):
+            return n
+        backend.wake(ledger, cfg, n)
+    return None
 
 
 def pool(ledger: Ledger) -> List[dict]:
@@ -339,6 +346,9 @@ def start(ledger: Ledger, run_id: str, log=print) -> dict:
             where = machine.get("wanted_node") or "any node"
             record["queue_reason"] = "no free slot on %s (%s)" % (
                 where, ", ".join("%s %d/%d" % (p["node"], p["used"], p["slots"]) for p in pool(ledger) if p["kind"] == machine["kind"]))
+            starting = backend.waking(ledger, cfg)
+            if starting:
+                record["queue_reason"] += "; starting %s" % ", ".join(starting)
             ledger.save_run(run_id, record)
             log("queued: %s" % record["queue_reason"])
             return record
@@ -480,6 +490,13 @@ def active(ledger: Ledger) -> List[str]:
     return out
 
 
+def power_tick(ledger: Ledger, log=lambda message: None) -> None:
+    """Stop the nodes that have held no run for long enough (org/power.py)."""
+    cfg, load = ledger.config(), node_load(ledger)
+    for kind, backend in sorted(backends.load(cfg).items()):
+        backend.power_tick(ledger, cfg, {n: c for (k, n), c in load.items() if k == kind}, log)
+
+
 def pump(ledger: Ledger, log=lambda message: None) -> List[str]:
     """Start whatever is queued and can now be placed. Returns the runs it started.
 
@@ -505,7 +522,7 @@ def pump(ledger: Ledger, log=lambda message: None) -> List[str]:
             log("could not start %s: %s" % (run_id, e))
     # Last, and each guarded: neither what the containers measured nor the deleting of finished
     # runs' machines may keep a queued run from starting, or raise out of here.
-    for step in (telemetry.measure_due, teardown):
+    for step in (telemetry.measure_due, teardown, power_tick):
         try:
             step(ledger, log)
         except Exception as e:  # whatever it is, the next pump tries again
