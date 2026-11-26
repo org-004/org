@@ -602,6 +602,18 @@ class TheStatus(LoopCase):
             self.assertIsNone(self.tick())
         self.assertEqual(self.launches, [])
 
+    def test_a_state_that_was_lost_starts_no_second_bootstrap_and_replays_no_history(self):
+        self.assertEqual(self.tick(), "bootstrap")
+        self.end_turn("failed", reason="no answer")
+        self.tick()
+        self.assertEqual(self.tick(6), "retry")
+        self.end_turn("failed", reason="no answer again")
+        loop.state_path(self.ledger).unlink()
+        self.assertIsNone(self.tick(), "the gap since the last line")
+        self.assertIsNone(self.loop_state().get("paused"), "the old failures are not counted again")
+        self.assertEqual(self.tick(600), "retry", "the count starts again, as after `org loop resume`")
+        self.assertEqual(self.loop_state()["running"]["turn"], 3)
+
     def test_a_tick_never_raises(self):
         with mock.patch.object(loop, "due", side_effect=RuntimeError("boom")):
             self.assertIsNone(self.tick())

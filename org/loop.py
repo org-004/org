@@ -209,6 +209,16 @@ def _midnight(t: float) -> float:
     return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
 
 
+def _started(ledger: Ledger, state: dict) -> int:
+    """How many turns have been started: `state.turns`, and never fewer than turns.jsonl names, so
+    that a state that was lost cannot start a second bootstrap or reuse a turn's number."""
+    try:
+        counted = int(state.get("turns") or 0)
+    except (TypeError, ValueError):
+        counted = 0
+    return max([counted] + [line["turn"] for line in turns(ledger)])
+
+
 def _last_line(ledger: Ledger) -> Optional[dict]:
     lines = turns(ledger)
     return max(lines, key=lambda line: line["turn"]) if lines else None
@@ -360,9 +370,11 @@ def _held_back(ledger: Ledger, state: dict, now: float) -> str:
     reason = graph.over_budget(ledger)
     if reason:
         resets = _brake_resets(ledger)
-        if state.get("brake_told") != resets:
+        # A reading without a reset time is still one reading: it is told once, as "unknown".
+        key = resets if resets is not None else "unknown"
+        if state.get("brake_told") != key:
             _brake_message(ledger, reason, resets, now)
-            state["brake_told"] = resets
+            state["brake_told"] = key
         return reason
     if day_cost(ledger, now) >= float(setting(ledger, "day_max_usd")):
         state["day_told"] = local_day(now)
@@ -443,7 +455,7 @@ def due(ledger: Ledger, state: dict, now: float) -> Optional[dict]:
     A time that passed while the machine slept counts at the next tick: every test here compares
     `now` with a stored wall time, never counts ticks.
     """
-    if not int(state.get("turns") or 0):
+    if not _started(ledger, state):
         return {"why": "bootstrap", "runs": [], "detail": "no turn has run before"}
     seen = state.get("seen") or {}
     runs = _runs(ledger)
@@ -506,7 +518,7 @@ def start(ledger: Ledger, state: dict, why: dict, now: float, clock_offset: floa
     never two turns at once."""
     from . import dispatch
 
-    n = int(state.get("turns") or 0) + 1
+    n = _started(ledger, state) + 1
     runs = _runs(ledger)
     seen = state.setdefault("seen", {})
     marked = list(runs) if why["why"] == "bootstrap" else [r for r in why.get("runs") or [] if r in runs]
@@ -564,6 +576,10 @@ def reap(ledger: Ledger, state: dict, now: float) -> None:
             state["running"] = None
     elif running is not None:
         state["running"] = None
+    if "reaped" not in state and "turns" not in state:
+        # A state that was lost (it is never written without `turns`): the lines already there are
+        # history, not news, and are not taken in a second time.
+        state["reaped"] = max([0] + [line["turn"] for line in turns(ledger)])
     reaped = int(state.get("reaped") or 0)
     for line in sorted(turns(ledger), key=lambda line: line["turn"]):
         if line["turn"] <= reaped:
@@ -1187,7 +1203,7 @@ def status(ledger: Ledger, clock: Optional[Clock] = None) -> dict:
         elif out["day_reached"]:
             out["waits_for"] = "the next local day: today's turns have cost %s of loop.day_max_usd %s" % (
                 fmt_usd(out["day_cost_usd"]), fmt_usd(out["day_max_usd"]))
-        elif not int(state.get("turns") or 0):
+        elif not _started(ledger, state):
             out["waits_for"] = "the next pump, which starts the first turn"
         else:
             pending = [r for r in ("trouble", "settled") if isinstance((state.get("pending") or {}).get(r), dict)]
