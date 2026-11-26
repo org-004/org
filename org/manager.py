@@ -20,14 +20,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import secrets, status
+from . import pricing, secrets, status
 from .ledger import Ledger
 from .sync import sync_all
 from .util import fmt_stamp, now, read_json, read_text, render, write_json
@@ -216,14 +218,20 @@ def settings(ledger: Ledger, mode: str, with_sandbox: Optional[bool] = None) -> 
     return out
 
 
-def launch_env(ledger: Ledger, github: bool = False) -> dict:
+def launch_env(ledger: Ledger, github: bool = False, actor: bool = False) -> dict:
+    """The environment of a manager session. `github` gives it the organization's token (a direct
+    chat and a turn); `actor` sets ORG_ACTOR=manager (a chat and a turn, never a question or a review)."""
     env = dict(os.environ)
+    # A review or a question started from inside a turn's process tree must not inherit its actor.
+    env.pop("ORG_ACTOR", None)
+    if actor:
+        env["ORG_ACTOR"] = ACTOR
     # ~/.local/bin is where Claude Code installs itself, and a service or a command passed in
     # from the host has only the PATH it was given.
     env["PATH"] = os.pathsep.join([str(BIN), str(Path.home() / ".local" / "bin"), env.get("PATH", "")])
     env["ORG_HOME"] = str(ledger.root)
     # The manager's session makes model requests with the token this installation was handed.
-    # It is never given the GitHub token: the chat reads public repositories and pushes nothing.
+    # It is given the GitHub token only when `github` is set (a direct chat or a turn).
     token = secrets.claude_token()
     if token and not env.get("CLAUDE_CODE_OAUTH_TOKEN") and not env.get("ANTHROPIC_API_KEY"):
         env["CLAUDE_CODE_OAUTH_TOKEN"] = token
@@ -240,7 +248,7 @@ def launch_env(ledger: Ledger, github: bool = False) -> dict:
     if kept:
         env["GIT_CONFIG_COUNT"] = str(len(kept))
     if github:
-        # Only a direct chat (`manager.direct`) is started this way: it is given the token that
+        # Only a direct chat (`manager.direct`) or a turn is started this way: it is given the token that
         # engineers are given, which reaches the repositories of one organization, and git is
         # told to use it for github.com.
         github_token = secrets.github_token()
@@ -274,22 +282,31 @@ def turn_problems(ledger: Ledger) -> list:
 
 
 def turn_settings(ledger: Ledger) -> dict:
-    """The settings of a turn: exactly `settings(ledger, "talk")` of a direct chat that asks nothing,
-    with the deny rules of `loop.TURN_DENY_SHELL` and `loop.TURN_DENY_ORG` added, each in every
-    form a session could type it. Nothing else differs; a chat never has these rules."""
+    """The settings of a turn: exactly `settings(ledger, "talk")` plus the deny rules of
+    `loop.TURN_DENY_SHELL` and `loop.TURN_DENY_ORG`, each in every form a session could type it.
+    Only used when `turn_problems` is empty, which is the loop's check, so `settings` is not asked
+    to pretend that the ledger is direct. A chat never has these rules."""
     from . import loop
 
-    out = settings(ledger, "talk", with_sandbox=False)
-    extra = ["Bash(%s)" % c for c in loop.TURN_DENY_SHELL] + ["Bash(%s *)" % c for c in loop.TURN_DENY_SHELL] + _org(loop.TURN_DENY_ORG)
-    out["permissions"]["deny"] = out["permissions"]["deny"] + [r for r in extra if r not in out["permissions"]["deny"]]
+    out = settings(ledger, "talk")
+    extra = []
+    for c in loop.TURN_DENY_SHELL:
+        extra += ["Bash(%s)" % c, "Bash(%s *)" % c]
+    for c in loop.TURN_DENY_ORG:
+        # `org --home <dir> login` puts options before the verb, and `org * login` covers them. The
+        # verb must stand as a whole word after a space, so `org approve` and `org loop status`
+        # are not matched by `org * login`, `org * down` or `org * node add`.
+        for head in ("org", "python3 -m org", "python -m org", str(BIN / "org")):
+            extra += ["Bash(%s %s)" % (head, c), "Bash(%s %s *)" % (head, c)]
+        extra += ["Bash(org * %s)" % c, "Bash(org * %s *)" % c]
+    deny = list(out["permissions"]["deny"])
+    out["permissions"]["deny"] = deny + [r for r in extra if r not in deny]
     return out
 
 
 def turn_env(ledger: Ledger) -> dict:
     """The environment of a turn: `launch_env(ledger, github=True)` with `ORG_ACTOR=manager`."""
-    env = launch_env(ledger, github=True)
-    env["ORG_ACTOR"] = ACTOR
-    return env
+    return launch_env(ledger, github=True, actor=True)
 
 
 def actor_refusal(ledger: Ledger, command: str, header: Optional[dict] = None) -> Optional[str]:
@@ -298,7 +315,19 @@ def actor_refusal(ledger: Ledger, command: str, header: Optional[dict] = None) -
     the brake, `graph.over_budget`'s reason; for `approve` and `dispatch`, a spec whose `header`
     lacks `expect_usd` or `expect_hours`. Without `ORG_ACTOR` always None: a person's command
     behaves as it always has."""
-    raise NotImplementedError
+    if os.environ.get("ORG_ACTOR") != ACTOR:
+        return None
+    from . import graph
+
+    brake = graph.over_budget(ledger)
+    if brake:
+        return "org %s is refused to the manager at the brake: %s" % (command, brake)
+    if command in ("approve", "dispatch"):
+        missing = [k for k in ("expect_usd", "expect_hours") if not isinstance((header or {}).get(k), (int, float))]
+        if missing:
+            return ("org %s is refused to the manager: the spec's header lacks %s, its forecast of the whole run"
+                    % (command, " and ".join(missing)))
+    return None
 
 
 def sessions_path(ledger: Ledger) -> Path:
@@ -349,12 +378,46 @@ def sessions_cost(ledger: Ledger, since: float) -> dict:
     return out
 
 
-def chat_cost_estimate(ledger: Ledger, since: float) -> Optional[float]:
+def chat_cost_estimate(ledger: Ledger, since: float, home: Optional[Path] = None) -> Optional[float]:
     """An estimate of what the manager's chats cost since `since` (R21 of spec 016): the token counts
     of Claude Code's own transcripts of conversations in the desk (`~/.claude/projects/<the desk's
     path with every / as ->/*.jsonl`), messages at or after `since`, times `org/pricing.py`'s prices.
-    None when there is no transcript to read. Labelled an estimate wherever it is shown."""
-    return None
+    None when there is no transcript to read. Labelled an estimate wherever it is shown.
+
+    The directory name is the desk's path with every character that is not a letter or a digit
+    replaced by `-`. `home` is where `.claude` lives, given by a test."""
+    home = home or Path.home()
+    folder = home / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(ledger.desk))
+    files = sorted(folder.glob("*.jsonl")) if folder.is_dir() else []
+    if not files:
+        return None
+    prices = pricing.table(ledger.config().get("pricing"))
+    seen, total = set(), 0.0
+    for path in files:
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for raw in lines:
+            try:
+                entry = json.loads(raw)
+            except ValueError:
+                continue
+            msg = entry.get("message") if isinstance(entry, dict) else None
+            if not isinstance(msg, dict) or entry.get("type") != "assistant" or not isinstance(msg.get("usage"), dict):
+                continue
+            try:
+                at = datetime.fromisoformat(str(entry.get("timestamp")).replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                continue
+            if at < since:
+                continue
+            key = msg.get("id") or entry.get("uuid")
+            if key in seen:
+                continue  # a message written once for each block of its content is one message
+            seen.add(key)
+            total += pricing.usage_cost(msg.get("model"), msg["usage"], prices) or 0.0
+    return total
 
 
 def machines_help(cfg: dict) -> str:
@@ -531,7 +594,7 @@ def talk(ledger: Ledger, prompt: Optional[str] = None, project: Optional[str] = 
     if prompt:
         cmd.append(prompt)
     os.chdir(ledger.desk)
-    os.execve(claude, cmd, launch_env(ledger, github=direct_mode))
+    os.execve(claude, cmd, launch_env(ledger, github=direct_mode, actor=True))
     return 0  # not reached
 
 
@@ -616,6 +679,8 @@ def ask(ledger: Ledger, question: str, on_text: Optional[Callable[[str], None]] 
         same = out["sid"] == session.get("id")
         write_json(session_path, {"id": out["sid"], "questions": (session.get("questions", 0) if same else 0) + 1,
                                   "cost_usd": (session.get("cost_usd", 0.0) if same else 0.0) + cost, "last_at": now()})
+    if out["started"]:
+        record_session(ledger, "ask", str(mgr.get("ask_model") or "sonnet"), cost, "question: " + " ".join(question.split())[:80])
     return {"text": text, "error": error, "cost_usd": cost, "session_id": out["sid"]}
 
 

@@ -7,7 +7,7 @@
 
     org spec new "<title>"         start a draft            org spec check <spec>
     org spec show <spec>           print a draft or spec    org spec ls
-    org approve <spec> --sha <8+>  freeze the draft and dispatch an engineer
+    org approve <spec> [--sha <8+>]  freeze the draft and dispatch an engineer
     org dispatch <spec>            run an approved spec again
 
     org plan|report|review <run>   the frozen plan, the report, plan against outcome
@@ -137,11 +137,17 @@ def cmd_spec(args) -> int:
 
 
 def cmd_approve(args) -> int:
-    from . import dispatch, spec
+    from . import dispatch, manager, spec
 
     ledger = Ledger(args.home)
     spec_id = need_spec(ledger, args.spec)
     before = ledger.spec_meta(spec_id) or {}
+    # Refused before the draft is frozen, so that nothing is approved either.
+    draft = read_text(ledger.draft_path(spec_id))
+    if draft is not None:
+        refused = manager.actor_refusal(ledger, "approve", spec.parse(draft)[0])
+        if refused:
+            die(refused)
     try:
         meta = spec.approve(ledger, spec_id, args.sha)
     except spec.ApprovalError as e:
@@ -176,8 +182,14 @@ def _dispatch(ledger: Ledger, spec_id: str, machine) -> int:
 
 
 def cmd_dispatch(args) -> int:
+    from . import manager
+
     ledger = Ledger(args.home)
-    return _dispatch(ledger, need_spec(ledger, args.spec), args.machine)
+    spec_id = need_spec(ledger, args.spec)
+    refused = manager.actor_refusal(ledger, "dispatch", (ledger.spec_meta(spec_id) or {}).get("header") or {})
+    if refused:
+        die(refused)
+    return _dispatch(ledger, spec_id, args.machine)
 
 
 # ---------------------------------------------------------------- status
@@ -802,10 +814,13 @@ def cmd_pump(args) -> int:
 
 def cmd_release(args) -> int:
     """Lift the hold on a run of a plan. The person's command: the manager chat must ask."""
-    from . import graph
+    from . import graph, manager
 
     ledger = Ledger(args.home)
     run_id = need_run(ledger, args.run)
+    refused = manager.actor_refusal(ledger, "release")
+    if refused:
+        die(refused)
     try:
         print(graph.release(ledger, run_id))
     except graph.GraphError as e:
@@ -950,7 +965,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("approve", help="freeze a draft and dispatch an engineer")
     s.add_argument("spec")
-    s.add_argument("--sha", required=True, help="first 8+ characters of the draft's sha256, from `org spec check`")
+    s.add_argument("--sha", help="first 8+ characters of the draft's sha256, from `org spec check`; optional: without it the draft is approved as it stands")
     s.add_argument("--machine", help="incus, ssh:<name> or local (overrides the spec header)")
     s.add_argument("--no-dispatch", action="store_true")
     s.set_defaults(fn=cmd_approve)

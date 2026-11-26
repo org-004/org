@@ -235,6 +235,8 @@ def run(ledger: Ledger, run_id: str, attempt: int = 1) -> int:
     finally:
         if main:
             signal.signal(signal.SIGTERM, before)
+    mgr = ledger.config().get("manager") or {}
+    manager.record_session(ledger, "review", mgr.get("review_model") or mgr.get("model"), got["cost_usd"], "review of %s" % run_id)
     problems, answer = [], None
     if got["timed_out"]:
         kind = "timeout"
