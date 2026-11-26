@@ -407,6 +407,8 @@ def _held_back(ledger: Ledger, state: dict, now: float) -> str:
             _brake_message(ledger, reason, resets, now)
             state["brake_told"] = key
         return reason
+    # The brake is off: a later one, even for the same reset time, is a new episode and is told again.
+    state.pop("brake_told", None)
     if day_cost(ledger, now) >= float(setting(ledger, "day_max_usd")):
         state["day_told"] = local_day(now)
         return "the turns of today have cost loop.day_max_usd"

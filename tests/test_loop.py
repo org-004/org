@@ -368,6 +368,20 @@ class TheTwoNumbers(LoopCase):
             self.assertEqual(self.tick(), "bootstrap")
             self.assertEqual(len(receiver.requests), 1)
 
+    def test_the_two_numbers_at_a_second_brake_the_message_is_sent_again(self):
+        resets = self.weekly(0.81)
+        with Receiver() as receiver:
+            self.set(notify={"url": receiver.url})
+            self.assertIsNone(self.tick())
+            self.assertEqual(len(receiver.requests), 1)
+            self.weekly(0.2)
+            self.assertEqual(self.tick(), "bootstrap")
+            self.assertNotIn("brake_told", self.loop_state())
+            self.end_turn(answer=dict(ANSWER, wake_in_min=15))
+            self.weekly(0.81)
+            self.assertIsNone(self.tick(30))
+            self.assertEqual(len(receiver.requests), 2, receiver.requests)
+
     def test_the_two_numbers_at_day_max_usd_no_turn_starts_until_the_clock_passes_local_midnight(self):
         self.boot()
         # The bootstrap turn cost $0.50; a second turn of the same day cost the rest, and asked to be woken.
