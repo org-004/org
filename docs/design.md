@@ -1043,7 +1043,12 @@ a wall. The walls are the ones the owner chose: the VM, and the tokens' scope.
 **What R2 keeps from it.** A turn has these denied, by deny rules added for a turn only (a chat is
 not changed): `ssh` and `scp`, because they reach other machines and the owner's computer resolves
 from the VM (`host.lima.internal`); and `org login`, `org down`, `org node add` and `org node rm`,
-because they change the owner's login or stop the organization with nobody there. `sudo` and `su`
+because they change the owner's login or stop the organization with nobody there. Each is denied
+with `--home <dir>` or `--home=<dir>` before the verb (the only option that may stand there), and
+through `~/.local/bin/org` as well as `org`, `python -m org` and `bin/org`; `sftp` and the full
+paths of `ssh`, `scp` and `sftp` are denied too. A turn also cannot set the two numbers that bound
+it, `loop.*` and `graph.pause_above_weekly_pct`, by `org config set` or by the file tools on
+`loop/`, though its shell could still write the file: that is a guard against a slip. `sudo` and `su`
 stay denied as in a chat. Deny rules are what keeps `sudo` and `ssh` here, because there is no
 sandbox to do it, and they match the form a model normally writes, so they guard against a slip
 and are not a wall; the wall is that the VM has no directory of the owner's computer mounted and no

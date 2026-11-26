@@ -97,10 +97,49 @@ class WhatATurnRunsUnder(Base):
         for command in forms:
             self.assertTrue(listed(deny, command), command)
 
+    def test_what_a_turn_runs_under_denies_the_verbs_after_home_in_both_spellings_and_from_the_local_bin(self):
+        deny = manager.turn_settings(self.ledger)["permissions"]["deny"]
+        local = str(Path.home() / ".local" / "bin" / "org")
+        forms = ["org --home=/x login", "org --home=/x node add a b", "org --home /x down --yes",
+                 "python3 -m org --home=/x down", "python -m org --home /x node rm a",
+                 str(manager.BIN / "org") + " --home=/x login", "~/.local/bin/org login", "~/.local/bin/org node rm a",
+                 "~/.local/bin/org --home /x down", local + " down", local + " node add a", local + " --home=/x login"]
+        for command in forms:
+            self.assertTrue(listed(deny, command), command)
+
+    def test_what_a_turn_runs_under_allows_a_verb_that_only_stands_inside_an_argument(self):
+        deny = manager.turn_settings(self.ledger)["permissions"]["deny"]
+        for command in ('org spec new "Fix the login page"', "org loop pause waiting for the owner to login",
+                        "org exec 012 -- docker compose down"):
+            self.assertFalse(listed(deny, command), command)
+
+    def test_what_a_turn_runs_under_denies_every_way_to_another_machine(self):
+        deny = manager.turn_settings(self.ledger)["permissions"]["deny"]
+        for command in ("sftp host", "sftp", "/usr/bin/ssh host", "/usr/bin/ssh", "/usr/bin/scp a b:c", "/usr/bin/scp",
+                        "/usr/bin/sftp h", "/usr/bin/sftp"):
+            self.assertTrue(listed(deny, command), command)
+
+    def test_what_a_turn_runs_under_may_not_set_the_two_numbers_that_bound_it(self):
+        turn = manager.turn_settings(self.ledger)["permissions"]["deny"]
+        chat = manager.settings(self.ledger, "talk")["permissions"]["deny"]
+        local = str(Path.home() / ".local" / "bin" / "org")
+        for head in ("org", "org --home /x", "org --home=/x", "python3 -m org", "python -m org --home /x", local, "~/.local/bin/org",
+                     str(manager.BIN / "org") + " --home=/x"):
+            for tail in ("config set loop.turn_max_usd 5", "config set loop.enabled false", "config set loop {}",
+                         "config set graph.pause_above_weekly_pct 100", "config set graph {}"):
+                command = "%s %s" % (head, tail)
+                self.assertTrue(listed(turn, command), command)
+                self.assertFalse(listed(chat, command), command)
+        self.assertIn("Edit(/%s/loop/**)" % self.ledger.root, turn)
+        self.assertNotIn("Edit(/%s/loop/**)" % self.ledger.root, chat)
+        for command in ("org config set notify.url x", "org config get loop.enabled", "org --home /x config set graph.other 1"):
+            self.assertFalse(listed(turn, command), command)
+
     def test_what_a_turn_runs_under_leaves_the_rest_free(self):
         p = manager.turn_settings(self.ledger)["permissions"]
         for command in ("git push origin main", "incus list", "docker ps", "org approve 001-x", "org upgrade abc",
-                        "org --home /x approve 001-x", "org loop status", "org node ls", "org spec check 1"):
+                        "org --home /x approve 001-x", "org loop status", "org node ls", "org spec check 1",
+                        "org config set notify.url x", "org loop pause", "org loop resume", "org --home=/x approve x"):
             self.assertFalse(listed(p["deny"], command), command)
             self.assertFalse(listed(p["ask"], command), command)
 

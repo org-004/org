@@ -80,8 +80,10 @@ OUTCOMES = ("ok", "failed", "stopped")
 # What a turn may never run, beside what a direct chat may never run (R2). Each command is denied
 # bare and with arguments, in each form a session could type it (`org`, `python3 -m org`, the
 # path of bin/org): see `manager.turn_settings`.
-TURN_DENY_SHELL = ["ssh", "scp"]
+TURN_DENY_SHELL = ["ssh", "scp", "sftp", "/usr/bin/ssh", "/usr/bin/scp", "/usr/bin/sftp"]
 TURN_DENY_ORG = ["login", "down", "node add", "node rm"]
+# The two numbers that bound a turn (R12) are not set by a turn, whole section or single key.
+TURN_DENY_CONFIG = ["config set loop*", "config set graph.pause_above_weekly_pct*", "config set graph *"]
 
 # The message R9 sends when the loop pauses itself.
 PAUSED_TITLE = "org: the manager's loop paused"

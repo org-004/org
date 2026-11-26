@@ -283,7 +283,8 @@ def turn_problems(ledger: Ledger) -> list:
 
 def turn_settings(ledger: Ledger) -> dict:
     """The settings of a turn: exactly `settings(ledger, "talk")` plus the deny rules of
-    `loop.TURN_DENY_SHELL` and `loop.TURN_DENY_ORG`, each in every form a session could type it.
+    `loop.TURN_DENY_SHELL`, `loop.TURN_DENY_ORG` and `loop.TURN_DENY_CONFIG`, each in every form a session
+    could type it, and no edit of the loop's own files by the file tools.
     Only used when `turn_problems` is empty, which is the loop's check, so `settings` is not asked
     to pretend that the ledger is direct. A chat never has these rules."""
     from . import loop
@@ -292,13 +293,21 @@ def turn_settings(ledger: Ledger) -> dict:
     extra = []
     for c in loop.TURN_DENY_SHELL:
         extra += ["Bash(%s)" % c, "Bash(%s *)" % c]
-    for c in loop.TURN_DENY_ORG:
-        # `org --home <dir> login` puts options before the verb, and `org * login` covers them. The
-        # verb must stand as a whole word after a space, so `org approve` and `org loop status`
-        # are not matched by `org * login`, `org * down` or `org * node add`.
-        for head in ("org", "python3 -m org", "python -m org", str(BIN / "org")):
-            extra += ["Bash(%s %s)" % (head, c), "Bash(%s %s *)" % (head, c)]
-        extra += ["Bash(org * %s)" % c, "Bash(org * %s *)" % c]
+    heads = ["org", "python3 -m org", "python -m org", str(BIN / "org"), "~/.local/bin/org",
+             str(Path.home() / ".local" / "bin" / "org")]
+    # `--home` is the only option that may stand before the verb. A pattern with a bare `*` there
+    # would also deny `org spec new "Fix the login page"` and `org exec 012 -- docker compose down`.
+    for head in heads:
+        for c in loop.TURN_DENY_ORG:
+            forms = ["%s %s" % (head, c), "%s %s *" % (head, c),
+                     "%s --home * %s" % (head, c), "%s --home * %s *" % (head, c),
+                     "%s --home=* %s" % (head, c), "%s --home=* %s *" % (head, c)]
+            extra += ["Bash(%s)" % f for f in forms]
+        # The two numbers that bound a turn are not the turn's to set, nor is the section that holds either.
+        for c in loop.TURN_DENY_CONFIG:
+            extra += ["Bash(%s)" % f for f in ("%s %s" % (head, c), "%s --home * %s" % (head, c), "%s --home=* %s" % (head, c))]
+    # An absolute path in a rule is written with a second leading slash.
+    extra += ["Edit(/%s/loop/**)" % ledger.root]
     deny = list(out["permissions"]["deny"])
     out["permissions"]["deny"] = deny + [r for r in extra if r not in deny]
     return out
