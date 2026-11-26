@@ -247,6 +247,24 @@ class WhenTheLoopWakes(LoopCase):
             self.assertIsNone(self.tick(minutes))
         self.assertEqual(self.launches, [1])
 
+    def test_when_the_loop_wakes_a_clock_set_back_does_not_hold_the_turn_back(self):
+        self.assertEqual(self.tick(), "bootstrap")
+        self.end_turn(answer=dict(ANSWER, wake_in_min=15))
+        self.now -= 3 * 3600  # the line says the turn ended three hours from now
+        self.assertIsNone(self.tick(6), "the gap has passed, the wake time has not")
+        self.assertEqual(self.tick(20), "wake")
+
+    def test_when_the_loop_wakes_a_clock_set_back_does_not_hold_back_a_second_look(self):
+        self.boot()
+        self.made("executing")
+        self.made("failed")
+        self.assertIsNone(self.tick())
+        state = self.loop_state()
+        state["pending"]["trouble"]["since"] = self.now + 3 * 3600
+        write_json(loop.state_path(self.ledger), state)
+        self.assertIsNone(self.tick(), "the time is taken as now, and the second look is a settle_s later")
+        self.assertEqual(self.tick(2), "trouble")
+
     def test_when_the_loop_wakes_to_retry_after_a_first_failure_once_the_gap_has_passed(self):
         self.assertEqual(self.tick(), "bootstrap")
         self.end_turn("failed", reason="the session gave no structured answer")

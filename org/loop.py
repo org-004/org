@@ -458,7 +458,7 @@ def _alert(ledger: Ledger, run: str, kind: str, reason: str, at: float, **more) 
 
 def due(ledger: Ledger, state: dict, now: float) -> Optional[dict]:
     """Whether a turn is due now, as {"why": reason, "runs": [run ids], "detail": text} or None.
-    It reads the ledger and may change `state["pending"]` only; it writes no file.
+    It reads the ledger and may change `state["pending"]` and `state["end_clamp"]` only; it writes no file.
 
     The gap first: nothing is due until `loop.gap_min` minutes have passed since the last turn
     ended. Then the first that holds, in this order:
@@ -502,6 +502,9 @@ def due(ledger: Ledger, state: dict, now: float) -> Optional[dict]:
     for reason, held in holds.items():
         if held:
             entry = pending.get(reason) if isinstance(pending.get(reason), dict) else {"since": now}
+            # A clock set back must not hold a turn back: a time in the future is taken as now, and kept so.
+            if _num(entry.get("since")) and entry["since"] > now:
+                entry["since"] = now
             entry["runs"] = list(trouble if reason == "trouble" else ended)
             pending[reason] = entry
         else:
@@ -509,6 +512,15 @@ def due(ledger: Ledger, state: dict, now: float) -> Optional[dict]:
 
     last = _last_line(ledger)
     end = float(last.get("ended_at") or 0) if last else None
+    if last and end > now:
+        # A clock set back must not hold the next turn back either. The line cannot be changed, so
+        # the time this was first seen is kept in the state, and the end is never later than it.
+        clamp = state.get("end_clamp") if isinstance(state.get("end_clamp"), dict) else {}
+        seen_at = clamp.get("at") if clamp.get("turn") == last["turn"] and _num(clamp.get("at")) else now
+        state["end_clamp"] = {"turn": last["turn"], "at": min(seen_at, now)}
+    if last and isinstance(state.get("end_clamp"), dict) and state["end_clamp"].get("turn") == last["turn"] \
+            and _num(state["end_clamp"].get("at")):
+        end = min(end, state["end_clamp"]["at"])
     if end is not None and now - end < float(setting(ledger, "gap_min")) * 60:
         return None
     if last and last.get("outcome") == "failed" and int(state.get("failures") or 0) < 2:
