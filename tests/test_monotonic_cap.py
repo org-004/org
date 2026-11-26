@@ -38,6 +38,27 @@ class MonotonicCap(unittest.TestCase):
         self.assertEqual(st["state"], "done", st.get("end_reason"))
         self.assertNotIn("time cap", st.get("end_reason") or "")
 
+    def test_a_wall_clock_jump_does_not_make_a_talking_turn_silent(self):
+        # The silence watchdog is on the monotonic clock too: a jump of three hours, far past the
+        # minute of silence allowed here, ends nothing.
+        # M1 is quiet for 3.5 s, longer than the 2 s the runner waits for a line before it looks
+        # at the clocks, so it looks at least once after the jump with nothing heard since.
+        self.job({"plan": PLAN_TURN, "milestone:M1": dict(DONE("M1"), sleep=3.5), "report": REPORT},
+                 engineer={"silence_timeout_min": 1.0})
+        shift = [0.0]
+        threading.Timer(1.0, lambda: shift.__setitem__(0, 3 * 3600.0)).start()
+        with mock.patch.object(runner, "now", lambda: time.time() + shift[0]):
+            self.go()
+        self.assertEqual(self.status()["state"], "done", self.status().get("end_reason"))
+
+    def test_a_turn_that_says_nothing_for_longer_than_the_silence_allowed_is_ended(self):
+        self.job({"plan": PLAN_TURN, "milestone:M1": dict(DONE("M1"), sleep=30), "report": REPORT},
+                 engineer={"silence_timeout_min": 2 / 60.0, "max_turn_retries": 0})
+        started = time.monotonic()
+        self.go()
+        self.assertLess(time.monotonic() - started, 25, "the silent turn was ended, not waited out")
+        self.assertIn("no output for too long", self.status().get("end_reason") or "")
+
     def test_a_resumed_runner_carries_the_time_already_used_and_not_the_gap(self):
         self.job({"plan": PLAN_TURN}, caps={"max_hours": 2.0})
         first = runner.Runner(self.run_dir)

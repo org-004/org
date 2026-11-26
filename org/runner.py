@@ -474,6 +474,9 @@ class Runner:
 
         result, flags, saw_init, last_status = None, {}, False, 0.0
         silence = float(self.cfg.get("silence_timeout_min") or 90) * 60.0
+        # Silence is measured on the monotonic clock, as the time cap is: a wall clock that jumps
+        # (a correction, a VM that was paused) must not make a turn that is talking look silent.
+        heard = time.monotonic()
         while True:
             try:
                 raw = lines.get(timeout=2.0)
@@ -488,6 +491,7 @@ class Runner:
                 except ValueError:
                     ev = None
                 if isinstance(ev, dict):
+                    heard = time.monotonic()
                     summary = self.meter.feed(ev)
                     if ev.get("type") == "system" and ev.get("subtype") == "init":
                         saw_init = True
@@ -512,7 +516,7 @@ class Runner:
             elif (self.time_left() is not None and self.time_left() <= 0) and st["phase"] != "reporting":
                 flags["time_cap"] = True
                 self._kill(proc)
-            elif t - (self.meter.last_event_at or started) > silence:
+            elif time.monotonic() - heard > silence:
                 flags["silent"] = True
                 self._kill(proc)
         rc = proc.wait()
