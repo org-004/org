@@ -241,6 +241,63 @@ class ManagerSettings(unittest.TestCase):
                     self.assertIn(rule, p["deny"], rule)
         self.assertNotIn("sandbox", manager.settings(self.ledger, "ask"), "question mode runs nothing that needs one")
 
+    def test_direct_work_is_off_until_the_owner_turns_it_on(self):
+        self.assertFalse(manager.direct(self.ledger))
+        p = manager.settings(self.ledger, "talk", with_sandbox=True)["permissions"]
+        self.assertIn("Bash(git push *)", p["deny"])
+        self.assertIn("Bash(incus *)", p["deny"])
+        self.assertTrue(p["blockWritesOutsideWorkingDirectories"])
+        env = manager.launch_env(self.ledger)
+        self.assertNotIn("GH_TOKEN", env)
+        self.assertNotIn(manager.GIT_HELPER, env.values())
+
+    def test_with_manager_direct_the_chat_may_push_and_every_command_asks(self):
+        write_json(self.ledger.config_path, {"manager": {"direct": True}})
+        self.assertTrue(manager.direct(self.ledger))
+        self.assertFalse(manager.sandboxed(self.ledger), "a sandboxed shell has no login and cannot write a clone outside the desk")
+        self.assertEqual(manager.session_mode(self.ledger), "manual", "so the person is asked before each command that is not a read")
+        for with_sandbox in (None, True):
+            s = manager.settings(self.ledger, "talk", with_sandbox=with_sandbox)
+            p = s["permissions"]
+            self.assertNotIn("sandbox", s, "direct work has no sandbox, whatever the caller thought")
+            for rule in ("Bash(git push *)", "Bash(git * push *)", "Bash(gh pr create *)", "Bash(gh repo create *)",
+                         "Bash(incus *)", "Bash(incus)", "Bash(docker *)"):
+                self.assertNotIn(rule, p["deny"], rule)
+            self.assertFalse(p["blockWritesOutsideWorkingDirectories"], "a file outside the desk asks instead")
+            # What is left: root, the logins, the ledger's own records, and tools from outside.
+            for rule in ("Bash(sudo *)", "Bash(sudo)", "Bash(su *)", "Bash(su)", "mcp__*",
+                         "Edit(/%s/specs/**)" % self.ledger.root, "Read(/%s/**)" % os.environ["ORG_SECRETS_DIR"]):
+                self.assertIn(rule, p["deny"], rule)
+            # Nothing that was the person's decision is allowed by this: it asks, as before.
+            for cmd in ("approve", "dispatch", "stop", "exec", "upgrade", "release"):
+                self.assertIn("Bash(org %s *)" % cmd, p["ask"], cmd)
+                self.assertNotIn("Bash(org %s *)" % cmd, p["allow"], cmd)
+            self.assertFalse([r for r in p["allow"] if r in ("Bash", "Bash(*)", "Edit", "Write")], "no blanket permission")
+        ask = manager.settings(self.ledger, "ask")["permissions"]
+        self.assertIn("Bash(git push *)", ask["deny"], "a question or a review stays read-only whatever manager.direct says")
+        self.assertIn("Bash(incus *)", ask["deny"])
+        self.assertTrue(ask["blockWritesOutsideWorkingDirectories"])
+
+    def test_with_manager_direct_the_chat_is_given_the_organizations_token_and_git_is_told_to_use_it(self):
+        from org import secrets
+
+        held = self.tmp / "run-org"
+        held.mkdir()
+        (held / secrets.GITHUB).write_text("github_pat_not_a_real_token\n")
+        before = os.environ["ORG_SECRETS_DIR"]
+        os.environ["ORG_SECRETS_DIR"] = str(held)
+        self.addCleanup(os.environ.__setitem__, "ORG_SECRETS_DIR", before)
+        env = manager.launch_env(self.ledger, github=True)
+        self.assertEqual(env["GH_TOKEN"], "github_pat_not_a_real_token")
+        n = int(env["GIT_CONFIG_COUNT"]) - 1
+        self.assertEqual(env["GIT_CONFIG_KEY_%d" % n], "credential.https://github.com.helper", "for github.com and nowhere else")
+        self.assertEqual(env["GIT_CONFIG_VALUE_%d" % n], manager.GIT_HELPER)
+        self.assertNotIn("github_pat", manager.GIT_HELPER, "the helper reads the token from the environment; it does not hold it")
+        self.assertNotIn("GH_TOKEN", manager.launch_env(self.ledger), "a question, a review and an ordinary chat get no token")
+        note = manager.DIRECT_NOTE % {"desk": self.ledger.desk}
+        self.assertIn("%s/work/<name>" % self.ledger.desk, note)
+        self.assertNotIn("%(", note)
+
     def test_persona_names_the_desk_and_the_state(self):
         text = manager.persona(self.ledger)
         self.assertIn(str(self.ledger.desk), text)

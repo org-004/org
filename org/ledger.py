@@ -60,6 +60,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "sandbox_exclude": [],  # more command patterns to run outside the sandbox, under permission rules
         "permission_mode": None,
         "network_allow": ["github.com", "*.github.com", "*.githubusercontent.com"],
+        # True: the owner works with the chat directly. It may then change the organization's
+        # repositories itself: no shell sandbox, so every shell command that is not a read asks;
+        # pushes are no longer denied; and the chat is given the organization's GitHub token.
+        "direct": False,
     },
     "machines": {
         # Where a spec runs when its header does not say: "incus", "ssh:<name>", "local", or a kind

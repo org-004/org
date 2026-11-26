@@ -73,6 +73,13 @@ GIT_READ = ["status", "log", "show", "diff", "blame", "ls-files", "ls-remote", "
 # What stands between the chat and the machine that holds it. The chat has no use for either:
 # engineers' containers are reached with `org ls`, `org cat` and `org exec`.
 HOST_COMMANDS = ["incus", "sudo", "su", "docker"]
+# What is kept of those when the owner has set `manager.direct`: root owns the files that keep
+# this machine from the owner's own computer, so root stays out of reach. Incus and Docker
+# then divide the machine for the manager; they are not a wall.
+ROOT_COMMANDS = ["sudo", "su"]
+# How git finds the organization's token in a direct session: a credential helper for
+# github.com alone, given through the session's environment and written to no file.
+GIT_HELPER = '!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
 
 
 def secret_paths() -> list:
@@ -109,7 +116,17 @@ def sandbox_usable() -> bool:
         return False
 
 
+def direct(ledger: Ledger) -> bool:
+    """Whether the owner has set `manager.direct`: the chat may then change the organization's
+    repositories itself. It runs without the shell sandbox, so every shell command that is not
+    a read asks the person; pushes and the other outward commands are no longer denied; and
+    the session is given the organization's GitHub token. Off unless the owner turns it on."""
+    return bool((ledger.config().get("manager") or {}).get("direct"))
+
+
 def sandboxed(ledger: Ledger) -> bool:
+    if direct(ledger):
+        return False  # a sandboxed shell has no login and cannot write a clone outside the desk
     return bool((ledger.config().get("manager") or {}).get("sandbox", True)) and sandbox_usable()
 
 
@@ -133,23 +150,31 @@ def settings(ledger: Ledger, mode: str, with_sandbox: Optional[bool] = None) -> 
     """The Claude Code settings layered over the user's own for a manager session."""
     mgr = ledger.config().get("manager") or {}
     desk, root = str(ledger.desk), str(ledger.root)
+    # `manager.direct` changes the chat only: a question from the dashboard or a review stays
+    # read-only whatever it says.
+    direct_mode = mode == "talk" and direct(ledger)
+    if direct_mode:
+        with_sandbox = False
     if with_sandbox is None:
         with_sandbox = mode == "talk" and sandboxed(ledger)
+    outward = [] if direct_mode else ["Bash(%s *)" % c for c in OUTWARD] + ["Bash(%s)" % c for c in OUTWARD_FORMS + OUTWARD_API]
+    host = ROOT_COMMANDS if direct_mode else HOST_COMMANDS
     perms = {
         # Read(//**) as well as Read: the harness checks the paths given to ls, cat and the like
         # against read rules by path, and a rule without a path does not satisfy that check.
         "allow": ["Read", "Read(//**)", "Grep", "Glob"] + _org(READ_COMMANDS) + _read_rules(),
         "ask": _org(HUMAN_COMMANDS) + ["Bash(ssh *)"],
         # An absolute path in a rule is written with a second leading slash.
-        "deny": ["Bash(%s *)" % c for c in OUTWARD] + ["Bash(%s)" % c for c in OUTWARD_FORMS + OUTWARD_API]
+        "deny": outward
         + ["Edit(/%s/specs/**)" % root, "Edit(/%s/runs/**)" % root, "Edit(/%s/config.json)" % root]
         # The logins this side hands to engineers are not the manager chat's to read or repeat.
         + ["Read(/%s)" % p for p in secret_paths()]
         # No MCP server is configured here and none may be: a tool from one would be a way out
         # of this machine that no rule above describes.
         + ["mcp__*"]
-        + ["Bash(%s *)" % c for c in HOST_COMMANDS] + ["Bash(%s)" % c for c in HOST_COMMANDS],
-        "blockWritesOutsideWorkingDirectories": True,
+        + ["Bash(%s *)" % c for c in host] + ["Bash(%s)" % c for c in host],
+        # In a direct session a file written outside the desk asks the person instead.
+        "blockWritesOutsideWorkingDirectories": not direct_mode,
     }
     out = {"permissions": perms, "disableClaudeAiConnectors": True}
     if mode == "talk":
@@ -179,7 +204,7 @@ def settings(ledger: Ledger, mode: str, with_sandbox: Optional[bool] = None) -> 
     return out
 
 
-def launch_env(ledger: Ledger) -> dict:
+def launch_env(ledger: Ledger, github: bool = False) -> dict:
     env = dict(os.environ)
     # ~/.local/bin is where Claude Code installs itself, and a service or a command passed in
     # from the host has only the PATH it was given.
@@ -192,6 +217,17 @@ def launch_env(ledger: Ledger) -> dict:
         env["CLAUDE_CODE_OAUTH_TOKEN"] = token
     for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"):
         env.pop(name, None)
+    if github:
+        # Only a direct chat (`manager.direct`) is started this way: it is given the token that
+        # engineers are given, which reaches the repositories of one organization, and git is
+        # told to use it for github.com.
+        github_token = secrets.github_token()
+        if github_token:
+            env["GH_TOKEN"] = github_token
+            n = int(env.get("GIT_CONFIG_COUNT") or 0)
+            env["GIT_CONFIG_KEY_%d" % n] = "credential.https://github.com.helper"
+            env["GIT_CONFIG_VALUE_%d" % n] = GIT_HELPER
+            env["GIT_CONFIG_COUNT"] = str(n + 1)
     # No claude.ai connectors, whatever the account has attached. A token from `claude
     # setup-token` cannot fetch them anyway; this holds if a wider login ever lands here.
     env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
@@ -227,6 +263,19 @@ def machines_help(cfg: dict) -> str:
 # Said only to a session whose shell is sandboxed.
 SANDBOX_NOTE = """
 - Your shell commands run in a sandbox with no GitHub login, and there is none to find: every repository you work with is public, so `git clone`, `git fetch` and `curl -s https://api.github.com/repos/<owner>/<name>/pulls` read all you need. `org repos` lists the organization's repositories and `org clone <owner/name>` puts a copy in your scratch space. You cannot push, comment or open anything on GitHub, and `gh` will only tell you nobody is logged in. An `org` command must be the whole command: no pipe, no redirect, no `;` or `&&`, no `cd` in front, or it runs inside the sandbox and one that writes fails."""
+
+
+DIRECT_NOTE = """
+
+## Working directly (the owner has set `manager.direct`)
+
+The owner has chosen to work with you directly in this chat. This section replaces what is said above about never building, writing only inside the desk, and never pushing.
+
+- You may change a repository of the organization yourself when that is the quickest way to a verified result: a small fix, a document, a configuration value, a failed check with a plain cause. Dispatch an engineer when the work needs a long build or test, or more than about half an hour.
+- Work in a clone of your own under `%(desk)s/work/<name>`, made with `git clone` (a scratch clone from `org clone` is given a push address that refuses). Follow the repository's own rules (`AGENTS.md`), run its checks, commit as its log does, and push. Your shell has the organization's token as `GH_TOKEN`, and git uses it for github.com.
+- There is no shell sandbox in this mode: every shell command that is not a read asks the owner, and so does a file written outside the desk. Say in a few words what a command is for before you run it.
+- Still not yours: `sudo` and `su`, the logins kept on this machine, and anything on the owner's own computer. What cannot be undone (deleting a repository or a branch, rewriting a default branch's history) is put to the owner in words first.
+- After you push, read the checks on the commit and say what they show."""
 
 
 def persona(ledger: Ledger, live_state: bool = True, extra: str = "", with_sandbox: bool = False) -> str:
@@ -287,11 +336,14 @@ def talk(ledger: Ledger, prompt: Optional[str] = None, project: Optional[str] = 
         print("org: the claude CLI is not on PATH", file=sys.stderr)
         return 127
     with_sandbox = sandboxed(ledger)
+    direct_mode = direct(ledger)
+    note = (DIRECT_NOTE % {"desk": ledger.desk}) if direct_mode else ""
     mode = session_mode(ledger, with_sandbox)
     if dry_run:
         print("would run, in %s:\n  %s --append-system-prompt <persona, %d characters> --settings <below> --name 'org manager'%s\n"
-              % (ledger.desk, claude, len(persona(ledger, with_sandbox=with_sandbox)), (" --permission-mode " + mode) if mode else ""))
-        print("shell sandbox: %s\n" % ("on" if with_sandbox else "not available here, so the session asks before shell commands that are not reads"))
+              % (ledger.desk, claude, len(persona(ledger, with_sandbox=with_sandbox, extra=note)), (" --permission-mode " + mode) if mode else ""))
+        print("shell sandbox: %s\n" % ("on" if with_sandbox else "off by manager.direct: the session asks before shell commands that are not reads, and may push"
+                                       if direct_mode else "not available here, so the session asks before shell commands that are not reads"))
         print(json.dumps(settings(ledger, "talk", with_sandbox), indent=2))
         return 0
     try:
@@ -300,10 +352,13 @@ def talk(ledger: Ledger, prompt: Optional[str] = None, project: Optional[str] = 
         pass
     prepare_own_session(ledger, claude)
     mgr = ledger.config().get("manager") or {}
-    if not with_sandbox and mgr.get("sandbox", True):
+    if direct_mode:
+        print("org: manager.direct is set: no shell sandbox, the manager asks before any shell command that is not a read,\n"
+              "     and it has the organization's GitHub token.", file=sys.stderr)
+    elif not with_sandbox and mgr.get("sandbox", True):
         print("org: no shell sandbox on this machine; the manager will ask before any shell command that is not a read.\n"
               "     `org doctor` says what is missing.", file=sys.stderr)
-    cmd = [claude, "--append-system-prompt", persona(ledger, with_sandbox=with_sandbox),
+    cmd = [claude, "--append-system-prompt", persona(ledger, with_sandbox=with_sandbox, extra=note),
            "--settings", json.dumps(settings(ledger, "talk", with_sandbox)),
            "--name", "org manager"]
     for flag, key in (("--model", "model"), ("--effort", "effort")):
@@ -320,7 +375,7 @@ def talk(ledger: Ledger, prompt: Optional[str] = None, project: Optional[str] = 
     if prompt:
         cmd.append(prompt)
     os.chdir(ledger.desk)
-    os.execve(claude, cmd, launch_env(ledger))
+    os.execve(claude, cmd, launch_env(ledger, github=direct_mode))
     return 0  # not reached
 
 

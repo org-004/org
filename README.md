@@ -699,6 +699,15 @@ are absent from the file above because they have defaults.
 `machines.after_finish` (`delete` or `keep`, default `delete`) is described under
 [A finished run's machine](#a-finished-runs-machine).
 
+`manager.direct` (default `false`) is for an owner who wants to work with the chat directly.
+With `org config set manager.direct true` and a new `org talk`, the chat may change the
+organization's repositories itself: it runs without the shell sandbox, so every shell command
+that is not a read asks the person, and so does a file written outside the desk; `git push`,
+`gh`, `incus` and `docker` are no longer refused; and the session is given the organization's
+GitHub token, which git uses for github.com. `sudo` and `su` stay refused, the logins stay
+unreadable, and approve, dispatch, stop, exec and upgrade still ask. Questions from the
+dashboard and the reviews between specs are not changed by it.
+
 The plan's settings are described under [Plans](#plans). `manager.review_model` and
 `manager.review_effort` are the review's model and effort, and `null` means the manager chat's own.
 `graph.max_retries` is the reviews' retries per version of a spec, `graph.max_resumes` the resumes

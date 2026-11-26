@@ -914,6 +914,34 @@ prompt goes to the person.
 `org` user there. It can inside an engineer's container too, which matters for an engineer that
 works on org itself.
 
+**`manager.direct` takes most of this down, by the owner's decision.** The confinement above
+was built for an owner who approved every spec and wanted a chat that could change nothing. On
+2026-11-25 the owner of the first installation decided otherwise: "I just care that you don't
+run arbitrary code on my host machine. Everything else is game", "incus containers are helpful
+for you to divide up your own environment (the VM, which you essentially own) as you see fit.
+Not a security safeguard", and, for the work itself, "you should just try to edit these things
+yourself and i'll approve every command". The first try showed what stood in the way: a CI
+file was changed in a scratch clone within minutes, and the push was refused by a deny rule
+that no prompt can lift, from a shell that had no login. So there is a switch, off by default.
+With `manager.direct` true, the chat (`talk` mode only; `ask` and the review are unchanged):
+
+| What changes | Why |
+|---|---|
+| no shell sandbox, and the ask-first permission mode | a sandboxed shell has no login and cannot write outside the desk; without it every shell command that is not a read asks the person, which is the control they asked for |
+| `OUTWARD`, `incus` and `docker` are no longer denied | pushing is the point, and containers divide the machine for the manager |
+| `blockWritesOutsideWorkingDirectories` is off | a file outside the desk asks instead of being refused |
+| the session gets the organization's GitHub token as `GH_TOKEN`, and a credential helper for github.com through `GIT_CONFIG_*` | the token engineers already hold; it reaches one organization; nothing is written to the user's git configuration |
+
+What stays: `sudo` and `su` are denied, because root owns what keeps the VM from the owner's
+own computer, and that wall is not this repository's (`org-host`); the logins are unreadable to
+the file tools; approved specs, run records and `config.json` are not edited by hand; `mcp__*`
+is denied; and approve, dispatch, stop, exec, upgrade and the rest of `HUMAN_COMMANDS` ask.
+What it gives up, plainly: with no sandbox, a shell command the person approves can read the
+tokens' files, reach Incus and with it every engineer's container, and reach any host on the
+network. The person's answer to each prompt is the only check, and a page or a package that
+misleads the session could lead it to ask for something harmful in words that look harmless.
+No live check of this mode against the real Claude Code had been run when this was written.
+
 **What the live check taught**, in the layouts before this one (`tests/live_manager_rules.py`,
 fourteen attempted actions judged by outcome). The rules that came of it are unchanged:
 
