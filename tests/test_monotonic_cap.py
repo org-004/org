@@ -20,7 +20,11 @@ import test_runner  # noqa: E402
 DONE, PLAN_TURN, REPORT = test_runner.DONE, test_runner.PLAN_TURN, test_runner.REPORT
 
 
-class MonotonicCap(test_runner.RunnerCase):
+class MonotonicCap(unittest.TestCase):
+    # The runner case's helpers, without the many tests it carries, which would run again here.
+    setUp, job, go, status = (test_runner.RunnerCase.setUp, test_runner.RunnerCase.job,
+                              test_runner.RunnerCase.go, test_runner.RunnerCase.status)
+
     def test_a_wall_clock_set_three_hours_forward_in_the_middle_of_a_run_does_not_end_a_run_capped_at_two_hours(self):
         self.job({"plan": PLAN_TURN, "milestone:M1": dict(DONE("M1"), sleep=1.5), "milestone:M2": DONE("M2"), "report": REPORT},
                  caps={"max_hours": 2.0})
