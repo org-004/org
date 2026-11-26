@@ -177,8 +177,10 @@ def settings(ledger: Ledger, mode: str, with_sandbox: Optional[bool] = None) -> 
         # An absolute path in a rule is written with a second leading slash.
         "deny": outward
         + ["Edit(/%s/specs/**)" % root, "Edit(/%s/runs/**)" % root, "Edit(/%s/config.json)" % root]
-        # The logins this side hands to engineers are not the manager chat's to read or repeat.
-        + ["Read(/%s)" % p for p in secret_paths()]
+        # The logins this side hands to engineers are not a confined chat's to read or repeat.
+        # A direct chat already holds both tokens in its environment, and the owner gave it
+        # the files too: "The logins on this machine are yours to read".
+        + ([] if direct_mode else ["Read(/%s)" % p for p in secret_paths()])
         # No MCP server is configured here and none may be: a tool from one would be a way out
         # of this machine that no rule above describes.
         + ["mcp__*"]
@@ -287,22 +289,35 @@ SANDBOX_NOTE = """
 
 DIRECT_NOTE = """
 
-## Working directly (the owner has set `manager.direct`)
-
-The owner has chosen to work with you directly in this chat. This section replaces what is said above about never building, writing only inside the desk, and never pushing.
+## What is yours to do (the owner has set `manager.direct`)
 
 - You may change a repository of the organization yourself when that is the quickest way to a verified result: a small fix, a document, a configuration value, a failed check with a plain cause. Dispatch an engineer when the work needs a long build or test, or more than about half an hour.
 - Work in a clone of your own under `%(desk)s/work/<name>`, made with `git clone` (a scratch clone from `org clone` is given a push address that refuses). Follow the repository's own rules (`AGENTS.md`), run its checks, commit as its log does, and push. Your shell has the organization's token as `GH_TOKEN`, and git uses it for github.com.
 %(asks)s
-- Still not yours: `sudo` and `su`, the logins kept on this machine, and anything on the owner's own computer. What cannot be undone (deleting a repository or a branch, rewriting a default branch's history) is put to the owner in words first.
+- The logins kept on this machine (the Claude token, the organization's GitHub token) are yours to read and use. The repositories are public: a token is never written into a commit, a spec, a brief, a report or a log, and never sent anywhere but the service it belongs to.
 - After you push, read the checks on the commit and say what they show."""
 
 
-DIRECT_ASKS = "- There is no shell sandbox in this mode: every shell command that is not a read asks the owner, and so does a file written outside the desk. Say in a few words what a command is for before you run it."
+DIRECT_ASKS = ("- There is no shell sandbox in this mode: every shell command that is not a read asks the owner, and so does a file written outside the desk. "
+               "Say in a few words what a command is for before you run it. `org approve`, `org release`, `org stop`, `org exec` and `org upgrade` ask too, "
+               "so a spec is dispatched when the owner confirms the command: tell them what it builds, its caps and the assumption you consider riskiest.")
 DIRECT_FREE = ("- Nothing asks the owner in this mode: there is no shell sandbox and no question before a command, an approval, a dispatch or an upgrade, as in an engineer's session. "
                "The machine is yours and it is the only wall. So you are the check: read a command before you run it, look at what you are about to delete or overwrite, "
-               "verify before you push, and say afterwards what you did. `org approve`, `org dispatch`, `org stop`, `org exec` and `org upgrade` are yours to run when the work calls for them; "
-               "keep to the budget the owner set, and never pass `--skip-tests` to an upgrade.")
+               "verify before you push, and say afterwards what you did. `org approve`, `org release`, `org dispatch`, `org stop`, `org exec` and `org upgrade` are yours to run when the work calls for them: "
+               "a spec of yours that `org spec check` reports ready is approved by you, and the journal says why it was worth its caps. "
+               "Never pass `--skip-tests` to an upgrade.")
+
+
+# Said to a chat that is not direct: the owner approves, and the session changes nothing outside its desk.
+CONFINED_NOTE = """
+
+## What is yours to do (`manager.direct` is not set)
+
+- The logins kept on this machine are not yours to read.
+- You write only inside `%(desk)s`. Reading is allowed everywhere: to read a checkout elsewhere on the machine, `cd` into it and use plain commands.
+- You never change project state: no commits, pushes, issues, merges or releases, and nothing on an engineer's machine. Something you are about to fix is a requirement for a spec. If testing a hypothesis needs a change to exist, make it in a scratch clone and discard it.
+- Approval is the owner's act, bound to the exact text they read. Present the draft: its path, what will be built and what will not, the caps, the assumption you consider riskiest, and the sha256 prefix that `org spec check` printed. Only when they clearly approve that text, run `org approve <spec> --sha <prefix>`; Claude Code asks them to confirm the command, and that confirmation is the approval. Each spec of a plan is approved on its own text. Enthusiasm about an idea is not approval of a text.
+- `org release`, `org stop` and `org exec` ask the owner in the same way. A paused plan is not got moving by a release you suggest: say what the reason was and what you would change."""
 
 
 def direct_note(ledger: Ledger) -> str:
@@ -310,6 +325,11 @@ def direct_note(ledger: Ledger) -> str:
     if not direct(ledger):
         return ""
     return DIRECT_NOTE % {"desk": ledger.desk, "asks": DIRECT_FREE if unasked(ledger) else DIRECT_ASKS}
+
+
+def mode_note(ledger: Ledger) -> str:
+    """The last section of a chat's persona: what the session may do itself, by `manager.direct`."""
+    return direct_note(ledger) or CONFINED_NOTE % {"desk": ledger.desk}
 
 
 def persona(ledger: Ledger, live_state: bool = True, extra: str = "", with_sandbox: bool = False) -> str:
@@ -323,7 +343,7 @@ def persona(ledger: Ledger, live_state: bool = True, extra: str = "", with_sandb
                 for name, p in sorted(projects.items()))
     else:
         state = "(sent with each question)"
-    return render(read_text(PROMPTS / "manager.md"), desk=ledger.desk, root=ledger.root, state=state,
+    return render(read_text(PROMPTS / "manager.md"), desk=ledger.desk, root=ledger.root, state=state, guide=PROMPTS / "manager",
                   machines=machines_help(ledger.config()), sandbox_note=SANDBOX_NOTE if with_sandbox else "") + extra
 
 
@@ -371,7 +391,7 @@ def talk(ledger: Ledger, prompt: Optional[str] = None, project: Optional[str] = 
         return 127
     with_sandbox = sandboxed(ledger)
     direct_mode = direct(ledger)
-    note = direct_note(ledger)
+    note = mode_note(ledger)
     mode = session_mode(ledger, with_sandbox)
     if dry_run:
         print("would run, in %s:\n  %s --append-system-prompt <persona, %d characters> --settings <below> --name 'org manager'%s\n"

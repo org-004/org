@@ -264,10 +264,12 @@ class ManagerSettings(unittest.TestCase):
                          "Bash(incus *)", "Bash(incus)", "Bash(docker *)"):
                 self.assertNotIn(rule, p["deny"], rule)
             self.assertFalse(p["blockWritesOutsideWorkingDirectories"], "a file outside the desk asks instead")
-            # What is left: root, the logins, the ledger's own records, and tools from outside.
+            # What is left: root, the ledger's own records, and tools from outside.
             for rule in ("Bash(sudo *)", "Bash(sudo)", "Bash(su *)", "Bash(su)", "mcp__*",
-                         "Edit(/%s/specs/**)" % self.ledger.root, "Read(/%s/**)" % os.environ["ORG_SECRETS_DIR"]):
+                         "Edit(/%s/specs/**)" % self.ledger.root):
                 self.assertIn(rule, p["deny"], rule)
+            # The logins are a direct chat's to read: it holds both tokens in its environment already.
+            self.assertFalse([r for r in p["deny"] if r.startswith("Read(")], "no file is kept from a direct chat")
             # Nothing that was the person's decision is allowed by this: it asks, as before.
             for cmd in ("approve", "dispatch", "stop", "exec", "upgrade", "release"):
                 self.assertIn("Bash(org %s *)" % cmd, p["ask"], cmd)
@@ -276,6 +278,7 @@ class ManagerSettings(unittest.TestCase):
         ask = manager.settings(self.ledger, "ask")["permissions"]
         self.assertIn("Bash(git push *)", ask["deny"], "a question or a review stays read-only whatever manager.direct says")
         self.assertIn("Bash(incus *)", ask["deny"])
+        self.assertIn("Read(/%s/**)" % os.environ["ORG_SECRETS_DIR"], ask["deny"], "and is not given the logins")
         self.assertTrue(ask["blockWritesOutsideWorkingDirectories"])
 
     def test_with_manager_direct_the_chat_is_given_the_organizations_token_and_git_is_told_to_use_it(self):
@@ -336,6 +339,37 @@ class ManagerSettings(unittest.TestCase):
         self.assertIn(str(self.ledger.desk), text)
         self.assertIn("No runs yet.", text)
         self.assertNotIn("{{", text)
+
+    def test_persona_starts_from_the_desks_record_and_points_at_guides_that_exist(self):
+        text = manager.persona(self.ledger)
+        # A session remembers nothing: it is told to read what the last one wrote before it
+        # says or does anything, and to carry on from there without asking.
+        for said in ("%s/roadmap.md" % self.ledger.desk, "%s/journal/" % self.ledger.desk, 'journal\'s "Next" list',
+                     "A step that is already decided needs no permission.", "The owner approves the plan, not the steps.",
+                     "Do not work on an outside contribution"):
+            self.assertIn(said, text)
+        guide = manager.PROMPTS / "manager"
+        for name in ("specs.md", "runs.md"):
+            self.assertIn("%s/%s" % (guide, name), text)
+            body = (guide / name).read_text()
+            self.assertTrue(body.strip(), name)
+            self.assertNotIn("{{", body, "a guide is read as it is, never filled in")
+
+    def test_a_chat_is_told_what_is_its_own_to_do_by_manager_direct(self):
+        confined = manager.mode_note(self.ledger)
+        self.assertIn("You write only inside `%s`" % self.ledger.desk, confined)
+        self.assertIn("Approval is the owner's act", confined)
+        self.assertIn("logins kept on this machine are not yours to read", confined)
+        self.assertNotIn("%(", confined)
+        write_json(self.ledger.config_path, {"manager": {"direct": True, "permission_mode": "bypassPermissions"}})
+        free = manager.mode_note(self.ledger)
+        self.assertEqual(free, manager.direct_note(self.ledger))
+        self.assertIn("approved by you", free)
+        self.assertIn("yours to read and use", free)
+        self.assertIn("never written into a commit", free)
+        self.assertNotIn("Approval is the owner's act", free)
+        # Neither is said to a question or a review, which are read-only whatever the setting.
+        self.assertNotIn("What is yours to do", manager.persona(self.ledger, live_state=False))
 
     def test_the_manager_can_fetch_a_repository_and_knows_what_the_sandbox_hides(self):
         talk = manager.settings(self.ledger, "talk", with_sandbox=True)["permissions"]

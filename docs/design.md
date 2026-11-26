@@ -933,14 +933,18 @@ With `manager.direct` true, the chat (`talk` mode only; `ask` and the review are
 | the session gets the organization's GitHub token as `GH_TOKEN`, and a credential helper for github.com through `GIT_CONFIG_*` | the token engineers already hold; it reaches one organization; nothing is written to the user's git configuration |
 
 What stays: `sudo` and `su` are denied, because root owns what keeps the VM from the owner's
-own computer, and that wall is not this repository's (`org-host`); the logins are unreadable to
-the file tools; approved specs, run records and `config.json` are not edited by hand; `mcp__*`
+own computer, and that wall is not this repository's (`org-host`); approved specs, run records and `config.json` are not edited by hand; `mcp__*`
 is denied; and approve, dispatch, stop, exec, upgrade and the rest of `HUMAN_COMMANDS` ask.
 What it gives up, plainly: with no sandbox, a shell command the person approves can read the
 tokens' files, reach Incus and with it every engineer's container, and reach any host on the
 network. The person's answer to each prompt is the only check, and a page or a package that
 misleads the session could lead it to ask for something harmful in words that look harmless.
 No live check of this mode against the real Claude Code had been run when this was written.
+The file tools' deny rules for the logins went the same day ("The logins on this machine are
+yours to read, I don't see the issue with you having the claude or github token"): the session
+holds both tokens in its environment, so the rules kept nothing from it. What the persona asks
+instead is that a token never be written into anything that leaves the machine, because the
+repositories are public.
 
 **And the questions can go too.** The same owner, an hour later: "Can you make it so each command
 doesn't ask me? I want you to essentially run in skip-permissions-run-dangerously, same as the

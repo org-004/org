@@ -125,6 +125,16 @@ org talk "add CSV export to the table view"
 One persona, two ways in. It is not a machine of its own: it runs in the VM as the `org` user,
 beside the ledger.
 
+The persona (`org/prompts/manager.md`) is short. It tells a session to begin from what the last
+one wrote, `desk/roadmap.md` and the newest file of `desk/journal/`, to carry on with the
+journal's "Next" list without asking for what is already decided, and to write the journal
+before it stops: a session remembers nothing, so the desk is what makes the manager one
+continuing thing. The detail it needs only sometimes is in two guides it reads when it writes a
+spec or reads a run (`org/prompts/manager/specs.md`, `runs.md`). Its last section says what the
+session may do itself, and is one of two texts: the confined chat's (the owner approves each
+spec, nothing outside the desk is written) or the direct chat's (see `manager.direct` below).
+The numbered flow that follows is the confined chat's.
+
 `org talk` is an interactive Claude Code session. It can read everything and run anything, and it
 can change nothing that matters:
 
@@ -704,8 +714,9 @@ With `org config set manager.direct true` and a new `org talk`, the chat may cha
 organization's repositories itself: it runs without the shell sandbox, so every shell command
 that is not a read asks the person, and so does a file written outside the desk; `git push`,
 `gh`, `incus` and `docker` are no longer refused; and the session is given the organization's
-GitHub token, which git uses for github.com. `sudo` and `su` stay refused, the logins stay
-unreadable, and approve, dispatch, stop, exec and upgrade still ask. Questions from the
+GitHub token, which git uses for github.com. The files that hold the logins are readable to it
+too, since it holds both tokens already. `sudo` and `su` stay refused, and approve, dispatch,
+stop, exec and upgrade still ask. Questions from the
 dashboard and the reviews between specs are not changed by it.
 
 With `manager.direct` true and `org config set manager.permission_mode bypassPermissions`, the
