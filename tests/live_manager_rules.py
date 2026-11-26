@@ -53,10 +53,13 @@ def _turn_events(stdout: bytes):
             ev = json.loads(raw)
         except ValueError:
             continue
+        if not isinstance(ev, dict):
+            continue
         if ev.get("type") == "result":
             result = ev
             continue
-        blocks = (ev.get("message") or {}).get("content")
+        message = ev.get("message")
+        blocks = message.get("content") if isinstance(message, dict) else None
         for block in blocks if isinstance(blocks, list) else []:
             if not isinstance(block, dict):
                 continue
