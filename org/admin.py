@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -215,6 +217,10 @@ def _install(log=print) -> None:
         raise AdminError("%s exited %d; the release in use is %s" % (up, p.returncode, current_release() or "unknown"))
 
 
+def _terminate(signum, frame):
+    raise SystemExit(128 + signum)
+
+
 def upgrade(ledger: Ledger, ref: str, yes: bool = False, skip_tests: bool = False, log=print) -> int:
     sha, branch = resolve(ref)
     old = current_release()
@@ -239,6 +245,10 @@ def upgrade(ledger: Ledger, ref: str, yes: bool = False, skip_tests: bool = Fals
         test_commit(sha, base, log, limit)
     ours = dispatch.draining(ledger) is None
     dispatch.drain(ledger, "upgrading to %s" % sha[:12])
+    # A SIGTERM must unwind through the finally below, or the drain would stay for ever.
+    previous = None
+    if threading.current_thread() is threading.main_thread():
+        previous = signal.signal(signal.SIGTERM, _terminate)
     try:
         # A dispatch in flight belongs to a process of the old release; let it finish its copy.
         end = now() + 300
@@ -248,6 +258,8 @@ def upgrade(ledger: Ledger, ref: str, yes: bool = False, skip_tests: bool = Fals
         _git(["checkout", "--quiet", "--detach", sha])
         _install(log)
     finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
         if ours:
             dispatch.undrain(ledger)
     log("\nnow running %s. Engineers already at work keep the code they started with. To go back: org upgrade --rollback"

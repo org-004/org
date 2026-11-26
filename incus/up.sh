@@ -228,6 +228,11 @@ Description=org dashboard
 ExecStart=$HOME/.local/bin/org dash --no-open
 Restart=on-failure
 RestartSec=3
+# Turns and reviews that the pump starts are children of the dashboard, so they sit in this unit's cgroup. A
+# restart, as `org upgrade` does, must end the dashboard only: with the default KillMode=control-group it would
+# kill the turn that runs the upgrade before the upgrade lifts its drain. The price is that stopping the unit
+# (`org down`) leaves a running turn alive; a turn ends at its own limits.
+KillMode=process
 Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 [Install]

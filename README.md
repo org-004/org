@@ -2,11 +2,13 @@
 
 A product manager and a team of engineers, each in a box of its own.
 
-You talk to the manager. It turns a loose request into an exact spec, pushing back and looking at
-the real system on the way, and you approve the text. Approval dispatches an engineer: an
-autonomous Claude Code session, alone in its own container, that plans the work, executes it, and
-reports. While engineers work, the manager is a status page and a chat box that answers from what
-the engineers have written down, without interrupting them.
+The manager runs by itself. After `org up` and with `loop.enabled` set, org wakes a headless
+session of the manager when there is something to decide: it reads what engineers reported, writes
+specs, starts engineers, records what it did in its desk and sleeps again. You open `org talk` when
+you want to say something. An engineer is an autonomous Claude Code session, alone in its own
+container, that plans the work, executes it, and reports. While engineers work, the manager is also
+a status page and a chat box that answers from what the engineers have written down, without
+interrupting them.
 
 Standard library Python around the `claude` CLI. No database: the state is files.
 
@@ -100,8 +102,73 @@ login or asks `gh` for one: a login made there would be the whole account, not t
 ## The flow
 
 ```sh
-org talk "add CSV export to the table view"
+org up                       # once; the dashboard's service starts and pumps every ten seconds
+org config set loop.enabled true
+org talk "this week, move the build time of acme/web down"     # whenever you want to say something
 ```
+
+**What wakes the manager.** Every pump of the dashboard's service calls the loop (`org/loop.py`),
+and a session of the manager, called a turn, starts only for one of these reasons, which is
+written on the turn's line and in its message:
+
+- `bootstrap`: no turn has ever run.
+- `wake`: the time the last turn named has passed, or it named none, nothing is running or
+  queued, and `loop.idle_wake_h` hours have passed.
+- `settled`: a run has ended since the last turn started and no run is live or queued and able
+  to start. It must be found so on two ticks at least `loop.settle_s` apart, so that a retry,
+  a resume or a review that org is about to start is seen first.
+- `trouble`: a run ended `failed` or `stopped`, a dispatch failed, or a queued run became held
+  or paused, found on two ticks `loop.settle_s` apart. This wakes the manager while other runs
+  still run. A run that ended `done` or `partial` beside live ones wakes nothing: that decision
+  can wait for the others.
+- `retry`: the last turn failed, and it was the first failure in a row.
+
+Never sooner than `loop.gap_min` minutes after the last turn ended, never while a turn runs,
+while the loop is paused, at the brake or at the day's limit (below). A time that passed while
+the machine slept counts at the next pump.
+
+**What a turn may do.** A turn runs under what a direct chat that asks nothing runs under
+(`manager.direct` and `manager.permission_mode bypassPermissions`, both of which must be set,
+or no turn starts; `org loop status` and `org doctor` say which is missing): no shell sandbox,
+no question before a command, the organization's GitHub token in its environment. It may read
+and change the organization's repositories, push, use the web, run `incus` and `docker`, approve
+and dispatch its own specs, and upgrade org. It may not run `sudo` or `su`, `ssh` or `scp`,
+`org login`, `org down`, `org node add` or `org node rm`: the last three would change your login or
+stop the organization with nobody there, and `ssh` would reach other machines, among them your
+computer, whose address resolves from the VM. Its prompt (`org/prompts/turn.md`) puts the work
+in this order: read the roadmap, the briefs and the journal; read each run it was woken for and
+write what it taught into the project's brief; mend what is small; on the first turn of a day
+write that day's plan at the top of the journal and send it to you; start only what the last
+approved plan covers; record; commit and push the desk; end. A turn ends with a structured
+answer: what it did, when to wake it next (15 to 1440 minutes, or none), and at most one line
+for your phone. That line goes through `notify.url`, at most `loop.tells_per_day` a day. Every
+turn is one line of `loop/turns.jsonl`, its log is beside it, and its cost is a line of
+`manager.jsonl`. A turn is killed at `loop.turn_max_usd` or `loop.turn_timeout_min`; two failed
+turns in a row pause the loop and send one message.
+
+**Your part.**
+
+1. `org up` starts everything. Nothing starts by itself until `loop.enabled` is true.
+2. `org talk` is how you speak to it: approve the day's plan ("Approved", which the chat writes
+   under the plan with the time), set an objective, ask why. A chat and a turn may act at the
+   same time; say in the chat what you want and it will see the journal.
+3. Two numbers bound it, both yours, set with `org config set`:
+   `graph.pause_above_weekly_pct` (default 80), the brake: when any weekly window of the account
+   that is not stale is at or above it, no turn starts, and `org approve`, `org dispatch` and
+   `org release` run by the manager are refused; and `loop.day_max_usd` (default 25), after which
+   no turn starts until the next local day. One message is sent when the brake first holds a turn
+   back, saying when the limit resets; `org loop status` says when the day's limit holds.
+4. `org loop status` says whether it is on, paused and why, the last three turns, and what it
+   waits for. `org loop pause [reason]` stops further turns (a running one is left to end) and
+   `org loop resume` lifts any pause, including the one the loop makes of itself.
+
+A spec of the manager's carries `expect_usd` and `expect_hours`, its forecast for the whole run;
+`org approve` and `org dispatch` run as the manager refuse a spec without them. A person who
+approves is not asked for them. `org approve <spec>` approves the draft as it stands; `--sha <8+>`
+still binds the approval to a text you have read, and the confined chat is told to use it.
+
+**A chat that is confined** (the default of `manager.direct`) keeps the flow of a manager that
+asks you first:
 
 1. **Refine.** The manager restates what you are after, reads the repositories (cloning into its
    scratch space to build and test), checks what is already running, challenges the request and
@@ -113,12 +180,17 @@ org talk "add CSV export to the table view"
    under make the command always ask, and the hash ties it to the text you read. If the draft
    changed after you looked, the hash no longer matches and nothing happens. You can also approve
    from a terminal or from the dashboard.
-4. **Watch.** `org status`, the dashboard, or `org ask "why is the export run late?"`.
-5. **Afterwards.** `org report <run>` is the engineer's report. `org review <run>` sets the
-   frozen plan against what happened. The engineer's container is deleted by the next `org status`
-   or `org pump` after the run is over and fully copied, so only the report, the record, what
-   the machine measured and what the engineer pushed remain (see
-   [A finished run's machine](#a-finished-runs-machine)).
+
+In every case, afterwards:
+
+- **Watch.** `org status`, the dashboard, or `org ask "why is the export run late?"`. The first
+  line of `org status` shows every weekly window the account has, by the name Claude Code gives it
+  (`seven_day` and `seven_day_overage_included` so far), and one line shows the loop.
+- **Read.** `org report <run>` is the engineer's report. `org review <run>` sets the
+  frozen plan and the manager's forecast against what happened. The engineer's container is
+  deleted by the next `org status` or `org pump` after the run is over and fully copied, so only
+  the report, the record, what the machine measured and what the engineer pushed remain (see
+  [A finished run's machine](#a-finished-runs-machine)).
 
 ## The manager
 
@@ -133,7 +205,11 @@ continuing thing. The detail it needs only sometimes is in two guides it reads w
 spec or reads a run (`org/prompts/manager/specs.md`, `runs.md`). Its last section says what the
 session may do itself, and is one of two texts: the confined chat's (the owner approves each
 spec, nothing outside the desk is written) or the direct chat's (see `manager.direct` below).
-The numbered flow that follows is the confined chat's.
+A turn of the loop is given the same persona with the direct chat's note, and `org/prompts/turn.md`
+after it. Every chat and every turn has `ORG_ACTOR=manager` in its environment, which is how
+`org approve`, `org dispatch` and `org release` know the manager is the one asking; `org ask`
+and the reviews do not.
+The table below is the confined chat's.
 
 `org talk` is an interactive Claude Code session. It can read everything and run anything, and it
 can change nothing that matters:
@@ -546,6 +622,8 @@ delivery: merge         # merge | branch | none
 machine: incus          # incus | ssh:<name>; leave it out for the default
 max_cost_usd: 40        # hard caps; set at least one
 max_hours: 6
+expect_usd: 22          # the manager's forecast for the whole run; at most the cap of its kind
+expect_hours: 3
 max_weekly_pct: 10      # enforced once the dollars-per-percent rate is known
 model: fable            # optional overrides for the engineer
 effort: high
@@ -558,7 +636,10 @@ considered, Open questions (which must read `None`). `org spec check` enforces t
 can check, including that every repository is one an engineer can reach, that it is in the
 organization named by `github.owner` (the only place an engineer can push), and that the machine
 the spec names is one this installation has. Changing an approved spec means revising the draft
-and approving again, which records a new version and starts a new run.
+and approving again, which records a new version and starts a new run. `expect_usd` and
+`expect_hours` are each a positive number no larger than the cap of the same kind when there is
+one; `org review <run>` shows them beside the engineer's plan and what the run took, and
+`org status --json` carries both. The manager's own specs must have both.
 
 ### Plans
 
@@ -635,7 +716,19 @@ and check it with `org notify test`.
   and the sum of the per-model rows ever disagree by more than 1% and $0.50, the run gets a
   warning that `org status` shows.
 - **The weekly limit** is the account-wide figure the CLI reports at the start of every engineer
-  turn. It is exact and shared with everything else you do with Claude.
+  turn and of every turn of the manager. It is exact and shared with everything else you do with
+  Claude. The account has more than one weekly window (`seven_day` and
+  `seven_day_overage_included` have been seen, and which model the second belongs to is not
+  verified); org keeps each by the name it came with, shows each in the first line of
+  `org status`, and the brake holds when any window that is not stale is at or above
+  `graph.pause_above_weekly_pct`, naming it. The dollars per point stay on `seven_day`.
+- **A run's `max_hours`**, and the time limits of a turn and of a review, are measured on a clock
+  that does not move when the machine sleeps or a wall clock is set (`time.monotonic()` in the
+  process that enforces them). A runner that is resumed carries the time already used in its
+  state (`used_s`); the gap while no process ran is not counted. Times shown to a person stay
+  wall-clock.
+- **The manager's own sessions** (turns, reviews, questions) each append a line to
+  `manager.jsonl` with their cost; `org status` and `org loop status` show what they cost today.
 - **A run's share of the weekly limit** needs the exchange rate between the two, which is not
   published. org learns it from finished runs (the largest dollars-per-point any run observed,
   since other activity only inflates the movement), or you set `budget.usd_per_weekly_pct`.
@@ -651,7 +744,7 @@ org up | down | login | doctor | init                      set up, stop the dash
 org talk [message]              talk to the manager        org ask "question"
 org status [--watch|--json]     every run                  org dash [--url]
 org spec new|check|show|ls|revise
-org approve <spec> --sha <8+>   freeze and dispatch        org dispatch <spec> [--machine M]
+org approve <spec> [--sha <8+>] freeze and dispatch        org dispatch <spec> [--machine M]
 org peek <run>                  one run, in words          org logs <run> [-f]
 org plan|report|review <run>
 org ls|cat|diff <run>           an engineer's files        org exec <run> -- <cmd>
@@ -660,6 +753,7 @@ org stop <run>                  org resume <run> | --interrupted
 org graph                       every plan: specs, runs, what waits, each review's verdict
 org release <run or spec>       start a held run of a plan anyway
 org notify test                 send one test message to notify.url
+org loop status|pause [reason]|resume                    the manager's loop
 org machine ls | rm <run>       org pool                   org pump
 org drain [--wait] [--reason R] [--status]                 org undrain
 org upgrade <ref> | --rollback  install a commit from the default branch, or go back one
@@ -689,13 +783,15 @@ Everything is optional; these are the values `org up` sets and the defaults arou
   "github": {"owner": "<organization>"},
   "engineer": {"model": "fable", "effort": "high", "max_turn_retries": 3, "report_reserve_usd": 3.0},
   "manager": {"model": "fable", "effort": "high", "ask_model": "sonnet", "sandbox": true, "own_claude": true,
-              "review_model": null, "review_effort": null,
+              "review_model": null, "review_effort": null, "turn_model": null, "turn_effort": null,
               "network_allow": ["github.com", "*.github.com", "*.githubusercontent.com"]},
   "budget": {"usd_per_weekly_pct": null},
   "status": {"sync_timeout_s": 8},
   "dash": {"port": 8787, "sync_interval_s": 10},
   "graph": {"max_retries": 1, "max_resumes": 2, "dead_after_min": 5, "review_timeout_min": 15,
             "pause_above_weekly_pct": 80},
+  "loop": {"enabled": false, "gap_min": 5, "settle_s": 120, "idle_wake_h": 6, "turn_max_usd": 10,
+           "turn_timeout_min": 60, "day_max_usd": 25, "tells_per_day": 6},
   "notify": {"url": null, "headers": {}}
 }
 ```
@@ -724,6 +820,18 @@ chat asks nothing at all, as an engineer's session does: no question before a sh
 file, an approval, a dispatch or an upgrade. `sudo` and `su` stay refused. The machine is then
 the only wall between the chat and everything it can reach; set it only on a machine you have
 given to the organization.
+
+The loop's settings, all under `loop`: `enabled` (default `false`: nothing runs by itself
+until it is `true`); `gap_min`, the minutes from the end of one turn to the start of the next at
+least; `settle_s`, how long a run's end must stand, over two ticks, before it wakes a turn;
+`idle_wake_h`, the hours after which a manager that named no wake time and has nothing running
+looks again; `turn_max_usd` and `turn_timeout_min`, the cost and the minutes at which a turn is
+killed; `day_max_usd`, the cost of a local day's turns after which no turn starts until the next
+day; and `tells_per_day`, how many lines of a turn's `tell` are sent to you in a local day.
+`manager.turn_model` and `manager.turn_effort` are a turn's model and effort, and `null` means the
+chat's own. A turn starts only with `manager.direct` true and `manager.permission_mode`
+`bypassPermissions`. `org doctor` has a `loop` row, and warns when the loop is on and
+`notify.url` is not set.
 
 The plan's settings are described under [Plans](#plans). `manager.review_model` and
 `manager.review_effort` are the review's model and effort, and `null` means the manager chat's own.
@@ -914,6 +1022,10 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
   - The memory limit, apart from the VM: the unit tests, and `tests/live_memory_incus.sh` in an
     Incus of one's own, as described under Tests.
 - **Not yet exercised:**
+  - The loop: no real turn has run. The scripted stand-in for the claude CLI and a local HTTP
+    server have played it end to end (`tests/demo_loop.py`), and `tests/live_manager_rules.py
+    --mode turn` tries the turn's rules against the real Claude Code; what a real turn costs and
+    whether it works well are not known.
   - Plans: no real review has run and no real notification service has been posted to. Only the
     scripted stand-in for the claude CLI and a local HTTP server have, so what a real review costs
     and whether it reads a report well are not known. The first checks after upgrading are
@@ -975,7 +1087,11 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
 - **An engineer can undo its own Claude Code settings.** It is root in its container, so the
   files there that forbid MCP servers and connectors are its to change. What protects the
   account is that its Claude token can only make model requests.
-- **The manager can change nothing on GitHub**, because it has no token. Its shell can still
+- **A turn can change anything the organization's token reaches.** With `manager.direct` and
+  `bypassPermissions` set, a turn of the loop holds the token and the Claude login, has no sandbox,
+  and can enter every engineer's container; see "The loop" in the design document for what a
+  misleading page could do with nobody watching. The confined chat is as described here.
+- **A confined chat can change nothing on GitHub**, because it has no token. Its shell can still
   reach the hosts on the sandbox's allow list, and its web search and fetch tools reach the web.
 - **A page an engineer serves is an untrusted web page** running in your browser on the Mac,
   when you open it with the web-app view.
@@ -983,8 +1099,17 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
   retry of a spec's text and two resumes of each run are the most it does; a spec approved after
   the review of what it waits on is held until you release it, because no review read it; alerts are written on the next pump, not at the
   instant of a pause; with no `notify.url` a pause shows only in `org status` and the dashboard.
-- **Nothing starts by itself.** After the Mac restarts, `org-vm up` brings the VM and the tokens
-  back and `org resume --interrupted` restarts the runners. Until then nothing runs.
+- **With `loop.enabled` false, nothing starts by itself.** After the Mac restarts, `org-vm up` brings the VM and the tokens
+  back and `org resume --interrupted` restarts the runners. Until then nothing runs. With the loop on,
+  the first pump after `org up` starts whatever is due. A turn that is running while the machine
+  sleeps ends at its limit when the machine wakes, or is found dead and counted as a failed turn.
+- **A day can overshoot `loop.day_max_usd`.** A running turn's spend is not counted in the day's
+  total until its line exists, so the day can pass the limit by up to `loop.turn_max_usd`.
+- **`org loop resume` sets the failure count to 0**, so after a resume the loop tries twice more
+  before it pauses itself again.
+- **No real turn had run when this was written.** What a turn costs, whether its prompt gets
+  the work done and whether the deny rules hold in a headless session are not known; see "What has
+  and has not been exercised".
 - **A finished run's container is deleted, and not undoably.** The next pump after a run is over
   and copied deletes it without asking; the first pump after upgrading to this version does so for
   every run that was already finished. Only the report, the mirror, the measurements and what was

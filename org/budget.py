@@ -28,27 +28,44 @@ MIN_MOVE = 0.02  # ignore runs that moved the meter by less than two points: rou
 _book_lock = threading.Lock()
 
 
+def is_weekly(name) -> bool:
+    """Whether a window's name is a weekly one: `seven_day`, `seven_day_overage_included`, and the like.
+    The brake is the weekly limit's (R25), so a five-hour window must never be taken for one."""
+    return isinstance(name, str) and name.startswith("seven_day")
+
+
 def record_sample(ledger: Ledger, status: dict, run_id: str) -> None:
-    """Keep the newest weekly reading seen in any synced status."""
+    """Keep the newest reading of every weekly window seen in any synced status."""
     rl = status.get("rate_limit") or {}
-    week = (rl.get("windows") or {}).get("seven_day")
-    if not week or week.get("utilization") is None:
+    wins = {n: w for n, w in (rl.get("windows") or {}).items() if is_weekly(n) and w and w.get("utilization") is not None}
+    if not wins:
         return
     with _book_lock:
-        _record(ledger, rl, week, run_id)
+        _record(ledger, rl, wins, run_id)
 
 
-def _record(ledger: Ledger, rl: dict, week: dict, run_id: str) -> None:
+def _sample(rl: dict, w: dict, run_id: str) -> dict:
+    return {"at": rl.get("at") or now(), "utilization": w["utilization"], "resets_at": w.get("resets_at"),
+            "status": w.get("status"), "run_id": run_id}
+
+
+def _record(ledger: Ledger, rl: dict, wins: dict, run_id: str) -> None:
     book = read_json(ledger.budget_path, {}) or {}
-    sample = {"at": rl.get("at") or now(), "utilization": week["utilization"], "resets_at": week.get("resets_at"),
-              "status": week.get("status"), "run_id": run_id}
-    latest = book.get("weekly") or {}
-    if sample["at"] >= (latest.get("at") or 0):
-        book["weekly"] = sample
-    samples = book.setdefault("samples", [])
-    if not samples or samples[-1].get("utilization") != sample["utilization"] or samples[-1].get("resets_at") != sample["resets_at"]:
-        samples.append(sample)
-        del samples[:-500]
+    held = book.setdefault("windows", {})
+    for name, w in wins.items():
+        sample = _sample(rl, w, run_id)
+        if sample["at"] >= (held.get(name) or {}).get("at", 0):
+            held[name] = sample
+    week = wins.get("seven_day")
+    if week:
+        sample = _sample(rl, week, run_id)
+        latest = book.get("weekly") or {}
+        if sample["at"] >= (latest.get("at") or 0):
+            book["weekly"] = sample
+        samples = book.setdefault("samples", [])
+        if not samples or samples[-1].get("utilization") != sample["utilization"] or samples[-1].get("resets_at") != sample["resets_at"]:
+            samples.append(sample)
+            del samples[:-500]
     write_json(ledger.budget_path, book)
 
 
@@ -60,6 +77,24 @@ def weekly(ledger: Ledger) -> Optional[dict]:
     week = dict(week)
     week["stale"] = bool(week.get("resets_at") and week["resets_at"] < now())
     return week
+
+
+def windows(ledger: Ledger) -> dict:
+    """Every weekly window the newest `rate_limit_event`s carried, by the name it came with (R25 of
+    spec 016): {name: {"at", "utilization", "resets_at", "status", "run_id", "stale"}}. Nothing is
+    guessed about which model a window belongs to. `weekly` stays the `seven_day` window."""
+    book = read_json(ledger.budget_path, {}) or {}
+    out = {}
+    for name, w in (book.get("windows") or {}).items():
+        if not is_weekly(name):
+            continue
+        w = dict(w)
+        w["stale"] = bool(w.get("resets_at") and w["resets_at"] < now())
+        out[name] = w
+    week = weekly(ledger)
+    if week and "seven_day" not in out:
+        out["seven_day"] = week
+    return out
 
 
 def finished_actuals(ledger: Ledger) -> List[dict]:

@@ -20,14 +20,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import secrets, status
+from . import pricing, secrets, status
 from .ledger import Ledger
 from .sync import sync_all
 from .util import fmt_stamp, now, read_json, read_text, render, write_json
@@ -216,14 +218,20 @@ def settings(ledger: Ledger, mode: str, with_sandbox: Optional[bool] = None) -> 
     return out
 
 
-def launch_env(ledger: Ledger, github: bool = False) -> dict:
+def launch_env(ledger: Ledger, github: bool = False, actor: bool = False) -> dict:
+    """The environment of a manager session. `github` gives it the organization's token (a direct
+    chat and a turn); `actor` sets ORG_ACTOR=manager (a chat and a turn, never a question or a review)."""
     env = dict(os.environ)
+    # A review or a question started from inside a turn's process tree must not inherit its actor.
+    env.pop("ORG_ACTOR", None)
+    if actor:
+        env["ORG_ACTOR"] = ACTOR
     # ~/.local/bin is where Claude Code installs itself, and a service or a command passed in
     # from the host has only the PATH it was given.
     env["PATH"] = os.pathsep.join([str(BIN), str(Path.home() / ".local" / "bin"), env.get("PATH", "")])
     env["ORG_HOME"] = str(ledger.root)
     # The manager's session makes model requests with the token this installation was handed.
-    # It is never given the GitHub token: the chat reads public repositories and pushes nothing.
+    # It is given the GitHub token only when `github` is set (a direct chat or a turn).
     token = secrets.claude_token()
     if token and not env.get("CLAUDE_CODE_OAUTH_TOKEN") and not env.get("ANTHROPIC_API_KEY"):
         env["CLAUDE_CODE_OAUTH_TOKEN"] = token
@@ -240,7 +248,7 @@ def launch_env(ledger: Ledger, github: bool = False) -> dict:
     if kept:
         env["GIT_CONFIG_COUNT"] = str(len(kept))
     if github:
-        # Only a direct chat (`manager.direct`) is started this way: it is given the token that
+        # Only a direct chat (`manager.direct`) or a turn is started this way: it is given the token that
         # engineers are given, which reaches the repositories of one organization, and git is
         # told to use it for github.com.
         github_token = secrets.github_token()
@@ -254,6 +262,171 @@ def launch_env(ledger: Ledger, github: bool = False) -> dict:
     # setup-token` cannot fetch them anyway; this holds if a wider login ever lands here.
     env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
     return env
+
+
+# ---------------------------------------------------------------- a turn of the loop (org/loop.py)
+
+ACTOR = "manager"  # the value of ORG_ACTOR in every chat and turn of the manager, and nowhere else
+
+
+def turn_problems(ledger: Ledger) -> list:
+    """What of R1 of spec 016 is missing for the loop to start a turn, as sentences; [] when a turn
+    may start. A turn runs as a direct chat that asks nothing runs, and under nothing else."""
+    mgr = ledger.config().get("manager") or {}
+    out = []
+    if not mgr.get("direct"):
+        out.append("manager.direct is not true")
+    if mgr.get("permission_mode") != "bypassPermissions":
+        out.append("manager.permission_mode is not bypassPermissions")
+    return out
+
+
+def turn_settings(ledger: Ledger) -> dict:
+    """The settings of a turn: exactly `settings(ledger, "talk")` plus the deny rules of
+    `loop.TURN_DENY_SHELL`, `loop.TURN_DENY_ORG` and `loop.TURN_DENY_CONFIG`, each in every form a session
+    could type it, and no edit of the loop's own files by the file tools.
+    Only used when `turn_problems` is empty, which is the loop's check, so `settings` is not asked
+    to pretend that the ledger is direct. A chat never has these rules."""
+    from . import loop
+
+    out = settings(ledger, "talk")
+    extra = []
+    for c in loop.TURN_DENY_SHELL:
+        extra += ["Bash(%s)" % c, "Bash(%s *)" % c]
+    heads = ["org", "python3 -m org", "python -m org", str(BIN / "org"), "~/.local/bin/org",
+             str(Path.home() / ".local" / "bin" / "org")]
+    # `--home` is the only option that may stand before the verb. A pattern with a bare `*` there
+    # would also deny `org spec new "Fix the login page"` and `org exec 012 -- docker compose down`.
+    for head in heads:
+        for c in loop.TURN_DENY_ORG:
+            forms = ["%s %s" % (head, c), "%s %s *" % (head, c),
+                     "%s --home * %s" % (head, c), "%s --home * %s *" % (head, c),
+                     "%s --home=* %s" % (head, c), "%s --home=* %s *" % (head, c)]
+            extra += ["Bash(%s)" % f for f in forms]
+        # The two numbers that bound a turn are not the turn's to set, nor is the section that holds either.
+        for c in loop.TURN_DENY_CONFIG:
+            extra += ["Bash(%s)" % f for f in ("%s %s" % (head, c), "%s --home * %s" % (head, c), "%s --home=* %s" % (head, c))]
+    # An absolute path in a rule is written with a second leading slash.
+    extra += ["Edit(/%s/loop/**)" % ledger.root]
+    deny = list(out["permissions"]["deny"])
+    out["permissions"]["deny"] = deny + [r for r in extra if r not in deny]
+    return out
+
+
+def turn_env(ledger: Ledger) -> dict:
+    """The environment of a turn: `launch_env(ledger, github=True)` with `ORG_ACTOR=manager`."""
+    return launch_env(ledger, github=True, actor=True)
+
+
+def actor_refusal(ledger: Ledger, command: str, header: Optional[dict] = None) -> Optional[str]:
+    """Why `org approve`, `org dispatch` or `org release` (`command`) is refused to the manager, or
+    None. Only when `ORG_ACTOR` is `manager` in this process's environment (R12 of spec 016): at
+    the brake, `graph.over_budget`'s reason; for `approve` and `dispatch`, a spec whose `header`
+    lacks `expect_usd` or `expect_hours`. Without `ORG_ACTOR` always None: a person's command
+    behaves as it always has."""
+    if os.environ.get("ORG_ACTOR") != ACTOR:
+        return None
+    from . import graph
+
+    brake = graph.over_budget(ledger)
+    if brake:
+        return "org %s is refused to the manager at the brake: %s" % (command, brake)
+    if command in ("approve", "dispatch"):
+        missing = [k for k in ("expect_usd", "expect_hours") if not isinstance((header or {}).get(k), (int, float))]
+        if missing:
+            return ("org %s is refused to the manager: the spec's header lacks %s, its forecast of the whole run"
+                    % (command, " and ".join(missing)))
+    return None
+
+
+def sessions_path(ledger: Ledger) -> Path:
+    return ledger.root / "manager.jsonl"
+
+
+def record_session(ledger: Ledger, kind: str, model: Optional[str], cost_usd: float, what: str, at: Optional[float] = None) -> None:
+    """Append one line to `<ledger>/manager.jsonl` for a headless session of the manager that ended
+    (R15 of spec 016): {"at", "kind" (`turn`, `review` or `ask`), "model", "cost_usd", "what"}.
+    Never raises: a line that cannot be written is not worth failing the session for."""
+    entry = {"at": now() if at is None else at, "kind": kind, "model": model, "cost_usd": round(float(cost_usd or 0.0), 6),
+             "what": str(what)[:300]}
+    try:
+        path = sessions_path(ledger)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=True) + "\n")
+    except OSError:
+        pass
+
+
+def sessions(ledger: Ledger) -> list:
+    """Every line of manager.jsonl, oldest first; a line that is not a JSON object is skipped."""
+    out = []
+    try:
+        with open(sessions_path(ledger), encoding="utf-8") as f:
+            for raw in f:
+                try:
+                    entry = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(entry, dict):
+                    out.append(entry)
+    except OSError:
+        pass
+    return out
+
+
+def sessions_cost(ledger: Ledger, since: float) -> dict:
+    """What the manager's headless sessions that ended at or after `since` cost, by kind:
+    {"turn": $, "review": $, "ask": $, "total": $}."""
+    out = {"turn": 0.0, "review": 0.0, "ask": 0.0}
+    for entry in sessions(ledger):
+        if (entry.get("at") or 0) >= since and isinstance(entry.get("cost_usd"), (int, float)):
+            kind = entry.get("kind") if entry.get("kind") in out else "other"
+            out[kind] = out.get(kind, 0.0) + float(entry["cost_usd"])
+    out["total"] = sum(v for k, v in out.items())
+    return out
+
+
+def chat_cost_estimate(ledger: Ledger, since: float, home: Optional[Path] = None) -> Optional[float]:
+    """An estimate of what the manager's chats cost since `since` (R21 of spec 016): the token counts
+    of Claude Code's own transcripts of conversations in the desk (`~/.claude/projects/<the desk's
+    path with every / as ->/*.jsonl`), messages at or after `since`, times `org/pricing.py`'s prices.
+    None when there is no transcript to read. Labelled an estimate wherever it is shown.
+
+    The directory name is the desk's path with every character that is not a letter or a digit
+    replaced by `-`. `home` is where `.claude` lives, given by a test."""
+    home = home or Path.home()
+    folder = home / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(ledger.desk))
+    files = sorted(folder.glob("*.jsonl")) if folder.is_dir() else []
+    if not files:
+        return None
+    prices = pricing.table(ledger.config().get("pricing"))
+    seen, total = set(), 0.0
+    for path in files:
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for raw in lines:
+            try:
+                entry = json.loads(raw)
+            except ValueError:
+                continue
+            msg = entry.get("message") if isinstance(entry, dict) else None
+            if not isinstance(msg, dict) or entry.get("type") != "assistant" or not isinstance(msg.get("usage"), dict):
+                continue
+            try:
+                at = datetime.fromisoformat(str(entry.get("timestamp")).replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                continue
+            if at < since:
+                continue
+            key = msg.get("id") or entry.get("uuid")
+            if key in seen:
+                continue  # a message written once for each block of its content is one message
+            seen.add(key)
+            total += pricing.usage_cost(msg.get("model"), msg["usage"], prices) or 0.0
+    return total
 
 
 def machines_help(cfg: dict) -> str:
@@ -430,7 +603,7 @@ def talk(ledger: Ledger, prompt: Optional[str] = None, project: Optional[str] = 
     if prompt:
         cmd.append(prompt)
     os.chdir(ledger.desk)
-    os.execve(claude, cmd, launch_env(ledger, github=direct_mode))
+    os.execve(claude, cmd, launch_env(ledger, github=direct_mode, actor=True))
     return 0  # not reached
 
 
@@ -515,6 +688,8 @@ def ask(ledger: Ledger, question: str, on_text: Optional[Callable[[str], None]] 
         same = out["sid"] == session.get("id")
         write_json(session_path, {"id": out["sid"], "questions": (session.get("questions", 0) if same else 0) + 1,
                                   "cost_usd": (session.get("cost_usd", 0.0) if same else 0.0) + cost, "last_at": now()})
+    if out["started"]:
+        record_session(ledger, "ask", str(mgr.get("ask_model") or "sonnet"), cost, "question: " + " ".join(question.split())[:80])
     return {"text": text, "error": error, "cost_usd": cost, "session_id": out["sid"]}
 
 

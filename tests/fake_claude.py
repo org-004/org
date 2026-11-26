@@ -14,7 +14,11 @@ by $FAKE_CLAUDE_SCENARIO:
       }
     }
 
-A review is the turn "review:<run id>" when the scenario has that key, else "review". A turn entry may hold: structured, files, cost, sleep, die, prose, limit (seconds until reset),
+A review is the turn "review:<run id>" when the scenario has that key, else "review". A turn of the manager's loop is known by
+the first words of its message (TURN_OPENING, which is org/loop.py's OPENING) and is the turn "turn:<n>" when the scenario
+has that key, else "turn"; n is the number its message gives as "(turn <n>)". A turn entry may hold: structured, files,
+commands (argument lists run in the session's working directory and environment before its result, their output on
+stderr), cost, sleep, die, prose, limit (seconds until reset),
 budget, subagents, no_session, api_error, wakeups. `api_error` ends the turn as an API error that used
 no tokens: cumulative cost and usage unchanged and `model_usage_since_last_result: {}`, as Claude Code
 2.1.330 printed it in run 013. `wakeups: N` prints N further results after the turn's first, each after a
@@ -25,6 +29,7 @@ scenario, so tests can assert on the flags and prompts the runner used.
 import fcntl
 import json
 import os
+import subprocess
 import sys
 import time
 import uuid
@@ -54,10 +59,21 @@ def parse(argv):
     return opts, flags, rest
 
 
+# The first words of a turn of the manager's loop: org/loop.py, OPENING. A test checks that the two agree.
+TURN_OPENING = "A turn of the manager's loop"
+
+
 def label_of(prompt, turns=None):
     """Which turn is this? Nudges and recoveries quote the original instruction, so search, don't match the start."""
     import re
 
+    # A turn of the loop is known by its start alone: its message quotes reports, reviews and `org status`, which may hold
+    # any of the markers below, and nothing else begins with these words.
+    if prompt.startswith(TURN_OPENING):
+        m = re.match(re.escape(TURN_OPENING) + r" \(turn (\d+)\)", prompt)
+        if m and "turn:" + m.group(1) in (turns or {}):
+            return "turn:" + m.group(1)
+        return "turn"
     # A review is tested first: its message quotes specs and reports, which may hold any of the markers below.
     m = re.search(r"Review the finished run `([^`]+)`", prompt)
     if m:
@@ -109,7 +125,7 @@ def main():
                             "flags": sorted(flags), "prompt": prompt, "cwd": os.getcwd(),
                             "system_prompt": opts.get("--append-system-prompt", "")[:200],
                             "env": {k: os.environ.get(k) for k in ("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "IS_SANDBOX", "ORG_RUN_DIR",
-                                                                 "CLAUDE_CODE_SHELL_PREFIX")}}) + "\n")
+                                                                 "CLAUDE_CODE_SHELL_PREFIX", "ORG_ACTOR")}}) + "\n")
 
     resume = opts.get("--resume")
     sid = resume or opts.get("--session-id") or str(uuid.uuid4())
@@ -186,6 +202,14 @@ def main():
         p = Path(path.replace("$RUN", run_dir).replace("$CWD", os.getcwd()))
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
+
+    # What a session would run with its shell: in its working directory and environment, as the real CLI's Bash tool runs it.
+    # The output goes to stderr, so the stream on stdout stays the CLI's.
+    for argv in entry.get("commands") or []:
+        done = subprocess.run([str(a).replace("$CWD", os.getcwd()) for a in argv], cwd=os.getcwd(), env=dict(os.environ),
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        sys.stderr.write("fake claude: ran %s: exit %d\n%s" % (argv, done.returncode, done.stdout.decode("utf-8", "replace")))
+        sys.stderr.flush()
 
     slept = 0.0
     while slept < float(entry.get("sleep", 0)):

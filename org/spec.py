@@ -67,7 +67,9 @@ None
 # `after` names the specs this one comes after: ids or numbers, checked against the ledger by
 # org/graph.py. Its run waits in the queue until each of them has finished well.
 LIST_KEYS = {"repos", "after"}
-NUMBER_KEYS = {"max_cost_usd", "max_weekly_pct", "max_hours"}
+NUMBER_KEYS = {"max_cost_usd", "max_weekly_pct", "max_hours", "expect_usd", "expect_hours"}
+# The manager's forecast for the whole run, each at most the cap of its kind.
+FORECAST_CAPS = {"expect_usd": "max_cost_usd", "expect_hours": "max_hours"}
 # No `pr`: pull requests are not used. An engineer lands its own work (`merge`), or pushes a
 # branch and stops (`branch`) when the person wants to look before anything reaches main.
 ENUMS = {"delivery": {"branch", "merge", "none"}, "effort": {"low", "medium", "high", "xhigh", "max"}}
@@ -148,6 +150,9 @@ def check(text: str, default_machine: str = "incus", owner: str = "") -> Tuple[L
             errors.append("header: %s must be a number, got %r" % (key, meta[key]))
         elif key in meta and meta[key] <= 0:
             errors.append("header: %s must be positive" % key)
+    for key, cap in FORECAST_CAPS.items():
+        if isinstance(meta.get(key), float) and isinstance(meta.get(cap), float) and meta[key] > meta[cap]:
+            errors.append("header: %s (%g) is more than %s (%g)" % (key, meta[key], cap, meta[cap]))
     for key, allowed in ENUMS.items():
         if key in meta and meta[key] not in allowed:
             errors.append("header: %s must be one of %s" % (key, ", ".join(sorted(allowed))))
@@ -202,7 +207,7 @@ def check(text: str, default_machine: str = "incus", owner: str = "") -> Tuple[L
         if hint in body:
             errors.append("template text is still present: %r" % hint)
             break
-    if not any(k in meta for k in NUMBER_KEYS):
+    if not any(k in meta for k in ("max_cost_usd", "max_weekly_pct", "max_hours")):
         warnings.append("no cap set (max_cost_usd, max_weekly_pct, max_hours): the run is unbounded")
     return errors, warnings
 
@@ -263,20 +268,21 @@ class ApprovalError(Exception):
     pass
 
 
-def approve(ledger: Ledger, spec_id: str, sha_prefix: str, by: Optional[str] = None) -> dict:
-    """Freeze the draft as the approved spec. `sha_prefix` must match the draft as it is now.
+def approve(ledger: Ledger, spec_id: str, sha_prefix: Optional[str] = None, by: Optional[str] = None) -> dict:
+    """Freeze the draft as the approved spec. With `sha_prefix` (8 or more characters) it must match
+    the draft as it is now; with None the draft is approved as it stands.
 
-    The hash is what ties the approval to the text the human read: if the draft changed after
+    The hash is what ties the approval to the text a reader saw: if the draft changed after
     they looked at it, the prefix no longer matches and nothing is approved.
     """
     text = read_text(ledger.draft_path(spec_id))
     if text is None:
         raise ApprovalError("no draft for %s" % spec_id)
     sha = sha256_bytes(text.encode("utf-8"))
-    sha_prefix = (sha_prefix or "").strip().lower()
-    if len(sha_prefix) < 8:
+    sha_prefix = None if sha_prefix is None else sha_prefix.strip().lower()
+    if sha_prefix is not None and len(sha_prefix) < 8:
         raise ApprovalError("give at least 8 characters of the draft's sha256 (it is %s)" % sha[:12])
-    if not sha.startswith(sha_prefix):
+    if sha_prefix is not None and not sha.startswith(sha_prefix):
         raise ApprovalError(
             "sha mismatch: the draft is now %s, not %s. It changed since it was reviewed." % (sha[:12], sha_prefix)
         )

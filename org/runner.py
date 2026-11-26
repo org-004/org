@@ -106,6 +106,13 @@ class Runner:
                            self.state.get("cumulative") or {})
         # The last total_cost_usd of each session. A state.json written before it was kept has none.
         self.meter.totals = self.state.get("cumulative_total") or {}
+        # The time cap is measured on the monotonic clock of this process, so that a wall clock that
+        # is set forward or back (a sync, a resumed VM) cannot end a run or lengthen it. `used_s` is
+        # what earlier processes of this run had used when they last saved; this one adds its own.
+        if "used_s" not in self.state:  # a state.json from before the cap was measured this way
+            self.state["used_s"] = max(now() - self.state["started_at"], 0.0)
+        self._used_before = float(self.state["used_s"])
+        self._mono0 = time.monotonic()
         self.stop_requested = False
         self.proc: Optional[subprocess.Popen] = None
         self._killed = False
@@ -121,6 +128,7 @@ class Runner:
             "state": "planning",  # what the dashboard shows
             "detail": "starting",
             "started_at": now(),
+            "used_s": 0.0,
             "plan_done_at": None,
             "exec_started_at": None,
             "exec_ended_at": None,
@@ -151,6 +159,7 @@ class Runner:
         self.state["by_model"] = self.meter.by_model
         self.state["cumulative"] = self.meter.cumulative
         self.state["cumulative_total"] = self.meter.totals
+        self.state["used_s"] = self.used_s()
         write_json(self.dir / "state.json", self.state)
 
     def cost_cap(self) -> Optional[float]:
@@ -163,10 +172,25 @@ class Runner:
             limits.append(float(self.caps["max_weekly_pct"]) * float(per_pct))
         return min(limits) if limits else None
 
-    def deadline(self) -> Optional[float]:
+    def used_s(self) -> float:
+        """Seconds this run has been running: what earlier processes of it had used, plus the time
+        of this process on the monotonic clock. The gap while no process ran (the runner ended and
+        was resumed later) is not counted: a run is not charged for the time nobody worked on it.
+        Time since the last save of the earlier process is lost with it, a few seconds at most."""
+        return self._used_before + (time.monotonic() - self._mono0)
+
+    def time_left(self) -> Optional[float]:
+        """Seconds left under `max_hours`, negative once past it; None without a time cap."""
         if self.caps.get("max_hours"):
-            return self.state["started_at"] + float(self.caps["max_hours"]) * 3600.0
+            return float(self.caps["max_hours"]) * 3600.0 - self.used_s()
         return None
+
+    def deadline(self) -> Optional[float]:
+        """When the cap will be reached if the wall clock keeps pace, as a wall time for a person
+        to read (`deadline_at`, "time left"): now plus the time left. Never compared against `now()`
+        to enforce the cap; `time_left` is what is enforced."""
+        left = self.time_left()
+        return None if left is None else now() + left
 
     def forecast(self) -> Optional[dict]:
         """Projected finish time and total cost, re-derived from the pace so far."""
@@ -450,7 +474,6 @@ class Runner:
 
         result, flags, saw_init, last_status = None, {}, False, 0.0
         silence = float(self.cfg.get("silence_timeout_min") or 90) * 60.0
-        deadline = self.deadline()
         while True:
             try:
                 raw = lines.get(timeout=2.0)
@@ -486,7 +509,7 @@ class Runner:
             if self._stop_now():
                 flags["stopped"] = True
                 self._kill(proc)
-            elif deadline and t > deadline and st["phase"] != "reporting":
+            elif (self.time_left() is not None and self.time_left() <= 0) and st["phase"] != "reporting":
                 flags["time_cap"] = True
                 self._kill(proc)
             elif t - (self.meter.last_event_at or started) > silence:
@@ -564,8 +587,8 @@ class Runner:
         while True:
             if self._stop_now():
                 raise Stop()
-            deadline = self.deadline()
-            if deadline and now() > deadline and st["phase"] != "reporting":
+            left = self.time_left()
+            if left is not None and left <= 0 and st["phase"] != "reporting":
                 raise CapReached("time")
             budget, cap = None, self.cost_cap()
             if cap is not None:
@@ -734,10 +757,10 @@ class Runner:
         if cap is not None and (est.get("cost_usd") or 0) + spent > cap:
             out.append("estimated cost %s plus the %s already spent exceeds the cap of %s"
                        % (fmt_usd(est.get("cost_usd")), fmt_usd(spent), fmt_usd(cap)))
-        deadline = self.deadline()
-        if deadline and now() + (est.get("wall_minutes") or 0) * 60.0 > deadline:
+        left = self.time_left()
+        if left is not None and (est.get("wall_minutes") or 0) * 60.0 > left:
             out.append("estimated %s of work does not fit in the %s left before the time cap"
-                       % (fmt_dur((est.get("wall_minutes") or 0) * 60), fmt_dur(deadline - now())))
+                       % (fmt_dur((est.get("wall_minutes") or 0) * 60), fmt_dur(left)))
         if len((read_text(self.dir / "plan.md") or "").strip()) < 200:
             out.append("plan.md is missing or too short to review")
         return out
@@ -799,10 +822,10 @@ class Runner:
                     fmt_dur((m.get("est_minutes") or 0) * 60), fmt_usd(m.get("est_cost_usd"))))
         if not lines:
             lines.append("- This is the first milestone.")
-        cap, deadline = self.cost_cap(), self.deadline()
+        cap, left = self.cost_cap(), self.time_left()
         lines.append("- Spent so far: %s%s." % (fmt_usd(self.meter.confirmed_usd), (" of a %s cap" % fmt_usd(cap)) if cap else ""))
-        if deadline:
-            lines.append("- Time left before the cap: %s." % fmt_dur(deadline - now()))
+        if left is not None:
+            lines.append("- Time left before the cap: %s." % fmt_dur(max(left, 0)))
         return "\n".join(lines)
 
     def phase_execute(self) -> None:
