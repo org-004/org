@@ -403,15 +403,17 @@ def waiting_for(ledger: Ledger, record: dict) -> Optional[str]:
 
 
 def over_budget(ledger: Ledger) -> Optional[str]:
-    """The reason nothing may start by itself, or None: the newest weekly reading is not stale and
+    """The reason nothing may start by itself, or None: any weekly window's newest reading is not stale and
     is at or above `graph.pause_above_weekly_pct`. With no reading the limit is not taken to be near."""
-    week = budget.weekly(ledger)
-    if not week or week.get("stale") or not isinstance(week.get("utilization"), (int, float)):
-        return None
-    used, limit = week["utilization"] * 100.0, _setting(ledger, "pause_above_weekly_pct")
-    if used < limit:
-        return None
-    return "the weekly limit is %.0f%% used, at or above graph.pause_above_weekly_pct (%g%%)" % (used, limit)
+    limit = _setting(ledger, "pause_above_weekly_pct")
+    for name, week in sorted(budget.windows(ledger).items(), key=lambda kv: kv[0] != "seven_day"):
+        if week.get("stale") or not isinstance(week.get("utilization"), (int, float)):
+            continue
+        used = week["utilization"] * 100.0
+        if used >= limit:
+            label = "" if name == "seven_day" else " " + name
+            return "the weekly limit%s is %.0f%% used, at or above graph.pause_above_weekly_pct (%g%%)" % (label, used, limit)
+    return None
 
 
 def blocked(ledger: Ledger, record: dict) -> Optional[str]:
