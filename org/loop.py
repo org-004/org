@@ -162,9 +162,33 @@ def turns(ledger: Ledger) -> List[dict]:
 
 
 def read_state(ledger: Ledger) -> dict:
-    """The loop's state; {} for a loop that has never run, or a file that is not an object."""
+    """The loop's state; {} for a loop that has never run. A file that is there but is not a JSON
+    object also reads as {}, so a caller that must not act on it asks `state_problem` first."""
     found = read_json(state_path(ledger), {}) if state_path(ledger).exists() else {}
     return found if isinstance(found, dict) else {}
+
+
+def state_problem(ledger: Ledger) -> Optional[str]:
+    """Why `loop/state.json` cannot be used, or None when it is missing (the empty state) or fine.
+    An unreadable state must not read as an empty one, which would lift a pause or reuse a number."""
+    path = state_path(ledger)
+    try:
+        with open(path, encoding="utf-8") as f:
+            found = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        return "loop/state.json is unreadable: %s; fix or remove it" % clip(e, 120)
+    if not isinstance(found, dict):
+        return "loop/state.json is unreadable: it is not a JSON object; fix or remove it"
+    return None
+
+
+def _fresh_state(ledger: Ledger) -> dict:
+    """A new state to replace an unreadable one: it keeps the turn count that turns.jsonl and the
+    turn files show, and takes the lines already there as history."""
+    n = _started(ledger, {})
+    return {"turns": n, "reaped": n}
 
 
 def _write_state(ledger: Ledger, state: dict) -> None:
@@ -333,6 +357,11 @@ def _tick(ledger: Ledger, log, clock: Clock) -> Optional[str]:
             return None
 
     step("stamp", lambda: write_json(pumped_path(ledger), {"at": now}))
+    broken = state_problem(ledger)
+    if broken:
+        # Failing open would lift a pause or start a second turn with a number already used.
+        log("loop: nothing is started: %s" % broken)
+        return None
     state = read_state(ledger)
     step("reap", lambda: reap(ledger, state, now))
     step("state", lambda: _write_state(ledger, state))
@@ -519,6 +548,9 @@ def start(ledger: Ledger, state: dict, why: dict, now: float, clock_offset: floa
     from . import dispatch
 
     n = _started(ledger, state) + 1
+    # A number whose log or message is already on disk is never used again, whatever the state says.
+    while log_path(ledger, n).exists() or message_path(ledger, n).exists():
+        n += 1
     runs = _runs(ledger)
     seen = state.setdefault("seen", {})
     marked = list(runs) if why["why"] == "bootstrap" else [r for r in why.get("runs") or [] if r in runs]
@@ -1148,7 +1180,7 @@ def pause(ledger: Ledger, reason: str = "", by: str = "hand") -> dict:
     with _lock(ledger, wait=10) as got:
         if not got:
             raise RuntimeError("the loop's lock is held by another process; try again in a moment")
-        state = read_state(ledger)
+        state = _fresh_state(ledger) if state_problem(ledger) else read_state(ledger)
         state["paused"] = {"reason": reason or "paused by hand", "at": time.time(), "by": by}
         _write_state(ledger, state)
         return state
@@ -1161,7 +1193,7 @@ def resume(ledger: Ledger) -> dict:
     with _lock(ledger, wait=10) as got:
         if not got:
             raise RuntimeError("the loop's lock is held by another process; try again in a moment")
-        state = read_state(ledger)
+        state = _fresh_state(ledger) if state_problem(ledger) else read_state(ledger)
         state["paused"] = None
         state["failures"] = 0
         _write_state(ledger, state)
@@ -1200,6 +1232,9 @@ def status(ledger: Ledger, clock: Optional[Clock] = None) -> dict:
                "waits_for": "", "next_wake_at": None, "day_cost_usd": day_cost(ledger, now),
                "day_max_usd": float(setting(ledger, "day_max_usd")), "day_reached": False, "brake": graph.over_budget(ledger)}
         out["day_reached"] = out["day_cost_usd"] >= out["day_max_usd"]
+        broken = state_problem(ledger)
+        if broken:
+            out["problems"] = list(out["problems"]) + [broken]
         state = read_state(ledger)
         out["paused"] = state.get("paused") if isinstance(state.get("paused"), dict) else None
         running = state.get("running") if isinstance(state.get("running"), dict) else None
@@ -1236,6 +1271,8 @@ def status(ledger: Ledger, clock: Optional[Clock] = None) -> dict:
                 out["waits_for"] = "a run to end, trouble, or the wake time"
         if not on:
             line = "loop: off"
+        elif broken:
+            line = "loop: starts nothing: %s" % broken
         elif out["paused"]:
             line = "loop: paused: %s" % notify.plain(out["paused"].get("reason") or "")
         elif running:

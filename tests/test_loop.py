@@ -625,7 +625,52 @@ class TheStatus(LoopCase):
         with mock.patch.object(loop, "due", side_effect=RuntimeError("boom")):
             self.assertIsNone(self.tick())
         loop.state_path(self.ledger).write_text("not json")
+        self.assertIsNone(self.tick())
+
+
+class AnUnreadableState(LoopCase):
+    def break_state(self, text="{not json"):
+        loop.loop_dir(self.ledger).mkdir(parents=True, exist_ok=True)
+        loop.state_path(self.ledger).write_text(text)
+
+    def test_an_unreadable_state_starts_nothing_and_does_not_lift_a_pause(self):
         self.assertEqual(self.tick(), "bootstrap")
+        loop.pause(self.ledger, "the owner is reading")
+        self.end_turn(answer=dict(ANSWER, wake_in_min=15))
+        self.break_state()
+        self.assertIsNone(self.tick(600))
+        self.assertEqual(self.launches, [1])
+
+    def test_a_state_that_is_not_an_object_is_unreadable_and_a_missing_one_is_empty(self):
+        self.assertIsNone(loop.state_problem(self.ledger))
+        for text in ("[]", "3", "", "{not json"):
+            self.break_state(text)
+            self.assertIn("loop/state.json is unreadable", loop.state_problem(self.ledger))
+        self.assertEqual(self.tick(), None)
+        self.assertEqual(self.launches, [])
+
+    def test_an_unreadable_state_is_shown_in_the_status_line_and_problems(self):
+        self.break_state()
+        out = loop.status(self.ledger, self.clock)
+        self.assertTrue(any("loop/state.json is unreadable" in p and "fix or remove it" in p for p in out["problems"]), out["problems"])
+        self.assertIn("loop/state.json is unreadable", out["line"])
+
+    def test_resume_rewrites_an_unreadable_state_and_keeps_the_turn_count(self):
+        self.assertEqual(self.tick(), "bootstrap")
+        self.end_turn(answer=dict(ANSWER, wake_in_min=15))
+        self.break_state()
+        state = loop.resume(self.ledger)
+        self.assertIsNone(loop.state_problem(self.ledger))
+        self.assertEqual(state["turns"], 1)
+        self.assertEqual(self.tick(30), "wake")
+        self.assertEqual(self.launches, [1, 2])
+
+    def test_a_turn_number_is_never_reused_when_its_log_or_message_is_on_disk(self):
+        loop.log_path(self.ledger, 1).parent.mkdir(parents=True, exist_ok=True)
+        loop.log_path(self.ledger, 1).write_text("")
+        loop.message_path(self.ledger, 2).write_text("")
+        self.assertEqual(self.tick(), "bootstrap")
+        self.assertEqual(self.launches, [3])
 
 
 if __name__ == "__main__":
