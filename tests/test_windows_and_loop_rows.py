@@ -69,6 +69,27 @@ class EveryWeeklyWindow(Case):
         self.assertEqual(graph.over_budget(self.ledger),
                          "the weekly limit seven_day_overage_included is 81% used, at or above graph.pause_above_weekly_pct (80%)")
 
+    def test_every_weekly_window_leaves_out_a_five_hour_window_and_it_holds_no_brake(self):
+        event = {"type": "rate_limit_event", "rate_limit_info": {
+            "status": "allowed", "rateLimitType": "five_hour",
+            "unifiedWindows": {
+                "seven_day": {"utilization": 0.40, "resetsAt": time.time() + 86400, "status": "allowed"},
+                "five_hour": {"utilization": 0.90, "resetsAt": time.time() + 3600, "status": "allowed"}}}}
+        meter = Meter({})
+        meter.feed(event)
+        budget.record_sample(self.ledger, {"rate_limit": meter.rate_limit}, "001-x-r1")
+        self.assertEqual(sorted(budget.windows(self.ledger)), ["seven_day"])
+        self.assertNotIn("five_hour", read_json(self.ledger.budget_path)["windows"])
+        self.assertIsNone(graph.over_budget(self.ledger))
+
+    def test_every_weekly_window_leaves_out_a_lone_five_hour_reading_with_no_windows_object(self):
+        meter = Meter({})
+        meter.feed({"type": "rate_limit_event", "rate_limit_info": {
+            "status": "allowed", "rateLimitType": "five_hour", "utilization": 0.9, "resetsAt": time.time() + 3600}})
+        budget.record_sample(self.ledger, {"rate_limit": meter.rate_limit}, "001-x-r1")
+        self.assertEqual(budget.windows(self.ledger), {})
+        self.assertIsNone(graph.over_budget(self.ledger))
+
     def test_every_weekly_window_that_has_reset_is_stale_and_holds_no_brake(self):
         self.sample_two_windows()
         book = read_json(self.ledger.budget_path)

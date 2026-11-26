@@ -28,10 +28,16 @@ MIN_MOVE = 0.02  # ignore runs that moved the meter by less than two points: rou
 _book_lock = threading.Lock()
 
 
+def is_weekly(name) -> bool:
+    """Whether a window's name is a weekly one: `seven_day`, `seven_day_overage_included`, and the like.
+    The brake is the weekly limit's (R25), so a five-hour window must never be taken for one."""
+    return isinstance(name, str) and name.startswith("seven_day")
+
+
 def record_sample(ledger: Ledger, status: dict, run_id: str) -> None:
     """Keep the newest reading of every weekly window seen in any synced status."""
     rl = status.get("rate_limit") or {}
-    wins = {n: w for n, w in (rl.get("windows") or {}).items() if w and w.get("utilization") is not None}
+    wins = {n: w for n, w in (rl.get("windows") or {}).items() if is_weekly(n) and w and w.get("utilization") is not None}
     if not wins:
         return
     with _book_lock:
@@ -80,6 +86,8 @@ def windows(ledger: Ledger) -> dict:
     book = read_json(ledger.budget_path, {}) or {}
     out = {}
     for name, w in (book.get("windows") or {}).items():
+        if not is_weekly(name):
+            continue
         w = dict(w)
         w["stale"] = bool(w.get("resets_at") and w["resets_at"] < now())
         out[name] = w
