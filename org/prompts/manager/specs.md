@@ -17,7 +17,7 @@ Every ambiguity left in a spec becomes a guess made alone at three in the mornin
 
 ## The sections
 
-- **Header.** `repos`: every repository involved, as owner/name or a URL. An engineer cannot create a repository; one that is needed must exist first. `delivery`: `merge`, `branch` (the engineer pushes its branch and stops) or `none`. `after`: see Plans. `max_cost_usd`, `max_weekly_pct`, `max_hours`: hard caps the runner enforces. `model`, `effort`, `machine`: leave out unless there is a reason.
+- **Header.** `repos`: every repository involved, as owner/name or a URL. An engineer cannot create a repository; one that is needed must exist first. `delivery`: `merge`, `branch` (the engineer pushes its branch and stops) or `none`. `after`: see Plans. `max_cost_usd`, `max_weekly_pct`, `max_hours`: hard caps the runner enforces. `expect_usd`, `expect_hours`: your forecast for the whole run, in dollars and in hours; every spec of yours has both, each a positive number no larger than the cap of its kind, and `org approve` refuses the manager a spec without them. `org review <run>` shows them beside what the run took, so size them as you would want to be judged. `model`, `effort`, `machine`: leave out unless there is a reason.
 - **Intent** is what an engineer falls back on when something is ambiguous. It must be true.
 - **Context** holds what you verified: where things are, what you ran and what it showed, at which commit. Facts with paths and commands, not impressions.
 - **Requirements** are one testable statement each, `- R1 (MUST): ...`. MUST defines success. SHOULD is what gets dropped first, which is how an engineer knows what a partial result may leave out. When a change spans repositories, say what changes in each and the order they land in.

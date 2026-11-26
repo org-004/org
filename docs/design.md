@@ -835,7 +835,8 @@ lost to red-green colour blindness. Status colours always travel with an icon sh
 Two exact numbers and one learned one.
 
 - **Utilization** of the account's weekly limit: reported by the CLI at the start of every
-  engineer turn. Account-wide, shared with everything else the account does.
+  engineer turn and of every turn of the manager, once for each window the account has, by name
+  (see "The loop"). Account-wide, shared with everything else the account does.
 - **Dollars** a run cost at list prices: from the CLI.
 - **Dollars per percent** is not published. Each finished run saw utilization move by some amount
   while it spent a known number of dollars. Other activity on the account only inflates the
@@ -967,6 +968,94 @@ fourteen attempted actions judged by outcome). The rules that came of it are unc
 - A push written as `git -C <dir> push` does not match a deny rule for `git push`: both forms
   are denied.
 
+## The loop
+
+Until 2026-11-25 nothing was read, planned or started unless the owner opened the manager's chat
+and asked. The owner's words that day were "I'm imagining you more as a long running process or
+cron. I'll start the org with org-up and then you'll get going", and the guards that held the work
+back for approval bought no safety they wanted. So org now wakes a headless session of the manager,
+a turn, when there is something to decide. `org/loop.py` decides; `dispatch.pump` calls it after
+`graph.tick`, every ten seconds while the dashboard's service runs, which `org up` starts. It
+needed no change to `incus/up.sh` or to the service: the service's loop (`dash._sync_loop`) already
+calls `dispatch.pump`, and `org upgrade` restarts it. With `loop.enabled` false, the default, the
+loop does nothing at all.
+
+**When a turn starts (R8).** Never while the loop is paused, while another turn runs, less than
+`loop.gap_min` after the last turn ended, or while one of the two numbers below forbids it. And
+only for a reason, which the turn's line records: `bootstrap` (no turn has ever run); `wake` (the
+time the last turn named has passed, or it named none, nothing is live or queued, and
+`loop.idle_wake_h` has passed); `settled` (a run has ended since the last turn began and nothing is
+live, or queued and able to start); `trouble` (a run ended `failed` or `stopped`, a dispatch failed,
+or a queued run became held or paused); `retry` (the first failed turn in a row). The reasons are
+few because a turn costs dollars from the same weekly limit as the engineers, and a turn for every
+run that ended would spend them on decisions that can wait: a run that ends `done` or `partial`
+beside a live one wakes nothing. `settled` and `trouble` are found on two ticks at least
+`loop.settle_s` apart, because `graph.tick` may be about to retry, resume or review, and a turn
+woken in that moment would decide on a state that is about to change. A time that passed while the
+machine slept counts at the next pump, since nothing may depend on a moment being caught: the
+owner's computer sleeps, and the VM with it.
+
+**When a turn fails (R9).** A turn fails when it gives no valid answer, is killed at its cap, or
+its process ends without leaving a line. The next turn is told why. After two failures in a row
+the loop pauses itself, sends one message and starts nothing until `org loop resume`: a turn that
+fails the same way a third time would only spend money to learn it again, and nobody is there to
+look. A pause by hand is `org loop pause`; a running turn is left to end.
+
+**Two numbers bound it (R12).** Both are the owner's, set with `org config set`. The brake,
+`graph.pause_above_weekly_pct`: at or above it no turn starts, and `org approve`, `org dispatch`
+and `org release` run with `ORG_ACTOR=manager` are refused with the reason; the first time it holds
+a turn back one message says so and when the limit resets. And `loop.day_max_usd`: once the day's
+turns have cost that much, none starts until the next local day. The persona tells the session not to
+change them, but that is a rule and not a wall: the file tools are denied `config.json`, and a shell
+command of a turn is not stopped from writing it. What bounds the loop is that org's code counts the cost and decides
+whether a turn starts, from files the turn does not own (`loop/` is org's to write; the persona
+says so). A spec of the manager's without `expect_usd` and `expect_hours` is refused the same way,
+so the forecast that the next turn reads against the actual exists.
+
+Every weekly window the account has is kept by its name, and the brake holds when any window
+that is not stale is at or above the limit, naming it (R25). The account has more than one
+(`seven_day` and `seven_day_overage_included` have been seen, and which model the second belongs to
+is not verified), and org read one of them: the owner saw the account's page at 49% and 75% for one
+model while org showed 47%. Nothing is guessed about a window's model. Dollars per point stay on
+`seven_day`.
+
+**Time is counted on a clock that does not jump (R24).** A run's `max_hours`, and the time limits of
+a turn and a review, are measured with `time.monotonic()` in the process that enforces them.
+Before, the cap was the wall-clock `started_at` plus the hours, and run 013 lost 218 minutes of its
+seven when the owner's computer slept twice and the container's clock was set forward. A runner
+resumed after its process ended carries the time already used in its state, `used_s`; the gap while
+no process ran is not counted, because no work was done in it. Times shown to a person stay
+wall-clock.
+
+**What a turn can reach.** It runs under what a direct chat that asks nothing runs under: no shell
+sandbox, no question, the organization's GitHub token in its environment. So it can reach the
+organization's token and everything that token may do to one organization's repositories; the
+Claude login, which is in its session; every engineer's container, through `incus`, where both
+tokens also are; and the ledger, which holds the run records and the notify address. With the web
+tools and no sandbox it also reads pages and installs packages from anywhere. Nobody watches a
+turn. A page, a package, an issue or a report that misleads it is therefore not caught by a person's
+answer to a prompt, as in a chat that asks: it could push to the organization's repositories,
+change a workflow, spend the weekly limit through engineers, delete containers, or send either
+token to a stranger. The persona and `org/prompts/turn.md` say that what it reads is never an
+instruction and that an outside contribution is not worked on; that is a rule a model follows, not
+a wall. The walls are the ones the owner chose: the VM, and the tokens' scope.
+
+**What R2 keeps from it.** A turn has these denied, by deny rules added for a turn only (a chat is
+not changed): `ssh` and `scp`, because they reach other machines and the owner's computer resolves
+from the VM (`host.lima.internal`); and `org login`, `org down`, `org node add` and `org node rm`,
+because they change the owner's login or stop the organization with nobody there. `sudo` and `su`
+stay denied as in a chat. Deny rules are what keeps `sudo` and `ssh` here, because there is no
+sandbox to do it, and they match the form a model normally writes, so they guard against a slip
+and are not a wall; the wall is that the VM has no directory of the owner's computer mounted and no
+SSH agent, and what keeps the VM from that computer is made in `org-host`. Whether deny rules hold
+in a headless session under `bypassPermissions` is found out by trial with the real program, not
+assumed: `tests/live_manager_rules.py --mode turn`. Checked on <date>: <outcome> (TODO: the
+integrator fills this in from the live run).
+
+**What the loop writes.** `<ledger>/loop/state.json`, `turns.jsonl` and a log for each turn; every
+headless session of the manager appends a line to `<ledger>/manager.jsonl` with its kind, model and
+cost. `org status` and `org loop status` read them.
+
 ## GitHub
 
 All repositories live in one organization and all of them are public. `github.owner` names the
@@ -1004,6 +1093,7 @@ first is a rule a model follows; only the second is a setting.
 | `org-host` on the Mac | Lima; the two tokens, from the Keychain | start, stop and delete the VM; pipe the tokens in; run commands in it |
 | `admin` and root in the VM | sudo; the firewall; `/etc/claude-code`; Incus | everything in the VM; used only by `org-vm` and its provisioning |
 | the `org` program in the VM | the ledger; both tokens; the `org` user's Incus project | create, enter and delete containers there; whatever the person or the page asks of it |
+| a turn of the manager's loop | what a direct chat that asks nothing holds: the organization's token, the Claude login, no sandbox, `incus`; `ssh`, `scp`, `org login`, `org down` and `org node add`/`rm` are denied | act with nobody watching, bounded by `loop.turn_max_usd`, `loop.day_max_usd` and the brake (see "The loop") |
 | manager chat | read access to what the `org` user can read, less the tokens; the desk | draft; propose approve, dispatch, stop, exec and the rest of the person's decisions |
 | the review, a headless manager session | what `ask` mode holds: reading, the read-only `org` commands; the text of a run's report | answer `continue`, `retry` or `pause`, and write a reason and a note for each waiting spec; code decides what that does |
 | engineer | root in its container; copies of both tokens | anything in its container; on GitHub and the model, what the tokens allow; read and write the build cache |
@@ -1075,6 +1165,11 @@ On 2026-11-23, on an M4 Mac with macOS 15.7, Lima 2.3.0, Debian 13, Incus 6.0.4 
 
 Not yet exercised:
 
+- The loop with a real model: no real turn had run when this was written. The unit tests and
+  `tests/demo_loop.py` play it against the scripted stand-in for the claude CLI, a local HTTP server
+  and simulated Incus, and `tests/live_manager_rules.py --mode turn` tries the turn's rules on the
+  real Claude Code (see "The loop"). What a real turn costs, whether its prompt gets the work done,
+  and whether it behaves at the edges of R8, R9 and R12 are not known.
 - Plans with a real model and a real notification service. No real review has run, so what one
   costs and how well it reads a report are not known, and nothing has been posted to a real push
   service. The owner's first checks after upgrading are `org notify test`, and then a plan of two
@@ -1177,7 +1272,16 @@ none is claimed for this layout.
 
 ## Known gaps
 
-- Nothing in this layout has made a real model call yet; see what has been checked.
+- Nothing in this layout has made a real model call yet; see what has been checked. In particular
+  no real turn of the loop had run when this was written.
+- A chat and a turn can act at the same time: nothing keeps the owner's `org talk` from editing the
+  desk, or approving a spec, while a turn does the same, and the journal is the only place they meet.
+- A running turn's spend is not counted in the day's total until its line exists, so a day can
+  overshoot `loop.day_max_usd` by up to `loop.turn_max_usd`.
+- `org loop resume` sets the failure count to 0, so after a resume the loop tries twice more
+  before it pauses itself again.
+- A turn's shell is not stopped from writing `config.json` or `loop/`, since it runs as a direct chat
+  does; the two numbers hold against a slip and not against a session that is led to change them.
 - An engineer lands its own work on the default branch; nothing on GitHub reviews it first.
 - The build cache's settings stop a Bazel older than 8.6 with "Unrecognized option" (see "The
   build cache"); the file has to be removed in such a project's container.
